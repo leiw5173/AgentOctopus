@@ -1,0 +1,54 @@
+import { z } from 'zod';
+export declare const AuthSchema: z.ZodEnum<["none", "api_key", "oauth", "bearer"]>;
+export declare const AdapterSchema: z.ZodEnum<["http", "mcp", "subprocess", "openai"]>;
+export declare const HostingSchema: z.ZodEnum<["cloud", "local", "both"]>;
+export declare const SkillManifestSchema: z.ZodObject<{
+    name: z.ZodString;
+    description: z.ZodString;
+    tags: z.ZodDefault<z.ZodArray<z.ZodString, "many">>;
+    version: z.ZodDefault<z.ZodString>;
+    endpoint: z.ZodOptional<z.ZodString>;
+    adapter: z.ZodDefault<z.ZodEnum<["http", "mcp", "subprocess", "openai"]>>;
+    hosting: z.ZodDefault<z.ZodEnum<["cloud", "local", "both"]>>;
+    auth: z.ZodDefault<z.ZodEnum<["none", "api_key", "oauth", "bearer"]>>;
+    input_schema: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    output_schema: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    rating: z.ZodDefault<z.ZodNumber>;
+    invocations: z.ZodDefault<z.ZodNumber>;
+    enabled: z.ZodDefault<z.ZodBoolean>;
+    llm_powered: z.ZodDefault<z.ZodBoolean>;
+}, "strip", z.ZodTypeAny, {
+    name: string;
+    description: string;
+    tags: string[];
+    version: string;
+    adapter: "http" | "mcp" | "subprocess" | "openai";
+    hosting: "cloud" | "local" | "both";
+    auth: "none" | "api_key" | "oauth" | "bearer";
+    rating: number;
+    invocations: number;
+    enabled: boolean;
+    llm_powered: boolean;
+    endpoint?: string | undefined;
+    input_schema?: Record<string, string> | undefined;
+    output_schema?: Record<string, string> | undefined;
+}, {
+    name: string;
+    description: string;
+    tags?: string[] | undefined;
+    version?: string | undefined;
+    endpoint?: string | undefined;
+    adapter?: "http" | "mcp" | "subprocess" | "openai" | undefined;
+    hosting?: "cloud" | "local" | "both" | undefined;
+    auth?: "none" | "api_key" | "oauth" | "bearer" | undefined;
+    input_schema?: Record<string, string> | undefined;
+    output_schema?: Record<string, string> | undefined;
+    rating?: number | undefined;
+    invocations?: number | undefined;
+    enabled?: boolean | undefined;
+    llm_powered?: boolean | undefined;
+}>;
+export type SkillManifest = z.infer<typeof SkillManifestSchema>;
+export type Adapter = z.infer<typeof AdapterSchema>;
+export type Auth = z.infer<typeof AuthSchema>;
+//# sourceMappingURL=manifest-schema.d.ts.map

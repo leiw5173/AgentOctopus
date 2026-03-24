@@ -1,0 +1,28 @@
+{
+  "name": "@octopus/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@octopus/registry": "workspace:*",
+    "@octopus/adapters": "workspace:*",
+    "openai": "^4.47.0",
+    "@google/generative-ai": "^0.15.0",
+    "ollama": "^0.5.0",
+    "vectra": "^0.6.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  }
+}
