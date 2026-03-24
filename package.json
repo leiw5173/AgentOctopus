@@ -20,5 +20,6 @@
     "typescript": "^5.4.0",
     "vitest": "^1.5.0",
     "tsx": "^4.7.0"
-  }
+  },
+  "license": "Apache-2.0"
 }
