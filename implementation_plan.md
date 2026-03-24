@@ -257,8 +257,8 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] `POST /api/ask` REST endpoint (Next.js API route in `apps/web`).
 - [x] Unit tests: `packages/adapters/tests/mcp-adapter.test.ts`.
 - [x] Integration test: `apps/web/tests/api.test.ts`.
-- [ ] `POST /api/feedback` for rating updates — deferred to Phase 3.
-- [ ] Remote MCP catalog discovery — deferred to Phase 3.
+- [x] `POST /api/feedback` for rating updates — `apps/web/src/app/api/feedback/route.ts`.
+- [x] Remote MCP catalog discovery — `packages/registry/src/catalog.ts` (`fetchRemoteCatalog`).
 
 ### Phase 3 — IM & Agent Input
 - [ ] Slack / Discord / Telegram bot adapters.
