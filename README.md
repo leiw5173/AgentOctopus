@@ -64,7 +64,8 @@ OLLAMA_BASE_URL=http://localhost:11434
 ```
 AgentOctopus/
 ├── apps/
-│   └── cli/           # CLI entry point (`octopus ask "..."`)
+│   ├── cli/           # CLI entry point (`octopus ask "..."`)
+│   └── web/           # Next.js web UI & API routes (`POST /api/ask`)
 ├── packages/
 │   ├── core/          # Router + Executor + Aggregator
 │   ├── registry/      # Skill manifest loader + rating store
