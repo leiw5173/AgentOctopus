@@ -34,7 +34,10 @@ export class SkillRegistry {
         const manifest = SkillManifestSchema.parse(data);
 
         // Merge persisted rating over manifest default
-        manifest.rating = this.ratingStore.getRating(manifest.name) ?? manifest.rating;
+        const persisted = this.ratingStore.getRating(manifest.name);
+        if (persisted !== undefined) {
+          manifest.rating = persisted;
+        }
 
         this.skills.set(manifest.name, {
           manifest,
@@ -78,8 +81,11 @@ export class SkillRegistry {
     this.ratingStore.recordFeedback(skillName, positive, comment);
     const skill = this.skills.get(skillName);
     if (skill) {
-      skill.rating = this.ratingStore.getRating(skillName);
-      skill.manifest.rating = skill.rating;
+      const updatedRating = this.ratingStore.getRating(skillName);
+      if (updatedRating !== undefined) {
+        skill.rating = updatedRating;
+        skill.manifest.rating = skill.rating;
+      }
     }
   }
 

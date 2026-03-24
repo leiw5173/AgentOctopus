@@ -73,8 +73,8 @@ export class RatingStore {
     this.save();
   }
 
-  getRating(skillName: string): number {
-    return this.store[skillName]?.rating ?? 3.0;
+  getRating(skillName: string): number | undefined {
+    return this.store[skillName]?.rating;
   }
 
   getAll(): RatingsStore {

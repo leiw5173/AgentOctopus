@@ -9,10 +9,12 @@
     "skipLibCheck": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true,
-    "outDir": "dist",
-    "rootDir": "src"
+    "sourceMap": true
   },
-  "include": [],
+  "include": [
+    "packages/**/*",
+    "apps/**/*",
+    "tests/**/*"
+  ],
   "exclude": ["node_modules", "dist"]
 }
