@@ -12,6 +12,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@octopus/registry": "workspace:*",
     "node-fetch": "^3.3.0"
   },
