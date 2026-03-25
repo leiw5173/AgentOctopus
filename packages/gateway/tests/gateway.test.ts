@@ -104,6 +104,66 @@ describe('createAgentRouter', () => {
     expect(typeof router).toBe('function');
     expect(Array.isArray((router as unknown as { stack: unknown[] }).stack)).toBe(true);
   });
+
+  it('falls back to direct chat answers when no skill matches', async () => {
+    vi.doMock('../src/engine.js', () => ({
+      DIRECT_ANSWER_SYSTEM_PROMPT: 'You are a helpful assistant. Answer the user\'s question concisely and accurately.',
+      bootstrapEngine: vi.fn().mockResolvedValue({
+        registry: {
+          getAll: () => [{ manifest: { name: 'test-skill' } }],
+          recordFeedback: vi.fn(),
+        },
+        router: {
+          route: vi.fn().mockResolvedValue([]),
+        },
+        executor: {
+          execute: vi.fn(),
+        },
+        chatClient: {
+          chat: vi.fn().mockResolvedValue('general answer'),
+        },
+      }),
+      resetEngine: vi.fn(),
+    }));
+
+    const { createAgentRouter } = await import('../src/agent-protocol.js');
+    const router = await createAgentRouter();
+    const askLayer = (router as unknown as { stack: Array<{ route?: { path?: string; stack?: Array<{ handle: Function }> } }> }).stack
+      .find((layer) => layer.route?.path === '/ask');
+
+    expect(askLayer).toBeDefined();
+
+    const req = {
+      body: {
+        query: 'what is llm',
+        agentId: 'test-agent',
+      },
+    } as any;
+
+    const res = {
+      statusCode: 200,
+      jsonBody: undefined as unknown,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        this.jsonBody = payload;
+        return this;
+      },
+    };
+
+    await askLayer!.route!.stack![0]!.handle(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.jsonBody).toEqual({
+      success: true,
+      response: 'general answer',
+      skill: null,
+      sessionId: expect.any(String),
+      confidence: null,
+    });
+  });
 });
 
 // ─── Engine bootstrap reset helper ──────────────────────────────────────────

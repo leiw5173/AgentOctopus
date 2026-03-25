@@ -1,5 +1,5 @@
 import express, { type Request, type Response } from 'express';
-import { bootstrapEngine } from './engine.js';
+import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 
 /**
@@ -7,7 +7,7 @@ import { sessionManager } from './session.js';
  *
  * POST /agent/ask
  *   Body: { query: string; sessionId?: string; agentId?: string; metadata?: object }
- *   Response: { success: boolean; response: string; skill: string; sessionId: string; confidence: number }
+ *   Response: { success: boolean; response: string; skill: string | null; sessionId: string; confidence: number | null }
  *
  * POST /agent/feedback
  *   Body: { skillName: string; positive: boolean; comment?: string }
@@ -48,10 +48,20 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     try {
       const [routing] = await engine.router.route(query);
       if (!routing) {
+        const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, query);
+
+        sessionManager.addMessage(session, {
+          role: 'assistant',
+          content: answer,
+          timestamp: Date.now(),
+        });
+
         res.status(200).json({
-          success: false,
-          error: 'No matching skill found',
+          success: true,
+          response: answer,
+          skill: null,
           sessionId: session.id,
+          confidence: null,
         });
         return;
       }

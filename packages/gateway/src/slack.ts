@@ -1,5 +1,5 @@
 import { App, type AppOptions } from '@slack/bolt';
-import { bootstrapEngine } from './engine.js';
+import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 
 export interface SlackGatewayOptions {
@@ -36,7 +36,13 @@ export async function startSlackGateway(options: SlackGatewayOptions): Promise<v
     try {
       const [routing] = await engine.router.route(text);
       if (!routing) {
-        await say({ text: "Sorry, I couldn't find a matching skill for your request.", thread_ts: threadTs });
+        const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, text);
+        sessionManager.addMessage(session, {
+          role: 'assistant',
+          content: answer,
+          timestamp: Date.now(),
+        });
+        await say({ text: answer, thread_ts: threadTs });
         return;
       }
 

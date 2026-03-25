@@ -1,11 +1,14 @@
 import path from 'path';
 import { SkillRegistry } from '@octopus/registry';
-import { Router, Executor, type LLMConfig } from '@octopus/core';
+import { Router, Executor, createChatClient, type ChatClient, type LLMConfig } from '@octopus/core';
+
+export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
 
 export interface OctopusEngine {
   registry: SkillRegistry;
   router: Router;
   executor: Executor;
+  chatClient: ChatClient;
 }
 
 let _engine: OctopusEngine | null = null;
@@ -40,12 +43,18 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
     baseUrl: process.env.EMBED_BASE_URL ?? chatConfig.baseUrl,
   };
 
-  const router = new Router(chatConfig, embedConfig);
+  const rerankConfig: LLMConfig = {
+    ...embedConfig,
+    model: process.env.RERANK_MODEL ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
+  };
+
+  const router = new Router(rerankConfig, embedConfig);
   await router.buildIndex(registry.getAll());
 
   const executor = new Executor(registry);
+  const chatClient = createChatClient(rerankConfig);
 
-  _engine = { registry, router, executor };
+  _engine = { registry, router, executor, chatClient };
   return _engine;
 }
 

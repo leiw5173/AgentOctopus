@@ -1,5 +1,5 @@
 import { Client, GatewayIntentBits, type Message } from 'discord.js';
-import { bootstrapEngine } from './engine.js';
+import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 
 export interface DiscordGatewayOptions {
@@ -52,7 +52,13 @@ export async function startDiscordGateway(options: DiscordGatewayOptions): Promi
     try {
       const [routing] = await engine.router.route(text);
       if (!routing) {
-        await message.reply("Sorry, I couldn't find a matching skill for your request.");
+        const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, text);
+        sessionManager.addMessage(session, {
+          role: 'assistant',
+          content: answer,
+          timestamp: Date.now(),
+        });
+        await message.reply(answer.slice(0, 1990));
         return;
       }
 
