@@ -1,22 +1,23 @@
 ---
 name: translation
 description: >
-  Translates text between languages. Use when the user asks to translate
-  text, convert language, or says things like "in French" or "en Español".
-tags: [translation, language, utility]
-version: 1.0.0
+  Translates text between languages using MyMemory. Use when the user asks
+  to translate text, convert language, or says things like "in French",
+  "en Español", "translate to Japanese", etc.
+tags: [translation, language, text, convert]
+version: 2.0.0
 adapter: subprocess
 hosting: local
 input_schema:
-  text: string
-  target_language: string
+  query: string
 output_schema:
   translated_text: string
 auth: none
-rating: 3.5
+rating: 4.5
 invocations: 0
 ---
 
 ## Instructions
 
-Extract the user's text and target language from the `OCTOPUS_INPUT` JSON environment variable, then generate a translation and return it.
+Parse the user's query to extract the text to translate and the target language.
+Call the MyMemory free translation API and return the translated text.

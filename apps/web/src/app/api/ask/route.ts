@@ -17,13 +17,28 @@ let executor: Executor;
 async function initOctopus() {
   if (!isInitialized) {
     await registry.load();
-    const llmConfig = {
-      provider: (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') || 'openai',
-      model: process.env.LLM_MODEL || 'gpt-4o',
+
+    const chatConfig = {
+      provider: (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') ?? 'openai',
+      model: process.env.LLM_MODEL ?? 'gpt-4o',
+      apiKey: process.env.OPENAI_API_KEY ?? process.env.GEMINI_API_KEY,
+      baseUrl: process.env.OPENAI_BASE_URL ?? process.env.OLLAMA_BASE_URL,
     };
-    
-    // In advanced setups, embed config could be separated based on ENV.
-    router = new Router(llmConfig, llmConfig);
+
+    const embedConfig = {
+      provider: (process.env.EMBED_PROVIDER as 'openai' | 'gemini' | 'ollama') ?? chatConfig.provider,
+      model: process.env.EMBED_MODEL ?? 'text-embedding-3-small',
+      apiKey: process.env.EMBED_API_KEY ?? chatConfig.apiKey,
+      baseUrl: process.env.EMBED_BASE_URL ?? chatConfig.baseUrl,
+    };
+
+    // Use embed provider for chat re-ranking if the primary chat endpoint is unreachable
+    const rerankConfig = {
+      ...embedConfig,
+      model: process.env.RERANK_MODEL ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
+    };
+
+    router = new Router(rerankConfig, embedConfig);
     await router.buildIndex(registry.getAll());
     executor = new Executor(registry);
     isInitialized = true;
