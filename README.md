@@ -155,9 +155,21 @@ cp .env.example .env
 ```env
 # LLM backend
 LLM_PROVIDER=openai          # openai | gemini | ollama
-LLM_MODEL=gpt-4o
+LLM_MODEL=gpt-5.4
 OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://your-openai-compatible-base-url/v1
+
+# Embeddings and reranking
+EMBED_PROVIDER=openai        # defaults to LLM_PROVIDER
+EMBED_MODEL=text-embedding-3-small
+EMBED_API_KEY=
+EMBED_BASE_URL=https://your-embedding-base-url/v1
+RERANK_MODEL=gpt-4o-mini
+
+# Optional alternate providers
+GEMINI_API_KEY=
 OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.2
 
 # Registry paths (optional, defaults to ./registry/)
 REGISTRY_PATH=./registry/skills
@@ -170,6 +182,8 @@ SLACK_APP_TOKEN=xapp-...
 DISCORD_TOKEN=...
 TELEGRAM_BOT_TOKEN=...
 ```
+
+General questions that do not match a registered skill fall back to the configured chat model directly. Skill routing uses embeddings plus an LLM reranker, so if you split providers you should ensure both the chat and embedding endpoints are reachable.
 
 ## Architecture
 
