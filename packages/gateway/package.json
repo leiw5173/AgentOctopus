@@ -1,23 +1,28 @@
 {
   "name": "@octopus/gateway",
   "version": "0.1.0",
-  "private": true,
+  "description": "AgentOctopus gateways: Slack, Discord, Telegram bots and agent-to-agent HTTP protocol",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "test": "vitest run",
-    "clean": "rm -rf dist"
-  },
   "exports": {
     ".": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start:agent": "tsx src/bin/start-agent-gateway.ts",
+    "test": "vitest run",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "pnpm build"
+  },
   "dependencies": {
-    "@octopus/core": "workspace:*",
-    "@octopus/registry": "workspace:*",
-    "@octopus/adapters": "workspace:*",
+    "@octopus/core": "^0.1.0",
+    "@octopus/registry": "^0.1.0",
+    "@octopus/adapters": "^0.1.0",
     "@slack/bolt": "^3.19.0",
     "discord.js": "^14.15.0",
     "telegraf": "^4.16.3",
@@ -28,8 +33,17 @@
     "@types/express": "^4.17.21",
     "@types/node": "^20.12.0",
     "@types/uuid": "^10.0.0",
+    "tsx": "^4.7.0",
     "typescript": "^5.4.0",
     "vitest": "^1.5.0"
   },
-  "license": "Apache-2.0"
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leiw5173/AgentOctopus"
+  },
+  "keywords": ["ai", "agent", "slack", "discord", "telegram", "bot", "mcp", "gateway"]
 }
