@@ -8,6 +8,10 @@ export interface RoutingResult {
 }
 
 const RATING_WEIGHT = 0.15;
+const IP_ADDRESS_PATTERN = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/;
+const DOMAIN_PATTERN = /\b(?=.{1,253}\b)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/i;
+const WEATHER_KEYWORDS = /\b(weather|temperature|forecast|rain|snow|wind|humidity|sunny|cloudy|storm|climate)\b/i;
+const TRANSLATION_KEYWORDS = /\b(translate|translation|in\s+(french|spanish|japanese|chinese|english|german|italian|portuguese|korean|arabic|russian)|to\s+(french|spanish|japanese|chinese|english|german|italian|portuguese|korean|arabic|russian))\b/i;
 
 function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;
@@ -23,6 +27,45 @@ function cosineSimilarity(a: number[], b: number[]): number {
 interface VectorEntry {
   skill: LoadedSkill;
   embedding: number[];
+}
+
+function isSkillEligible(skill: LoadedSkill, query: string): boolean {
+  const normalizedQuery = query.trim();
+  const skillName = skill.manifest.name.toLowerCase();
+
+  if (skillName === 'ip-lookup') {
+    return IP_ADDRESS_PATTERN.test(normalizedQuery) || DOMAIN_PATTERN.test(normalizedQuery);
+  }
+
+  if (skillName === 'weather') {
+    return WEATHER_KEYWORDS.test(normalizedQuery);
+  }
+
+  if (skillName === 'translation') {
+    return TRANSLATION_KEYWORDS.test(normalizedQuery);
+  }
+
+  return true;
+}
+
+function parseRerankDecision(response: string, candidates: RoutingResultCandidate[]): string | 'none' {
+  const normalized = response.trim().toLowerCase();
+
+  if (!normalized) return 'none';
+  if (normalized === 'none' || /\bnone\b/.test(normalized)) return 'none';
+
+  const exactMatch = candidates.find((candidate) => candidate.skill.manifest.name.toLowerCase() === normalized);
+  if (exactMatch) return exactMatch.skill.manifest.name.toLowerCase();
+
+  const mentionedMatch = candidates.find((candidate) => normalized.includes(candidate.skill.manifest.name.toLowerCase()));
+  if (mentionedMatch) return mentionedMatch.skill.manifest.name.toLowerCase();
+
+  return 'none';
+}
+
+interface RoutingResultCandidate {
+  skill: LoadedSkill;
+  score: number;
 }
 
 export class Router {
@@ -59,11 +102,13 @@ export class Router {
       return [];
     }
 
-    const scored = this.index.map(({ skill, embedding }) => {
-      const cosine = cosineSimilarity(queryEmbedding, embedding);
-      const ratingBoost = (skill.rating / 5) * RATING_WEIGHT;
-      return { skill, score: cosine + ratingBoost };
-    });
+    const scored = this.index
+      .filter(({ skill }) => isSkillEligible(skill, query))
+      .map(({ skill, embedding }) => {
+        const cosine = cosineSimilarity(queryEmbedding, embedding);
+        const ratingBoost = (skill.rating / 5) * RATING_WEIGHT;
+        return { skill, score: cosine + ratingBoost };
+      });
 
     scored.sort((a, b) => b.score - a.score);
     const candidates = scored.slice(0, topK);
@@ -78,10 +123,10 @@ export class Router {
 
     let bestSkillName: string;
     try {
-      bestSkillName = (await this.chatClient.chat(systemPrompt, userMessage)).trim().toLowerCase();
+      bestSkillName = parseRerankDecision(await this.chatClient.chat(systemPrompt, userMessage), candidates);
     } catch (err) {
-      console.warn(`[Router] LLM re-rank failed, falling back to top similarity match: ${(err as Error).message || err}`);
-      bestSkillName = candidates[0].skill.manifest.name;
+      console.warn(`[Router] LLM re-rank failed, returning no skill: ${(err as Error).message || err}`);
+      bestSkillName = 'none';
     }
 
     // LLM decided no skill fits
@@ -89,7 +134,8 @@ export class Router {
 
     const best = candidates.find(
       (c) => c.skill.manifest.name.toLowerCase() === bestSkillName,
-    ) ?? candidates[0];
+    );
+    if (!best) return [];
 
     return [
       {
