@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { Router, Executor, createChatClient } from '@octopus/core';
-import { SkillRegistry } from '@octopus/registry';
+import { Router, Executor, createChatClient } from '@agentoctopus/core';
+import { SkillRegistry } from '@agentoctopus/registry';
 import path from 'path';
 
 // Singleton initialization for production (can be expanded for persistence)

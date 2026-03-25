@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Router } from '../src/router.js';
-import type { LoadedSkill } from '@octopus/registry';
+import type { LoadedSkill } from '@agentoctopus/registry';
 
 // Mock LLM client logic
 vi.mock('../src/llm-client.js', () => {

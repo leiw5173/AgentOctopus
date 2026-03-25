@@ -1,5 +1,5 @@
 {
-  "name": "@octopus/core",
+  "name": "@agentoctopus/core",
   "version": "0.1.0",
   "description": "AgentOctopus core: semantic router, executor, and LLM client",
   "type": "module",
@@ -16,8 +16,8 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
-    "@octopus/registry": "^0.1.0",
-    "@octopus/adapters": "^0.1.0",
+    "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/adapters": "workspace:*",
     "openai": "^4.47.0",
     "@google/generative-ai": "^0.15.0",
     "ollama": "^0.5.0",

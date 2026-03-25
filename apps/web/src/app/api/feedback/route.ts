@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { SkillRegistry } from '@octopus/registry';
+import { SkillRegistry } from '@agentoctopus/registry';
 import path from 'path';
 
 const registry = new SkillRegistry(

@@ -7,8 +7,9 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import readline from 'readline';
 
-import { SkillRegistry } from '@octopus/registry';
-import { Router, Executor, type LLMConfig } from '@octopus/core';
+import { SkillRegistry } from '@agentoctopus/registry';
+import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
+import { startService } from './service.js';
 
 // Load env
 dotenv.config();
@@ -20,6 +21,22 @@ program
   .name('octopus')
   .description('AgentOctopus CLI — intelligent routing for skills and MCPs')
   .version('0.1.0');
+
+program
+  .command('start')
+  .description('Start the web app and agent gateway together')
+  .action(async () => {
+    console.log(chalk.bold('\n🐙 Starting AgentOctopus services\n'));
+    console.log(chalk.gray('  Web UI + REST API: http://localhost:3000'));
+    console.log(chalk.gray('  Agent gateway:     http://localhost:3002/agent/health\n'));
+
+    try {
+      await startService();
+    } catch (error) {
+      console.error(chalk.red(`Service startup failed: ${error}`));
+      process.exitCode = 1;
+    }
+  });
 
 /**
  * Helper to bootstrap the core Octopus engine

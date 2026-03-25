@@ -1,6 +1,6 @@
-import type { LoadedSkill, SkillRegistry } from '@octopus/registry';
-import type { AdapterResult } from '@octopus/adapters';
-import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@octopus/adapters';
+import type { LoadedSkill, SkillRegistry } from '@agentoctopus/registry';
+import type { AdapterResult } from '@agentoctopus/adapters';
+import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 
 export interface ExecutionResult {
   skill: LoadedSkill;

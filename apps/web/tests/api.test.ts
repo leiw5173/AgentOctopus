@@ -2,8 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { POST as askPost } from '../src/app/api/ask/route.js';
 import { POST as feedbackPost } from '../src/app/api/feedback/route.js';
 
-// Mock @octopus/core
-vi.mock('@octopus/core', () => ({
+// Mock @agentoctopus/core
+vi.mock('@agentoctopus/core', () => ({
   Router: vi.fn().mockImplementation(() => ({
     buildIndex: vi.fn(),
     route: vi.fn().mockResolvedValue([{
@@ -20,8 +20,8 @@ vi.mock('@octopus/core', () => ({
   }))
 }));
 
-// Mock @octopus/registry
-vi.mock('@octopus/registry', () => ({
+// Mock @agentoctopus/registry
+vi.mock('@agentoctopus/registry', () => ({
   SkillRegistry: vi.fn().mockImplementation(() => ({
     load: vi.fn(),
     getAll: vi.fn().mockReturnValue([]),

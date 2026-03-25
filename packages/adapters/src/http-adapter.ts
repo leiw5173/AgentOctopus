@@ -1,4 +1,4 @@
-import type { LoadedSkill } from '@octopus/registry';
+import type { LoadedSkill } from '@agentoctopus/registry';
 import type { Adapter, AdapterResult } from './adapter.js';
 
 export class HttpAdapter implements Adapter {

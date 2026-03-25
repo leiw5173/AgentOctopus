@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import path from 'path';
-import type { LoadedSkill } from '@octopus/registry';
+import type { LoadedSkill } from '@agentoctopus/registry';
 import type { Adapter, AdapterResult } from './adapter.js';
 
 export class SubprocessAdapter implements Adapter {

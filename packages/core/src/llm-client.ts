@@ -1,4 +1,4 @@
-import type { LoadedSkill } from '@octopus/registry';
+import type { LoadedSkill } from '@agentoctopus/registry';
 
 export interface LLMConfig {
   provider: 'openai' | 'gemini' | 'ollama';

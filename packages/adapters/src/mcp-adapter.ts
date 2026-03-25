@@ -1,4 +1,4 @@
-import type { LoadedSkill } from '@octopus/registry';
+import type { LoadedSkill } from '@agentoctopus/registry';
 import type { Adapter, AdapterResult } from './adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';

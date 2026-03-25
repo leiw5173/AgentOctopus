@@ -29,28 +29,40 @@ User: "Translate hello to French"
 - **Privacy-first** — encrypted credential vault, local-first option
 - **Stateful sessions** — conversation context persists across turns on all channels
 
+## Quick Start
+
+```bash
+# Install dependencies once
+pnpm install
+
+# Start the full service
+pnpm exec octopus start
+```
+
+This starts:
+
+- Web UI + REST API on `http://localhost:3000`
+- Agent gateway on `http://localhost:3002`
+
 ## Quick Start (CLI)
 
 ```bash
-# Install dependencies
-pnpm install
-
 # Build all packages
 pnpm build
 
 # Ask a question
-node apps/cli/dist/index.js ask "translate hello to French"
+pnpm exec octopus ask "translate hello to French"
 
 # List available skills
-node apps/cli/dist/index.js list
+pnpm exec octopus list
 ```
 
 ## REST API
 
-Start the Next.js server and call the API:
+Start the service and call the API:
 
 ```bash
-cd apps/web && pnpm dev
+pnpm exec octopus start
 
 # Route a query
 curl -X POST http://localhost:3000/api/ask \
@@ -108,7 +120,7 @@ The gateway exposes an OpenClaw-compatible HTTP API for agent-to-agent calls:
 
 ```bash
 # Start the standalone agent gateway (default port 3002)
-node -e "import('@octopus/gateway').then(g => g.startAgentGateway())"
+pnpm --filter @octopus/gateway start:agent
 
 # Route a query from an external agent
 curl -X POST http://localhost:3002/agent/ask \

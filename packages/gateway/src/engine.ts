@@ -1,6 +1,6 @@
 import path from 'path';
-import { SkillRegistry } from '@octopus/registry';
-import { Router, Executor, createChatClient, type ChatClient, type LLMConfig } from '@octopus/core';
+import { SkillRegistry } from '@agentoctopus/registry';
+import { Router, Executor, createChatClient, type ChatClient, type LLMConfig } from '@agentoctopus/core';
 
 export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
 

@@ -1,5 +1,5 @@
 {
-  "name": "@octopus/adapters",
+  "name": "@agentoctopus/adapters",
   "version": "0.1.0",
   "description": "AgentOctopus skill execution adapters: HTTP, MCP stdio, subprocess",
   "type": "module",
@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "@octopus/registry": "^0.1.0",
+    "@agentoctopus/registry": "workspace:*",
     "node-fetch": "^3.3.0"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 {
-  "name": "@octopus/gateway",
+  "name": "@agentoctopus/gateway",
   "version": "0.1.0",
   "description": "AgentOctopus gateways: Slack, Discord, Telegram bots and agent-to-agent HTTP protocol",
   "type": "module",
@@ -20,9 +20,9 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
-    "@octopus/core": "^0.1.0",
-    "@octopus/registry": "^0.1.0",
-    "@octopus/adapters": "^0.1.0",
+    "@agentoctopus/core": "workspace:*",
+    "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/adapters": "workspace:*",
     "@slack/bolt": "^3.19.0",
     "discord.js": "^14.15.0",
     "telegraf": "^4.16.3",

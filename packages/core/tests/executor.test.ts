@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Executor } from '../src/executor.js';
-import { SkillRegistry } from '@octopus/registry';
-import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@octopus/adapters';
+import { SkillRegistry } from '@agentoctopus/registry';
+import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 
-vi.mock('@octopus/adapters', () => {
+vi.mock('@agentoctopus/adapters', () => {
   return {
     HttpAdapter: vi.fn(),
     McpAdapter: vi.fn(),

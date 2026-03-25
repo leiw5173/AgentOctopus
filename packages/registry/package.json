@@ -1,5 +1,5 @@
 {
-  "name": "@octopus/registry",
+  "name": "@agentoctopus/registry",
   "version": "0.1.0",
   "description": "AgentOctopus skill manifest loader and rating store",
   "type": "module",
