@@ -21,12 +21,13 @@ User: "Translate hello to French"
 
 ## Features
 
-- 🧠 **Semantic routing** — understands natural language intent
-- ⭐ **Rating system** — skills are ranked by user feedback; better ones win
-- 🔌 **Multi-channel** — CLI, REST API, IM bots (Slack/Discord/Telegram), agent-to-agent
-- ☁️ **Hybrid execution** — skills run in cloud or locally
-- 🤖 **Flexible LLM** — OpenAI, Gemini, or local Ollama
-- 🔒 **Privacy-first** — encrypted credential vault, local-first option
+- **Semantic routing** — understands natural language intent
+- **Rating system** — skills are ranked by user feedback; better ones win
+- **Multi-channel** — CLI, REST API, IM bots (Slack/Discord/Telegram), agent-to-agent
+- **Hybrid execution** — skills run in cloud or locally
+- **Flexible LLM** — OpenAI, Gemini, or local Ollama
+- **Privacy-first** — encrypted credential vault, local-first option
+- **Stateful sessions** — conversation context persists across turns on all channels
 
 ## Quick Start (CLI)
 
@@ -44,6 +45,105 @@ node apps/cli/dist/index.js ask "translate hello to French"
 node apps/cli/dist/index.js list
 ```
 
+## REST API
+
+Start the Next.js server and call the API:
+
+```bash
+cd apps/web && pnpm dev
+
+# Route a query
+curl -X POST http://localhost:3000/api/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "translate hello to French"}'
+# → { "success": true, "skill": "translation", "confidence": 0.97, "response": "Bonjour" }
+
+# Submit feedback
+curl -X POST http://localhost:3000/api/feedback \
+  -H 'Content-Type: application/json' \
+  -d '{"skillName": "translation", "positive": true}'
+```
+
+## IM Bots
+
+Each platform adapter bootstraps the same routing engine and maintains per-user sessions (30-minute TTL, last 50 messages).
+
+### Slack
+
+```ts
+import { startSlackGateway } from '@octopus/gateway';
+
+await startSlackGateway({
+  appOptions: {
+    token: process.env.SLACK_BOT_TOKEN,
+    signingSecret: process.env.SLACK_SIGNING_SECRET,
+    socketMode: true,
+    appToken: process.env.SLACK_APP_TOKEN,
+  },
+});
+// Responds to @mentions and direct messages
+```
+
+### Discord
+
+```ts
+import { startDiscordGateway } from '@octopus/gateway';
+
+await startDiscordGateway({ token: process.env.DISCORD_TOKEN });
+// Responds to @mentions in guilds and all DMs
+```
+
+### Telegram
+
+```ts
+import { startTelegramGateway } from '@octopus/gateway';
+
+await startTelegramGateway({ token: process.env.TELEGRAM_BOT_TOKEN });
+// /ask <request>  or plain text messages
+```
+
+## Agent-to-Agent Protocol
+
+The gateway exposes an OpenClaw-compatible HTTP API for agent-to-agent calls:
+
+```bash
+# Start the standalone agent gateway (default port 3002)
+node -e "import('@octopus/gateway').then(g => g.startAgentGateway())"
+
+# Route a query from an external agent
+curl -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "translate hello to French", "agentId": "my-agent"}'
+# → { "success": true, "response": "Bonjour", "skill": "translation",
+#     "sessionId": "abc-123", "confidence": 0.95 }
+
+# Continue the session
+curl -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "now translate goodbye", "sessionId": "abc-123"}'
+
+# Submit feedback
+curl -X POST http://localhost:3002/agent/feedback \
+  -H 'Content-Type: application/json' \
+  -d '{"skillName": "translation", "positive": true}'
+
+# Health check
+curl http://localhost:3002/agent/health
+# → { "status": "ok", "skills": 3 }
+```
+
+Or mount the router inside an existing Express app:
+
+```ts
+import express from 'express';
+import { createAgentRouter } from '@octopus/gateway';
+
+const app = express();
+const agentRouter = await createAgentRouter();
+app.use('/agent', agentRouter);
+app.listen(3000);
+```
+
 ## Configuration
 
 Copy `.env.example` and fill in your values:
@@ -53,10 +153,22 @@ cp .env.example .env
 ```
 
 ```env
+# LLM backend
 LLM_PROVIDER=openai          # openai | gemini | ollama
 LLM_MODEL=gpt-4o
 OPENAI_API_KEY=sk-...
 OLLAMA_BASE_URL=http://localhost:11434
+
+# Registry paths (optional, defaults to ./registry/)
+REGISTRY_PATH=./registry/skills
+RATINGS_PATH=./registry/ratings.json
+
+# IM bot tokens
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...
+SLACK_APP_TOKEN=xapp-...
+DISCORD_TOKEN=...
+TELEGRAM_BOT_TOKEN=...
 ```
 
 ## Architecture
@@ -65,11 +177,12 @@ OLLAMA_BASE_URL=http://localhost:11434
 AgentOctopus/
 ├── apps/
 │   ├── cli/           # CLI entry point (`octopus ask "..."`)
-│   └── web/           # Next.js web UI & API routes (`POST /api/ask`)
+│   └── web/           # Next.js web UI & REST API (POST /api/ask, POST /api/feedback)
 ├── packages/
-│   ├── core/          # Router + Executor + Aggregator
-│   ├── registry/      # Skill manifest loader + rating store
-│   └── adapters/      # HTTP, MCP, subprocess adapters
+│   ├── core/          # Router + Executor + LLM client
+│   ├── registry/      # Skill manifest loader + rating store + remote catalog
+│   ├── adapters/      # HTTP, MCP stdio, subprocess adapters
+│   └── gateway/       # IM bots (Slack/Discord/Telegram) + agent protocol + sessions
 └── registry/
     └── skills/        # Built-in SKILL.md manifests
 ```
@@ -91,6 +204,26 @@ adapter: http
 ## Instructions
 ...
 ```
+
+## Development
+
+```bash
+pnpm install       # install all dependencies
+pnpm build         # build all packages
+pnpm test          # run all tests (35 tests across 6 packages)
+pnpm dev           # watch mode for all packages
+```
+
+### Test coverage
+
+| Package | Tests |
+|---|---|
+| `packages/registry` | 9 |
+| `packages/adapters` | 3 |
+| `packages/core` | 6 |
+| `apps/cli` | 1 |
+| `apps/web` | 6 |
+| `packages/gateway` | 10 |
 
 ## License
 

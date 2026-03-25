@@ -175,12 +175,17 @@ AgentOctopus/
 │   │   └── tests/
 │   │       └── mcp-adapter.test.ts  # ✅ MCP adapter tests
 │   │
-│   └── gateway/                    # ⏳ Planned Phase 3
-│       ├── im/
-│       │   ├── slack.ts
-│       │   ├── discord.ts
-│       │   └── telegram.ts
-│       └── agent-protocol.ts
+│   └── gateway/                    # ✅ Phase 3 Complete
+│       ├── src/
+│       │   ├── engine.ts           # ✅ Shared engine bootstrap
+│       │   ├── session.ts          # ✅ Stateful session manager
+│       │   ├── slack.ts            # ✅ Slack bot adapter (@slack/bolt)
+│       │   ├── discord.ts          # ✅ Discord bot adapter (discord.js)
+│       │   ├── telegram.ts         # ✅ Telegram bot adapter (telegraf)
+│       │   ├── agent-protocol.ts   # ✅ Agent-to-agent HTTP protocol
+│       │   └── index.ts            # ✅ Package entry point
+│       └── tests/
+│           └── gateway.test.ts     # ✅ 10 tests
 │
 └── registry/
     └── skills/                 # Built-in SKILL.md manifests
@@ -260,10 +265,12 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] `POST /api/feedback` for rating updates — `apps/web/src/app/api/feedback/route.ts`.
 - [x] Remote MCP catalog discovery — `packages/registry/src/catalog.ts` (`fetchRemoteCatalog`).
 
-### Phase 3 — IM & Agent Input
-- [ ] Slack / Discord / Telegram bot adapters.
-- [ ] Agent-to-agent protocol (OpenClaw and similar).
-- [ ] Stateful session management across turns.
+### Phase 3 — IM & Agent Input ✅ Complete
+- [x] Slack / Discord / Telegram bot adapters — `packages/gateway/src/{slack,discord,telegram}.ts`.
+- [x] Agent-to-agent protocol (OpenClaw-compatible Express router) — `packages/gateway/src/agent-protocol.ts`.
+- [x] Stateful session management across turns — `packages/gateway/src/session.ts`.
+- [x] Shared engine bootstrap — `packages/gateway/src/engine.ts`.
+- [x] 10 tests in `packages/gateway/tests/gateway.test.ts` ✅.
 
 ### Phase 4 — Intelligence & Composition
 - [ ] Multi-hop routing: decompose complex requests into sub-tasks.
@@ -290,7 +297,8 @@ pnpm test
 # packages/adapters  — 3 tests  ✅  (incl. mcp-adapter)
 # packages/core      — 6 tests  ✅  (incl. integration)
 # apps/cli           — 1 test   ✅
-# apps/web           — 2 tests  ✅  (POST /api/ask)
+# apps/web           — 6 tests  ✅  (POST /api/ask + /api/feedback)
+# packages/gateway   — 10 tests ✅  (session, agent-protocol, engine)
 ```
 
 ### Manual CLI Verification (Phase 1 ✅)
