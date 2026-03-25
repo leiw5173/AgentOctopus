@@ -33,10 +33,11 @@ export class SkillRegistry {
         const { data, content } = matter(raw);
         const manifest = SkillManifestSchema.parse(data);
 
-        // Merge persisted rating over manifest default
-        const persisted = this.ratingStore.getRating(manifest.name);
-        if (persisted !== undefined) {
-          manifest.rating = persisted;
+        // Merge persisted rating and invocation count over manifest defaults
+        const persistedEntry = this.ratingStore.getAll()[manifest.name];
+        if (persistedEntry !== undefined) {
+          manifest.rating = persistedEntry.rating;
+          manifest.invocations = persistedEntry.invocations;
         }
 
         this.skills.set(manifest.name, {
