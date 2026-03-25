@@ -73,19 +73,22 @@ export class Router {
       .map((c, i) => `${i + 1}. ${c.skill.manifest.name}: ${c.skill.manifest.description}`)
       .join('\n');
 
-    const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill to handle it. Respond with ONLY the skill name (exactly as listed), nothing else.`;
-    const userMessage = `User request: "${query}"\n\nCandidates:\n${candidateList}\n\nBest skill:`;
+    const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill to handle it — but ONLY if the skill is clearly relevant to the request. If the request is a general knowledge question, a definition, a "what does X mean" question, or simply not something any of the listed skills can handle, respond with exactly the word "none". Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
+    const userMessage = `User request: "${query}"\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
 
     let bestSkillName: string;
     try {
-      bestSkillName = (await this.chatClient.chat(systemPrompt, userMessage)).trim();
+      bestSkillName = (await this.chatClient.chat(systemPrompt, userMessage)).trim().toLowerCase();
     } catch (err) {
       console.warn(`[Router] LLM re-rank failed, falling back to top similarity match: ${(err as Error).message || err}`);
       bestSkillName = candidates[0].skill.manifest.name;
     }
 
+    // LLM decided no skill fits
+    if (bestSkillName === 'none') return [];
+
     const best = candidates.find(
-      (c) => c.skill.manifest.name.toLowerCase() === bestSkillName.toLowerCase(),
+      (c) => c.skill.manifest.name.toLowerCase() === bestSkillName,
     ) ?? candidates[0];
 
     return [

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { Router, Executor } from '@octopus/core';
+import { Router, Executor, createChatClient } from '@octopus/core';
 import { SkillRegistry } from '@octopus/registry';
 import path from 'path';
 
@@ -13,6 +13,7 @@ const registry = new SkillRegistry(
 let isInitialized = false;
 let router: Router;
 let executor: Executor;
+let chatClient: ReturnType<typeof createChatClient>;
 
 async function initOctopus() {
   if (!isInitialized) {
@@ -41,6 +42,7 @@ async function initOctopus() {
     router = new Router(rerankConfig, embedConfig);
     await router.buildIndex(registry.getAll());
     executor = new Executor(registry);
+    chatClient = createChatClient(rerankConfig);
     isInitialized = true;
   }
 }
@@ -55,8 +57,20 @@ export async function POST(req: Request) {
     await initOctopus();
 
     const routes = await router.route(query);
+
+    // No skill matched — answer directly with the LLM
     if (!routes || routes.length === 0) {
-      return NextResponse.json({ error: 'No suitable skill found' }, { status: 404 });
+      const answer = await chatClient.chat(
+        'You are a helpful assistant. Answer the user\'s question concisely and accurately.',
+        query,
+      );
+      return NextResponse.json({
+        success: true,
+        skill: null,
+        confidence: null,
+        rating: null,
+        response: answer,
+      });
     }
 
     const bestMatch = routes[0];
