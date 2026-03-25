@@ -9,15 +9,18 @@ function extractTarget(q) {
   if (ipv4) return ipv4[1];
   const domain = q.match(/\b([a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z]{2,})+)\b/);
   if (domain) return domain[1];
-  // Fall back to stripping common words
-  return q
-    .replace(/\b(lookup|geolocate|where is|what country|info|about|for|ip|address|domain)\b/gi, '')
-    .trim()
-    .split(/\s+/)[0] || '8.8.8.8';
+  return null;
 }
 
 async function main() {
   const target = extractTarget(query);
+
+  if (!target) {
+    console.log(JSON.stringify({
+      result: 'Please provide an IP address (e.g. 8.8.8.8) or domain name (e.g. github.com) to look up.',
+    }));
+    return;
+  }
   const url = `http://ip-api.com/json/${encodeURIComponent(target)}?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,org,as,query`;
 
   const res = await fetch(url, { headers: { 'User-Agent': 'AgentOctopus/0.1' } });
