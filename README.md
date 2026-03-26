@@ -267,6 +267,20 @@ AgentOctopus/
 
 ## Adding a Skill
 
+### From the AgentOctopus Marketplace
+
+The built-in marketplace lets you publish, browse, and install skills via the web UI or CLI:
+
+```bash
+# Browse the marketplace web UI
+# Start the server, then visit http://localhost:3000/marketplace
+
+# Publish your own skill
+cd my-skill/    # folder containing SKILL.md
+octopus publish --author "your-name"
+# → Published to the marketplace at http://localhost:3000/marketplace
+```
+
 ### From ClaWHub
 
 Browse the [ClaWHub skill registry](https://clawhub.ai) and install with one command:

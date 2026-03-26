@@ -269,4 +269,87 @@ program
     console.log(chalk.yellow('  Restart the server to apply changes.'));
   });
 
+program
+  .command('publish [dir]')
+  .description('Publish a skill to the AgentOctopus marketplace')
+  .option('--server <url>', 'Marketplace server URL', 'http://localhost:3000')
+  .option('--author <name>', 'Author name')
+  .action(async (dir: string | undefined, options: { server: string; author?: string }) => {
+    const skillDir = dir ? path.resolve(dir) : process.cwd();
+    const skillMdPath = path.join(skillDir, 'SKILL.md');
+
+    if (!fs.existsSync(skillMdPath)) {
+      console.error(chalk.red(`\n  No SKILL.md found in ${skillDir}`));
+      console.log(chalk.gray('  Create a SKILL.md with YAML frontmatter to publish.\n'));
+      return;
+    }
+
+    const spinner = ora('Reading skill manifest...').start();
+
+    try {
+      const content = fs.readFileSync(skillMdPath, 'utf8');
+
+      // Parse frontmatter (simple YAML between --- delimiters)
+      const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      if (!fmMatch) {
+        spinner.fail('SKILL.md must have YAML frontmatter between --- delimiters');
+        return;
+      }
+
+      const frontmatter: Record<string, any> = {};
+      for (const line of fmMatch[1]!.split('\n')) {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx > 0) {
+          const key = line.slice(0, colonIdx).trim();
+          let value = line.slice(colonIdx + 1).trim();
+          // Handle arrays like [tag1, tag2]
+          if (value.startsWith('[') && value.endsWith(']')) {
+            frontmatter[key] = value.slice(1, -1).split(',').map((s: string) => s.trim());
+          } else {
+            frontmatter[key] = value;
+          }
+        }
+      }
+
+      const slug = frontmatter.name || path.basename(skillDir);
+      const name = frontmatter.name || slug;
+      const description = frontmatter.description || '';
+      const tags = frontmatter.tags || [];
+      const version = frontmatter.version || '1.0.0';
+      const adapter = frontmatter.adapter || 'subprocess';
+      const author = options.author || frontmatter.author || 'anonymous';
+
+      spinner.text = `Publishing ${chalk.cyan(name)} to ${options.server}...`;
+
+      const res = await fetch(`${options.server}/api/marketplace`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slug,
+          name,
+          description,
+          tags,
+          version,
+          author,
+          adapter,
+          skillMd: content,
+        }),
+      });
+
+      const data = await res.json() as { error?: string; skill?: any };
+
+      if (res.ok) {
+        spinner.succeed(`Published ${chalk.cyan.bold(name)} v${version} to marketplace`);
+        console.log(chalk.gray(`  Slug: ${slug}`));
+        console.log(chalk.gray(`  Author: ${author}`));
+        console.log(chalk.green(`\n  Users can install with: octopus add ${slug}`));
+        console.log(chalk.green(`  Or from the web UI: ${options.server}/marketplace\n`));
+      } else {
+        spinner.fail(`Publish failed: ${data.error}`);
+      }
+    } catch (err) {
+      spinner.fail(`Publish failed: ${(err as Error).message}`);
+    }
+  });
+
 program.parse();

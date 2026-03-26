@@ -277,10 +277,10 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] LLM planner that generates an execution DAG.
 - [x] Confidence scoring; graceful "no matching skill" message.
 
-### Phase 5 — Developer Ecosystem (Partial ✅)
-- [x] Web UI: chat interface (`apps/web`).
-- [x] Public skill marketplace / registry (ClaWHub integration via `octopus add`).
-- [ ] SDK for publishing community skills.
+### Phase 5 — Developer Ecosystem ✅ Complete
+- [x] Web UI: enhanced chat interface with skills sidebar, dark/light mode, conversation clear, marketplace link.
+- [x] Public skill marketplace / registry — own REST API (list, search, publish, install) with web browse UI.
+- [x] SDK for publishing community skills — `octopus publish` CLI command reads SKILL.md and publishes to marketplace.
 
 ---
 
