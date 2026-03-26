@@ -38,8 +38,22 @@ out/
 ehthumbs.db
 Thumbs.db
 
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
 # Project specific
 registry/ratings.json
 registry/ratings.bak.json
+registry/marketplace/
 credentials.enc
 .octopus/
+
+# ClaWHub install metadata
+.clawhub-origin.json
+
+# Scratch/test files
+test-*.ts
+bin/
