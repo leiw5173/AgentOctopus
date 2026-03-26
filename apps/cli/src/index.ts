@@ -11,17 +11,22 @@ import { SkillRegistry } from '@agentoctopus/registry';
 import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
+import { fileURLToPath } from 'url';
 
 // Load env
 dotenv.config();
 dotenv.config({ path: path.join(process.cwd(), '.env') });
+
+// Read version from package.json dynamically
+const __cliDir = path.dirname(fileURLToPath(import.meta.url));
+const cliPkg = JSON.parse(fs.readFileSync(path.join(__cliDir, '..', 'package.json'), 'utf8'));
 
 const program = new Command();
 
 program
   .name('octopus')
   .description('AgentOctopus CLI — intelligent routing for skills and MCPs')
-  .version('0.1.0');
+  .version(cliPkg.version);
 
 program
   .command('start')
