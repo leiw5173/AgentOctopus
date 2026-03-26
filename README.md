@@ -25,7 +25,9 @@ User: "Translate hello to French"
 - **Multi-hop planner** — decomposes complex queries into parallel sub-tasks with dependency tracking
 - **Confidence scoring** — normalized 0-1 confidence on every routing result
 - **Rating system** — skills are ranked by user feedback; better ones win
-- **ClaWHub marketplace** — install community skills with `octopus add <slug>`
+- **Skill marketplace** — built-in marketplace to publish, browse, and install community skills
+- **ClaWHub integration** — install skills from [clawhub.ai](https://clawhub.ai) with `octopus add`
+- **Web UI** — chat interface with skills sidebar, dark/light mode, and marketplace browser
 - **Multi-channel** — CLI, REST API, IM bots (Slack/Discord/Telegram), agent-to-agent
 - **Hybrid execution** — skills run in cloud or locally
 - **Flexible LLM** — OpenAI, Gemini, or local Ollama
@@ -60,7 +62,8 @@ pnpm exec octopus start
 
 This starts:
 
-- Web UI + REST API on `http://localhost:3000`
+- Web UI + Chat on `http://localhost:3000`
+- Skill Marketplace on `http://localhost:3000/marketplace`
 - Agent gateway on `http://localhost:3002`
 
 ```bash
@@ -87,6 +90,24 @@ curl -X POST http://localhost:3000/api/ask \
 curl -X POST http://localhost:3000/api/feedback \
   -H 'Content-Type: application/json' \
   -d '{"skillName": "translation", "positive": true}'
+
+# List installed skills
+curl http://localhost:3000/api/skills
+# → { "skills": [{ "name": "translation", "rating": 4.5, ... }] }
+
+# Search the marketplace
+curl http://localhost:3000/api/marketplace?q=weather
+# → { "skills": [...], "total": 1 }
+
+# Publish a skill to the marketplace
+curl -X POST http://localhost:3000/api/marketplace \
+  -H 'Content-Type: application/json' \
+  -d '{"slug": "my-skill", "name": "My Skill", "description": "...", "author": "me", "skillMd": "---\nname: my-skill\n..."}'
+
+# Install a skill from the marketplace
+curl -X POST http://localhost:3000/api/marketplace/install \
+  -H 'Content-Type: application/json' \
+  -d '{"slug": "my-skill"}'
 ```
 
 ## IM Bots
@@ -242,16 +263,19 @@ General questions that do not match a registered skill fall back to the configur
 ```
 AgentOctopus/
 ├── apps/
-│   ├── cli/           # CLI entry point (`octopus ask "..."`)
-│   └── web/           # Next.js web UI & REST API (POST /api/ask, POST /api/feedback)
+│   ├── cli/           # CLI entry point (`octopus ask/list/add/publish`)
+│   └── web/           # Next.js web UI, REST API, and marketplace
+│       ├── /           # Chat interface with skills sidebar
+│       └── /marketplace  # Skill marketplace browser
 ├── packages/
 │   ├── agentoctopus/  # Umbrella package — re-exports everything
-│   ├── core/          # Router + Executor + LLM client
+│   ├── core/          # Router + Executor + Planner + LLM client
 │   ├── registry/      # Skill manifest loader + rating store + remote catalog
 │   ├── adapters/      # HTTP, MCP stdio, subprocess adapters
 │   └── gateway/       # IM bots (Slack/Discord/Telegram) + agent protocol + sessions
 └── registry/
-    └── skills/        # Built-in SKILL.md manifests
+    ├── skills/        # Built-in SKILL.md manifests
+    └── marketplace/   # Published skills + index.json
 ```
 
 ### npm Packages
@@ -259,7 +283,7 @@ AgentOctopus/
 | Package | Description |
 |---|---|
 | [`agentoctopus`](https://www.npmjs.com/package/agentoctopus) | All-in-one install — includes everything below |
-| [`@agentoctopus/cli`](https://www.npmjs.com/package/@agentoctopus/cli) | CLI (`octopus ask`, `octopus list`) |
+| [`@agentoctopus/cli`](https://www.npmjs.com/package/@agentoctopus/cli) | CLI (`octopus ask`, `list`, `add`, `search`, `publish`) |
 | [`@agentoctopus/core`](https://www.npmjs.com/package/@agentoctopus/core) | Router, Executor, LLM client |
 | [`@agentoctopus/gateway`](https://www.npmjs.com/package/@agentoctopus/gateway) | Slack/Discord/Telegram bots, agent HTTP API |
 | [`@agentoctopus/registry`](https://www.npmjs.com/package/@agentoctopus/registry) | Skill manifest loader, rating store |
@@ -279,6 +303,20 @@ The built-in marketplace lets you publish, browse, and install skills via the we
 cd my-skill/    # folder containing SKILL.md
 octopus publish --author "your-name"
 # → Published to the marketplace at http://localhost:3000/marketplace
+
+# Install from marketplace via API
+curl -X POST http://localhost:3000/api/marketplace/install \
+  -H 'Content-Type: application/json' \
+  -d '{"slug": "my-skill"}'
+```
+
+**Skill author workflow:**
+
+```
+1. Create a folder with SKILL.md (YAML frontmatter + instructions)
+2. Run `octopus publish --author "you"` to push to the marketplace
+3. Users browse /marketplace, click Install, restart the server
+4. The skill is now available for routing queries
 ```
 
 ### From ClaWHub
