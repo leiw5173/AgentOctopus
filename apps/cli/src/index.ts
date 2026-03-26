@@ -30,14 +30,36 @@ program
 
 program
   .command('start')
-  .description('Start the web app and agent gateway together')
+  .description('Start the web app and agent gateway together (requires source checkout)')
   .action(async () => {
+    // Check if we're in the monorepo (pnpm-workspace.yaml exists)
+    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+    const wsFile = path.join(rootDir, 'pnpm-workspace.yaml');
+    const pkgFile = path.join(rootDir, 'package.json');
+
+    if (!fs.existsSync(wsFile) || !fs.existsSync(pkgFile)) {
+      console.error(chalk.red('\n  Error: `octopus start` requires the AgentOctopus source repository.\n'));
+      console.log(chalk.gray('  This command starts the web UI and gateway from the monorepo.'));
+      console.log(chalk.gray('  It cannot run from a global npm install.\n'));
+      console.log(chalk.white('  To use from source:'));
+      console.log(chalk.cyan('    git clone https://github.com/leiw5173/AgentOctopus.git'));
+      console.log(chalk.cyan('    cd AgentOctopus && pnpm install && pnpm build'));
+      console.log(chalk.cyan('    octopus start\n'));
+      console.log(chalk.white('  Available without source:'));
+      console.log(chalk.cyan('    octopus ask "translate hello to French"'));
+      console.log(chalk.cyan('    octopus list'));
+      console.log(chalk.cyan('    octopus add <skill>'));
+      console.log(chalk.cyan('    octopus search <query>\n'));
+      process.exitCode = 1;
+      return;
+    }
+
     console.log(chalk.bold('\n🐙 Starting AgentOctopus services\n'));
     console.log(chalk.gray('  Web UI + REST API: http://localhost:3000'));
     console.log(chalk.gray('  Agent gateway:     http://localhost:3002/agent/health\n'));
 
     try {
-      await startService();
+      await startService(rootDir);
     } catch (error) {
       console.error(chalk.red(`Service startup failed: ${error}`));
       process.exitCode = 1;

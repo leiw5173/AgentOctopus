@@ -1,6 +1,6 @@
 {
   "name": "agentoctopus",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Intelligent routing layer that connects user needs to Skills and MCPs — install once, use everything",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,11 +17,11 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
-    "@agentoctopus/registry": "^0.2.3",
-    "@agentoctopus/adapters": "^0.2.3",
-    "@agentoctopus/core": "^0.2.3",
-    "@agentoctopus/gateway": "^0.2.3",
-    "@agentoctopus/cli": "^0.2.3"
+    "@agentoctopus/registry": "^0.2.4",
+    "@agentoctopus/adapters": "^0.2.4",
+    "@agentoctopus/core": "^0.2.4",
+    "@agentoctopus/gateway": "^0.2.4",
+    "@agentoctopus/cli": "^0.2.4"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
