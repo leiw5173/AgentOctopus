@@ -22,11 +22,13 @@ User: "Translate hello to French"
 ## Features
 
 - **Semantic routing** — understands natural language intent
+- **Multi-hop planner** — decomposes complex queries into parallel sub-tasks with dependency tracking
+- **Confidence scoring** — normalized 0-1 confidence on every routing result
 - **Rating system** — skills are ranked by user feedback; better ones win
+- **ClaWHub marketplace** — install community skills with `octopus add <slug>`
 - **Multi-channel** — CLI, REST API, IM bots (Slack/Discord/Telegram), agent-to-agent
 - **Hybrid execution** — skills run in cloud or locally
 - **Flexible LLM** — OpenAI, Gemini, or local Ollama
-- **Privacy-first** — encrypted credential vault, local-first option
 - **Stateful sessions** — conversation context persists across turns on all channels
 
 ## Install
@@ -167,6 +169,33 @@ app.use('/agent', agentRouter);
 app.listen(3000);
 ```
 
+## Multi-hop Planner
+
+For complex queries that involve multiple skills, the Planner decomposes the request into sub-tasks, runs them in parallel (or sequentially if there are dependencies), and synthesizes a single answer:
+
+```ts
+import { Planner, Router, Executor, SkillRegistry, createChatClient, createEmbedClient } from 'agentoctopus';
+
+// ... set up registry, router, executor as usual ...
+
+const planner = new Planner(chatClient, router, executor);
+const result = await planner.run(
+  'translate hello to French and check the weather in Paris',
+  registry.getAll(),
+);
+
+console.log(result.finalAnswer);
+// → "Bonjour! The weather in Paris is 22°C and sunny."
+
+console.log(result.plan.isMultiHop);     // true
+console.log(result.stepResults.length);  // 2
+result.stepResults.forEach(s => {
+  console.log(`${s.skill || 'LLM'}: ${s.output} (confidence: ${s.confidence})`);
+});
+```
+
+Steps without dependencies run in parallel. When a step depends on a prior step's output, it waits and receives the context automatically.
+
 ## Configuration
 
 Copy `.env.example` and fill in your values:
@@ -276,7 +305,7 @@ adapter: http
 ```bash
 pnpm install       # install all dependencies
 pnpm build         # build all packages
-pnpm test          # run all tests (35 tests across 6 packages)
+pnpm test          # run all tests (40+ tests across 6 packages)
 pnpm dev           # watch mode for all packages
 ```
 
@@ -286,10 +315,10 @@ pnpm dev           # watch mode for all packages
 |---|---|
 | `packages/registry` | 9 |
 | `packages/adapters` | 3 |
-| `packages/core` | 6 |
-| `apps/cli` | 1 |
+| `packages/core` | 14 |
+| `apps/cli` | 3 |
 | `apps/web` | 6 |
-| `packages/gateway` | 10 |
+| `packages/gateway` | 11 |
 
 ## License
 
