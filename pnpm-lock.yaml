@@ -129,6 +129,28 @@ importers:
         specifier: ^1.5.0
         version: 1.6.1(@types/node@20.19.37)(lightningcss@1.32.0)
 
+  packages/agentoctopus:
+    dependencies:
+      '@agentoctopus/adapters':
+        specifier: ^0.1.1
+        version: 0.1.1(zod@3.25.76)
+      '@agentoctopus/cli':
+        specifier: ^0.1.1
+        version: 0.1.1(ws@8.20.0)(zod@3.25.76)
+      '@agentoctopus/core':
+        specifier: ^0.1.1
+        version: 0.1.1(ws@8.20.0)(zod@3.25.76)
+      '@agentoctopus/gateway':
+        specifier: ^0.1.1
+        version: 0.1.1(ws@8.20.0)(zod@3.25.76)
+      '@agentoctopus/registry':
+        specifier: ^0.1.1
+        version: 0.1.1
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+
   packages/core:
     dependencies:
       '@agentoctopus/adapters':
@@ -232,6 +254,22 @@ importers:
         version: 1.6.1(@types/node@20.19.37)(lightningcss@1.32.0)
 
 packages:
+
+  '@agentoctopus/adapters@0.1.1':
+    resolution: {integrity: sha512-vmwSeRa7LRGhe0aX5zbkQKzM5EzYL76BsRAWTWfsWrKhr7k4xGvvwlK2qVb1Lx3ZxlokYinFdE21kWbHu+Rv/w==}
+
+  '@agentoctopus/cli@0.1.1':
+    resolution: {integrity: sha512-idYzAp7wg+jy0Hi8yLSJiGohfjGo6foyrxfXtN8L/0zoSPy0HnlWl3cg3Fdh8RSHMjM6LSvU1xXaHScWAOUOzQ==}
+    hasBin: true
+
+  '@agentoctopus/core@0.1.1':
+    resolution: {integrity: sha512-m9okVTCcW0Ww8CuX34S8O5yUa2c0y9d/nWMttsJHKTZPeMktaPAoRKiK132sHi5aYIc8B7c1J3H4M6US22aYOA==}
+
+  '@agentoctopus/gateway@0.1.1':
+    resolution: {integrity: sha512-f75CiSN2SOx6I6D7seuaC8u5UdunCPYqMHjx7upxXnPkTnFaCvFjhgCMMkbnii1/TG4s6gRUrONhILTo1LVQAg==}
+
+  '@agentoctopus/registry@0.1.1':
+    resolution: {integrity: sha512-YPrTfwnos8cdF8xhOyHR2Wuw+zJhBv+qItjVXENYgKeWLU6/JFBg6jtFqATi0Lug6/WZnNyf3xKqW2+YxdSqQA==}
 
   '@alloc/quick-lru@5.2.0':
     resolution: {integrity: sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw==}
@@ -3960,6 +3998,76 @@ packages:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
 snapshots:
+
+  '@agentoctopus/adapters@0.1.1(zod@3.25.76)':
+    dependencies:
+      '@agentoctopus/registry': 0.1.1
+      '@modelcontextprotocol/sdk': 1.27.1(zod@3.25.76)
+      node-fetch: 3.3.2
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - supports-color
+      - zod
+
+  '@agentoctopus/cli@0.1.1(ws@8.20.0)(zod@3.25.76)':
+    dependencies:
+      '@agentoctopus/core': 0.1.1(ws@8.20.0)(zod@3.25.76)
+      '@agentoctopus/registry': 0.1.1
+      chalk: 5.6.2
+      commander: 12.1.0
+      dotenv: 16.6.1
+      ora: 8.2.0
+      readline: 1.3.0
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - debug
+      - encoding
+      - supports-color
+      - ws
+      - zod
+
+  '@agentoctopus/core@0.1.1(ws@8.20.0)(zod@3.25.76)':
+    dependencies:
+      '@agentoctopus/adapters': 0.1.1(zod@3.25.76)
+      '@agentoctopus/registry': 0.1.1
+      '@google/generative-ai': 0.15.0
+      dotenv: 16.6.1
+      ollama: 0.5.18
+      openai: 4.104.0(ws@8.20.0)(zod@3.25.76)
+      vectra: 0.6.0
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - debug
+      - encoding
+      - supports-color
+      - ws
+      - zod
+
+  '@agentoctopus/gateway@0.1.1(ws@8.20.0)(zod@3.25.76)':
+    dependencies:
+      '@agentoctopus/adapters': 0.1.1(zod@3.25.76)
+      '@agentoctopus/core': 0.1.1(ws@8.20.0)(zod@3.25.76)
+      '@agentoctopus/registry': 0.1.1
+      '@slack/bolt': 3.22.0
+      discord.js: 14.25.1
+      express: 4.22.1
+      telegraf: 4.16.3
+      uuid: 10.0.0
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - bufferutil
+      - debug
+      - encoding
+      - supports-color
+      - utf-8-validate
+      - ws
+      - zod
+
+  '@agentoctopus/registry@0.1.1':
+    dependencies:
+      glob: 11.1.0
+      gray-matter: 4.0.3
+      zod: 3.25.76
 
   '@alloc/quick-lru@5.2.0': {}
 

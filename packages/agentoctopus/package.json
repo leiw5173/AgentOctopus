@@ -1,0 +1,38 @@
+{
+  "name": "agentoctopus",
+  "version": "0.1.1",
+  "description": "Intelligent routing layer that connects user needs to Skills and MCPs — install once, use everything",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "octopus": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@agentoctopus/registry": "^0.1.1",
+    "@agentoctopus/adapters": "^0.1.1",
+    "@agentoctopus/core": "^0.1.1",
+    "@agentoctopus/gateway": "^0.1.1",
+    "@agentoctopus/cli": "^0.1.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leiw5173/AgentOctopus"
+  },
+  "keywords": ["ai", "agent", "llm", "mcp", "routing", "skills", "slack", "discord", "telegram", "cli", "openai", "ollama", "gemini"]
+}
