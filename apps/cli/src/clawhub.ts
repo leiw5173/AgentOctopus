@@ -12,8 +12,8 @@ import path from 'path';
 import { inflateRawSync } from 'zlib';
 
 const DEFAULT_REGISTRY = 'https://clawhub.ai';
-const MAX_RETRIES = 2;
-const RETRY_BASE_MS = 1000;
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 2000;
 
 // --- Types matching the actual ClaWHub v1 API response ---
 
@@ -72,7 +72,8 @@ export interface ClaWHubSearchResult {
 }
 
 /**
- * Fetch with retry on 429 (rate limit).
+ * Fetch with retry on 429 (rate limit) and 5xx errors.
+ * Respects the retry-after header from ClaWHub.
  */
 async function fetchWithRetry(url: string, retries = MAX_RETRIES): Promise<Response> {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -80,14 +81,20 @@ async function fetchWithRetry(url: string, retries = MAX_RETRIES): Promise<Respo
     if (res.status === 429 && attempt < retries) {
       const retryAfter = res.headers.get('retry-after');
       const waitMs = retryAfter
-        ? parseInt(retryAfter, 10) * 1000
+        ? (parseInt(retryAfter, 10) + 1) * 1000  // respect server's retry-after + 1s buffer
         : RETRY_BASE_MS * Math.pow(2, attempt);
+      const waitSec = Math.ceil(waitMs / 1000);
+      process.stderr.write(`  Rate limited — waiting ${waitSec}s before retry (${attempt + 1}/${retries})...\n`);
+      await new Promise((r) => setTimeout(r, waitMs));
+      continue;
+    }
+    if (res.status >= 500 && attempt < retries) {
+      const waitMs = RETRY_BASE_MS * Math.pow(2, attempt);
       await new Promise((r) => setTimeout(r, waitMs));
       continue;
     }
     return res;
   }
-  // unreachable, but satisfies TS
   throw new Error('Fetch retry exhausted');
 }
 

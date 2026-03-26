@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/adapters",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "AgentOctopus skill execution adapters: HTTP, MCP stdio, subprocess",
   "type": "module",
   "main": "./dist/index.js",
