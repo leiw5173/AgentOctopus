@@ -32,16 +32,18 @@ User: "Translate hello to French"
 ## Install
 
 ```bash
-# CLI — install globally and use immediately
-npm install -g @agentoctopus/cli
+# All-in-one (CLI + full library)
+npm install -g agentoctopus
 octopus ask "translate hello to French"
 octopus list
+```
 
-# Gateway — add IM bots or agent protocol to your own app
-npm install @agentoctopus/gateway
+Or install individual packages if you only need a subset:
 
-# Core library — embed routing into your own project
-npm install @agentoctopus/core @agentoctopus/registry @agentoctopus/adapters
+```bash
+npm install @agentoctopus/gateway   # IM bots + agent protocol
+npm install @agentoctopus/core      # router + executor + LLM client
+npm install @agentoctopus/cli       # CLI only
 ```
 
 ## Quick Start (from source)
@@ -92,7 +94,7 @@ Each platform adapter bootstraps the same routing engine and maintains per-user 
 ### Slack
 
 ```ts
-import { startSlackGateway } from '@agentoctopus/gateway';
+import { startSlackGateway } from 'agentoctopus';
 
 await startSlackGateway({
   appOptions: {
@@ -108,7 +110,7 @@ await startSlackGateway({
 ### Discord
 
 ```ts
-import { startDiscordGateway } from '@agentoctopus/gateway';
+import { startDiscordGateway } from 'agentoctopus';
 
 await startDiscordGateway({ token: process.env.DISCORD_TOKEN });
 // Responds to @mentions in guilds and all DMs
@@ -117,7 +119,7 @@ await startDiscordGateway({ token: process.env.DISCORD_TOKEN });
 ### Telegram
 
 ```ts
-import { startTelegramGateway } from '@agentoctopus/gateway';
+import { startTelegramGateway } from 'agentoctopus';
 
 await startTelegramGateway({ token: process.env.TELEGRAM_BOT_TOKEN });
 // /ask <request>  or plain text messages
@@ -157,7 +159,7 @@ Or mount the router inside an existing Express app:
 
 ```ts
 import express from 'express';
-import { createAgentRouter } from '@agentoctopus/gateway';
+import { createAgentRouter } from 'agentoctopus';
 
 const app = express();
 const agentRouter = await createAgentRouter();
@@ -214,6 +216,7 @@ AgentOctopus/
 │   ├── cli/           # CLI entry point (`octopus ask "..."`)
 │   └── web/           # Next.js web UI & REST API (POST /api/ask, POST /api/feedback)
 ├── packages/
+│   ├── agentoctopus/  # Umbrella package — re-exports everything
 │   ├── core/          # Router + Executor + LLM client
 │   ├── registry/      # Skill manifest loader + rating store + remote catalog
 │   ├── adapters/      # HTTP, MCP stdio, subprocess adapters
@@ -221,6 +224,17 @@ AgentOctopus/
 └── registry/
     └── skills/        # Built-in SKILL.md manifests
 ```
+
+### npm Packages
+
+| Package | Description |
+|---|---|
+| [`agentoctopus`](https://www.npmjs.com/package/agentoctopus) | All-in-one install — includes everything below |
+| [`@agentoctopus/cli`](https://www.npmjs.com/package/@agentoctopus/cli) | CLI (`octopus ask`, `octopus list`) |
+| [`@agentoctopus/core`](https://www.npmjs.com/package/@agentoctopus/core) | Router, Executor, LLM client |
+| [`@agentoctopus/gateway`](https://www.npmjs.com/package/@agentoctopus/gateway) | Slack/Discord/Telegram bots, agent HTTP API |
+| [`@agentoctopus/registry`](https://www.npmjs.com/package/@agentoctopus/registry) | Skill manifest loader, rating store |
+| [`@agentoctopus/adapters`](https://www.npmjs.com/package/@agentoctopus/adapters) | HTTP, MCP, subprocess adapters |
 
 ## Adding a Skill
 

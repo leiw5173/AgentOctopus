@@ -79,12 +79,12 @@ pnpm test             # run all 35+ tests across all workspaces
 pnpm dev              # watch mode for all packages in parallel
 
 # Scoped commands
-pnpm --filter @octopus/core build
-pnpm --filter @octopus/core test
+pnpm --filter @agentoctopus/core build
+pnpm --filter @agentoctopus/core test
 pnpm --filter web test
 
 # Run a single test file
-pnpm --filter @octopus/registry exec vitest run tests/registry.test.ts
+pnpm --filter @agentoctopus/registry exec vitest run tests/registry.test.ts
 
 # CLI (must build first)
 node apps/cli/dist/index.js list
@@ -97,6 +97,8 @@ cd apps/web && pnpm dev   # http://localhost:3000
 ## Architecture
 
 AgentOctopus is a **pnpm monorepo** (workspaces: `packages/*`, `apps/*`). All packages are ESM (`"type": "module"`), TypeScript targeting ES2022/NodeNext. Each package builds with `tsc` to its own `dist/`.
+
+Published to npm under the `@agentoctopus/` scope, plus an `agentoctopus` umbrella package that re-exports everything.
 
 ### Request flow
 
@@ -114,6 +116,7 @@ User query
 
 | Package | Key files | Role |
 |---|---|---|
+| `packages/agentoctopus` | `index.ts` | Umbrella re-export of all sub-packages |
 | `packages/registry` | `registry.ts`, `rating.ts`, `manifest-schema.ts` | Loads `SKILL.md` files via gray-matter + Zod, persists ratings/invocations to `registry/ratings.json` |
 | `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution |
 | `packages/adapters` | `http-adapter.ts`, `mcp-adapter.ts`, `subprocess-adapter.ts` | Three execution strategies — HTTP POST, MCP stdio, Node subprocess |
@@ -155,94 +158,14 @@ Embedding and re-ranking can use a different provider/endpoint than the main LLM
 ### Next.js specifics
 
 - Config lives in `apps/web/next.config.mjs` only (`.ts` was removed).
-- `@octopus/adapters` must stay in `serverExternalPackages`, not `transpilePackages` — it uses Node-native APIs incompatible with the Turbopack bundler.
+- `@agentoctopus/adapters` must stay in `serverExternalPackages`, not `transpilePackages` — it uses Node-native APIs incompatible with the Turbopack bundler.
 - `apps/web/AGENTS.md` warns that this Next.js version (16.x) has breaking API changes — read `node_modules/next/dist/docs/` before touching framework-level code.
 
+### npm publishing
 
-## Commands
+All packages are published to npm under the `@agentoctopus/` scope. The umbrella `agentoctopus` package re-exports everything. To publish a new version:
 
-```bash
-pnpm install          # install all workspace dependencies
-pnpm build            # build all packages (order: registry → adapters → core → gateway → apps)
-pnpm test             # run all 35+ tests across all workspaces
-pnpm dev              # watch mode for all packages in parallel
-
-# Scoped commands
-pnpm --filter @octopus/core build
-pnpm --filter @octopus/core test
-pnpm --filter web test
-
-# Run a single test file
-pnpm --filter @octopus/registry exec vitest run tests/registry.test.ts
-
-# CLI (must build first)
-node apps/cli/dist/index.js list
-node apps/cli/dist/index.js ask "What's the weather in Tokyo?"
-
-# Web dev server
-cd apps/web && pnpm dev   # http://localhost:3000
-```
-
-## Architecture
-
-AgentOctopus is a **pnpm monorepo** (workspaces: `packages/*`, `apps/*`). All packages are ESM (`"type": "module"`), TypeScript targeting ES2022/NodeNext. Each package builds with `tsc` to its own `dist/`.
-
-### Request flow
-
-```
-User query
-  → Gateway (CLI / REST API / IM bot / agent-protocol)
-  → Router   — embeds query, cosine-scores against skill index,
-               pre-filters with isSkillEligible(), LLM re-ranks,
-               returns [] if no skill fits (→ direct LLM answer)
-  → Executor — picks adapter (http / mcp / subprocess), invokes skill
-  → Result   — formatted, returned to caller; feedback updates ratings.json
-```
-
-### Package responsibilities
-
-| Package | Key files | Role |
-|---|---|---|
-| `packages/registry` | `registry.ts`, `rating.ts`, `manifest-schema.ts` | Loads `SKILL.md` files via gray-matter + Zod, persists ratings/invocations to `registry/ratings.json` |
-| `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution |
-| `packages/adapters` | `http-adapter.ts`, `mcp-adapter.ts`, `subprocess-adapter.ts` | Three execution strategies — HTTP POST, MCP stdio, Node subprocess |
-| `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API |
-| `apps/web` | `src/app/api/ask/route.ts`, `src/app/page.tsx` | Next.js REST API + chat demo UI |
-| `apps/cli` | `src/index.ts` | Commander CLI (`list`, `ask`) with readline feedback prompt |
-
-### Routing logic (critical to understand)
-
-`router.ts` has two layers of filtering before a skill is chosen:
-
-1. **`isSkillEligible(skill, query)`** — hard keyword/regex pre-filter per skill name. `ip-lookup` only passes through if the query contains an IPv4 address or domain pattern. `weather` requires weather keywords. `translation` requires translate keywords. All other skills pass through unconditionally.
-
-2. **LLM re-rank** — sends top-K candidates to the chat LLM with a prompt that includes `"none"` as a valid answer. `parseRerankDecision()` handles fuzzy LLM output. If `"none"` is returned or the re-rank fails, `route()` returns `[]`.
-
-When `route()` returns `[]`, callers (web API, agent-protocol, IM bots) fall back to answering directly with the chat LLM.
-
-### Skills
-
-Skills live in `registry/skills/<name>/SKILL.md` (gray-matter YAML frontmatter + markdown instructions) with an optional `scripts/invoke.js` for subprocess adapter. The Zod schema is in `packages/registry/src/manifest-schema.ts`.
-
-Current real skills (all free APIs, no keys):
-- **weather** — wttr.in
-- **translation** — MyMemory API
-- **ip-lookup** — ip-api.com (requires actual IP/domain in query)
-
-### Environment
-
-The web app symlinks `apps/web/.env → ../../.env`. Key variables:
-
-```
-EMBED_PROVIDER / EMBED_MODEL / EMBED_API_KEY / EMBED_BASE_URL  # for embedding
-RERANK_MODEL                                                    # chat model for re-ranking
-LLM_PROVIDER / LLM_MODEL / OPENAI_API_KEY / OPENAI_BASE_URL   # fallback direct-answer LLM
-```
-
-Embedding and re-ranking can use a different provider/endpoint than the main LLM. The web `initOctopus()` in `apps/web/src/app/api/ask/route.ts` is a singleton — restart the server after changing skills or `.env`.
-
-### Next.js specifics
-
-- Config lives in `apps/web/next.config.mjs` only (`.ts` was removed).
-- `@octopus/adapters` must stay in `serverExternalPackages`, not `transpilePackages` — it uses Node-native APIs incompatible with the Turbopack bundler.
-- `apps/web/AGENTS.md` warns that this Next.js version (16.x) has breaking API changes — read `node_modules/next/dist/docs/` before touching framework-level code.
+1. Bump version in each `package.json`
+2. Build: `pnpm build`
+3. Publish in dependency order: registry → adapters → core → gateway → cli → agentoctopus
+4. Use `pnpm --filter <pkg> publish --no-git-checks`
