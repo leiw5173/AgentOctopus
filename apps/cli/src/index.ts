@@ -10,6 +10,7 @@ import readline from 'readline';
 import { SkillRegistry } from '@agentoctopus/registry';
 import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
+import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 
 // Load env
 dotenv.config();
@@ -164,6 +165,81 @@ program
       spinner.fail('Execution crashed');
       console.error(err);
     }
+  });
+
+program
+  .command('add <slug>')
+  .description('Install a skill from ClaWHub (clawhub.ai)')
+  .option('--version <version>', 'Install a specific version')
+  .option('--force', 'Overwrite existing skill')
+  .option('--registry <url>', 'Custom ClaWHub registry URL')
+  .action(async (slug: string, options: { version?: string; force?: boolean; registry?: string }) => {
+    const spinner = ora(`Fetching skill "${slug}" from ClaWHub...`).start();
+    try {
+      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+
+      const meta = await fetchSkillMeta(slug, options.registry);
+      spinner.text = `Downloading ${chalk.cyan(meta.name || slug)} v${options.version || meta.version}...`;
+
+      const skillDir = await installSkill(slug, skillsDir, {
+        version: options.version,
+        registryUrl: options.registry,
+        force: options.force,
+      });
+
+      spinner.succeed(`Installed ${chalk.cyan.bold(meta.name || slug)} v${options.version || meta.version}`);
+      console.log(chalk.gray(`  Path: ${skillDir}`));
+      console.log(chalk.gray(`  Author: ${meta.author}`));
+      if (meta.stars) console.log(chalk.gray(`  Stars: ${meta.stars}`));
+      console.log(chalk.yellow('\n  Restart the server to pick up the new skill.'));
+    } catch (err) {
+      spinner.fail(`Failed to install "${slug}": ${(err as Error).message}`);
+    }
+  });
+
+program
+  .command('search <query>')
+  .description('Search for skills on ClaWHub')
+  .option('--registry <url>', 'Custom ClaWHub registry URL')
+  .action(async (query: string, options: { registry?: string }) => {
+    const spinner = ora(`Searching ClaWHub for "${query}"...`).start();
+    try {
+      const results = await searchSkills(query, options.registry);
+      spinner.stop();
+
+      if (results.length === 0) {
+        console.log(chalk.yellow(`\n  No skills found for "${query}".`));
+        return;
+      }
+
+      console.log(chalk.bold(`\n🐙 ClaWHub — Search Results for "${query}"\n`));
+      for (const r of results) {
+        console.log(`  ${chalk.cyan.bold(r.slug)} ${chalk.gray(`v${r.version}`)} ${chalk.yellow(`⭐ ${r.stars || 0}`)}`);
+        console.log(`  ${chalk.gray(r.description || 'No description')}`);
+        console.log(`  ${chalk.gray(`by ${r.author}`)}  →  ${chalk.green(`octopus add ${r.slug}`)}\n`);
+      }
+    } catch (err) {
+      spinner.fail(`Search failed: ${(err as Error).message}`);
+    }
+  });
+
+program
+  .command('remove <name>')
+  .description('Remove an installed skill from the local registry')
+  .action(async (name: string) => {
+    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+    const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+    const skillDir = path.join(skillsDir, name);
+
+    if (!fs.existsSync(skillDir)) {
+      console.log(chalk.red(`  Skill "${name}" not found at ${skillDir}`));
+      return;
+    }
+
+    fs.rmSync(skillDir, { recursive: true });
+    console.log(chalk.green(`  Removed skill "${name}" from ${skillDir}`));
+    console.log(chalk.yellow('  Restart the server to apply changes.'));
   });
 
 program.parse();

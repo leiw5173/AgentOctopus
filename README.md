@@ -238,6 +238,23 @@ AgentOctopus/
 
 ## Adding a Skill
 
+### From ClaWHub
+
+Browse the [ClaWHub skill registry](https://clawhub.ai) and install with one command:
+
+```bash
+# Search for skills
+octopus search "self-improving"
+
+# Install a skill from ClaWHub
+octopus add self-improving-agent
+
+# Remove a skill
+octopus remove self-improving-agent
+```
+
+### Manual
+
 Create a new folder under `registry/skills/<skill-name>/` with a `SKILL.md`:
 
 ```markdown

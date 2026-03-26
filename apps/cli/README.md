@@ -56,6 +56,26 @@ RATINGS_PATH=./registry/ratings.json
 
 ## Adding custom skills
 
+### From ClaWHub (recommended)
+
+Browse skills at [clawhub.ai](https://clawhub.ai) and install with one command:
+
+```bash
+# Search for skills
+octopus search "self-improving"
+
+# Install a skill
+octopus add self-improving-agent
+
+# Install a specific version
+octopus add self-improving-agent --version 3.0.6
+
+# Remove a skill
+octopus remove self-improving-agent
+```
+
+### Manual
+
 Point `REGISTRY_PATH` at a folder of `SKILL.md` files:
 
 ```markdown
