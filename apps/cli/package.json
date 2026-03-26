@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/cli",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "AgentOctopus CLI — route natural language queries to skills via `octopus ask`",
   "type": "module",
   "bin": {
