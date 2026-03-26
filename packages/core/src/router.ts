@@ -4,6 +4,7 @@ import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, cr
 export interface RoutingResult {
   skill: LoadedSkill;
   score: number;
+  confidence: number; // 0-1 normalized confidence
   reason: string;
 }
 
@@ -141,8 +142,21 @@ export class Router {
       {
         skill: best.skill,
         score: best.score,
+        confidence: normalizeConfidence(best.score),
         reason: `Selected "${best.skill.manifest.name}" as the best match for your request.`,
       },
     ];
   }
+}
+
+/**
+ * Normalize a raw routing score (cosine + rating boost) to a 0-1 confidence value.
+ * Cosine similarity ranges roughly 0.3-0.9 for relevant matches; rating boost adds up to 0.15.
+ * We map the practical range [0.3, 1.0] → [0.0, 1.0] with clamping.
+ */
+function normalizeConfidence(rawScore: number): number {
+  const MIN_SCORE = 0.3;
+  const MAX_SCORE = 1.0;
+  const normalized = (rawScore - MIN_SCORE) / (MAX_SCORE - MIN_SCORE);
+  return Math.max(0, Math.min(1, Math.round(normalized * 100) / 100));
 }

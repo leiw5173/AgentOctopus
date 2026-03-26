@@ -26,10 +26,11 @@ export type {
   AdapterResult,
 } from '@agentoctopus/adapters';
 
-// Core — router, executor, LLM client
+// Core — router, executor, LLM client, planner
 export {
   Router,
   Executor,
+  Planner,
   createChatClient,
   createEmbedClient,
   skillToText,
@@ -37,6 +38,10 @@ export {
 export type {
   RoutingResult,
   ExecutionResult,
+  ExecutionPlan,
+  PlanStep,
+  PlanStepResult,
+  PlanExecutionResult,
   ChatClient,
   EmbedClient,
   LLMConfig,

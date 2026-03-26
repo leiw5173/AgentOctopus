@@ -17,11 +17,11 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
-    "@agentoctopus/registry": "^0.2.4",
-    "@agentoctopus/adapters": "^0.2.4",
-    "@agentoctopus/core": "^0.2.4",
-    "@agentoctopus/gateway": "^0.2.4",
-    "@agentoctopus/cli": "^0.2.4"
+    "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/adapters": "workspace:*",
+    "@agentoctopus/core": "workspace:*",
+    "@agentoctopus/gateway": "workspace:*",
+    "@agentoctopus/cli": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.4.0"

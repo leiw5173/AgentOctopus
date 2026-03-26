@@ -272,14 +272,14 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] Shared engine bootstrap — `packages/gateway/src/engine.ts`.
 - [x] 10 tests in `packages/gateway/tests/gateway.test.ts` ✅.
 
-### Phase 4 — Intelligence & Composition
-- [ ] Multi-hop routing: decompose complex requests into sub-tasks.
-- [ ] LLM planner that generates an execution DAG.
-- [ ] Confidence scoring; graceful "no matching skill" message.
+### Phase 4 — Intelligence & Composition ✅ Complete
+- [x] Multi-hop routing: decompose complex requests into sub-tasks.
+- [x] LLM planner that generates an execution DAG.
+- [x] Confidence scoring; graceful "no matching skill" message.
 
-### Phase 5 — Developer Ecosystem
-- [ ] Web UI: chat interface (`apps/web`).
-- [ ] Public skill marketplace / registry.
+### Phase 5 — Developer Ecosystem (Partial ✅)
+- [x] Web UI: chat interface (`apps/web`).
+- [x] Public skill marketplace / registry (ClaWHub integration via `octopus add`).
 - [ ] SDK for publishing community skills.
 
 ---
@@ -295,10 +295,10 @@ pnpm test
 # Results (all green):
 # packages/registry  — 9 tests  ✅
 # packages/adapters  — 3 tests  ✅  (incl. mcp-adapter)
-# packages/core      — 6 tests  ✅  (incl. integration)
-# apps/cli           — 1 test   ✅
+# packages/core      — 14 tests ✅  (router, executor, planner, integration)
+# apps/cli           — 3 tests  ✅
 # apps/web           — 6 tests  ✅  (POST /api/ask + /api/feedback)
-# packages/gateway   — 10 tests ✅  (session, agent-protocol, engine)
+# packages/gateway   — 11 tests ✅  (session, agent-protocol, engine)
 ```
 
 ### Manual CLI Verification (Phase 1 ✅)
