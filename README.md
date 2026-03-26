@@ -29,7 +29,22 @@ User: "Translate hello to French"
 - **Privacy-first** — encrypted credential vault, local-first option
 - **Stateful sessions** — conversation context persists across turns on all channels
 
-## Quick Start
+## Install
+
+```bash
+# CLI — install globally and use immediately
+npm install -g @agentoctopus/cli
+octopus ask "translate hello to French"
+octopus list
+
+# Gateway — add IM bots or agent protocol to your own app
+npm install @agentoctopus/gateway
+
+# Core library — embed routing into your own project
+npm install @agentoctopus/core @agentoctopus/registry @agentoctopus/adapters
+```
+
+## Quick Start (from source)
 
 ```bash
 # Install dependencies once
@@ -44,16 +59,10 @@ This starts:
 - Web UI + REST API on `http://localhost:3000`
 - Agent gateway on `http://localhost:3002`
 
-## Quick Start (CLI)
-
 ```bash
-# Build all packages
+# Or use the CLI directly
 pnpm build
-
-# Ask a question
 pnpm exec octopus ask "translate hello to French"
-
-# List available skills
 pnpm exec octopus list
 ```
 
@@ -83,7 +92,7 @@ Each platform adapter bootstraps the same routing engine and maintains per-user 
 ### Slack
 
 ```ts
-import { startSlackGateway } from '@octopus/gateway';
+import { startSlackGateway } from '@agentoctopus/gateway';
 
 await startSlackGateway({
   appOptions: {
@@ -99,7 +108,7 @@ await startSlackGateway({
 ### Discord
 
 ```ts
-import { startDiscordGateway } from '@octopus/gateway';
+import { startDiscordGateway } from '@agentoctopus/gateway';
 
 await startDiscordGateway({ token: process.env.DISCORD_TOKEN });
 // Responds to @mentions in guilds and all DMs
@@ -108,7 +117,7 @@ await startDiscordGateway({ token: process.env.DISCORD_TOKEN });
 ### Telegram
 
 ```ts
-import { startTelegramGateway } from '@octopus/gateway';
+import { startTelegramGateway } from '@agentoctopus/gateway';
 
 await startTelegramGateway({ token: process.env.TELEGRAM_BOT_TOKEN });
 // /ask <request>  or plain text messages
@@ -120,7 +129,7 @@ The gateway exposes an OpenClaw-compatible HTTP API for agent-to-agent calls:
 
 ```bash
 # Start the standalone agent gateway (default port 3002)
-pnpm --filter @octopus/gateway start:agent
+pnpm --filter @agentoctopus/gateway start:agent
 
 # Route a query from an external agent
 curl -X POST http://localhost:3002/agent/ask \
@@ -148,7 +157,7 @@ Or mount the router inside an existing Express app:
 
 ```ts
 import express from 'express';
-import { createAgentRouter } from '@octopus/gateway';
+import { createAgentRouter } from '@agentoctopus/gateway';
 
 const app = express();
 const agentRouter = await createAgentRouter();
