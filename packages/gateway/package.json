@@ -8,6 +8,9 @@
   "exports": {
     ".": "./dist/index.js"
   },
+  "bin": {
+    "agentoctopus-gateway": "./dist/bin/start-agent-gateway.js"
+  },
   "files": [
     "README.md",
     "dist"

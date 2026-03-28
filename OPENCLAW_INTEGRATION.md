@@ -20,6 +20,16 @@ AgentOctopus exposes an OpenClaw-compatible HTTP API that allows external agents
 
 ### 2. Build AgentOctopus
 
+**Option A: Install from npm (recommended)**
+
+```bash
+npm install -g @agentoctopus/gateway
+# or
+npx @agentoctopus/gateway
+```
+
+**Option B: Build from source**
+
 ```bash
 cd /path/to/AgentOctopus
 pnpm install
@@ -56,7 +66,18 @@ AGENT_GATEWAY_PORT=3002
 
 ### 4. Start the Agent Gateway
 
-**Option A: Standalone server (recommended)**
+**Option A: Using npm package (recommended)**
+
+```bash
+# Install globally
+npm install -g @agentoctopus/gateway
+agentoctopus-gateway
+
+# Or run directly with npx
+npx @agentoctopus/gateway
+```
+
+**Option B: From source**
 
 ```bash
 # From project root
@@ -65,7 +86,7 @@ pnpm --filter @agentoctopus/gateway start:agent
 
 The gateway will start on `http://localhost:3002` (or your configured port).
 
-**Option B: Programmatic (embed in your app)**
+**Option C: Programmatic (embed in your app)**
 
 ```typescript
 import { createAgentRouter } from '@agentoctopus/gateway';
@@ -247,11 +268,9 @@ print(result["response"])
 
 ```dockerfile
 FROM node:18-alpine
-WORKDIR /app
-COPY . .
-RUN npm install -g pnpm && pnpm install && pnpm build
+RUN npm install -g @agentoctopus/gateway
 EXPOSE 3002
-CMD ["pnpm", "--filter", "@agentoctopus/gateway", "start:agent"]
+CMD ["agentoctopus-gateway"]
 ```
 
 ```bash
@@ -262,7 +281,8 @@ docker run -p 3002:3002 --env-file .env agentoctopus-gateway
 ### Option 2: PM2 (Process Manager)
 
 ```bash
-pm2 start packages/gateway/dist/bin/start-agent-gateway.js --name agentoctopus-gateway
+npm install -g @agentoctopus/gateway pm2
+pm2 start agentoctopus-gateway --name agentoctopus
 pm2 save
 pm2 startup
 ```
@@ -279,7 +299,7 @@ Type=simple
 User=agentoctopus
 WorkingDirectory=/opt/agentoctopus
 EnvironmentFile=/opt/agentoctopus/.env
-ExecStart=/usr/bin/node packages/gateway/dist/bin/start-agent-gateway.js
+ExecStart=/usr/bin/agentoctopus-gateway
 Restart=on-failure
 
 [Install]
