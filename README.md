@@ -148,47 +148,31 @@ await startTelegramGateway({ token: process.env.TELEGRAM_BOT_TOKEN });
 // /ask <request>  or plain text messages
 ```
 
-## Agent-to-Agent Protocol
+## OpenClaw Integration
 
-The gateway exposes an OpenClaw-compatible HTTP API for agent-to-agent calls:
+AgentOctopus provides an OpenClaw-compatible HTTP API for agent-to-agent communication. External agents can route queries to specialized skills, maintain sessions, and receive direct LLM answers when no skill matches.
+
+**Quick Start:**
 
 ```bash
-# Start the standalone agent gateway (default port 3002)
-pnpm --filter @agentoctopus/gateway start:agent
+# Install and run
+npx @agentoctopus/gateway
 
-# Route a query from an external agent
-curl -X POST http://localhost:3002/agent/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "translate hello to French", "agentId": "my-agent"}'
-# → { "success": true, "response": "Bonjour", "skill": "translation",
-#     "sessionId": "abc-123", "confidence": 0.95 }
-
-# Continue the session
-curl -X POST http://localhost:3002/agent/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "now translate goodbye", "sessionId": "abc-123"}'
-
-# Submit feedback
-curl -X POST http://localhost:3002/agent/feedback \
-  -H 'Content-Type: application/json' \
-  -d '{"skillName": "translation", "positive": true}'
-
-# Health check
-curl http://localhost:3002/agent/health
-# → { "status": "ok", "skills": 3 }
+# Or install globally
+npm install -g @agentoctopus/gateway
+agentoctopus-gateway
 ```
 
-Or mount the router inside an existing Express app:
+**Basic Usage:**
 
-```ts
-import express from 'express';
-import { createAgentRouter } from 'agentoctopus';
-
-const app = express();
-const agentRouter = await createAgentRouter();
-app.use('/agent', agentRouter);
-app.listen(3000);
+```bash
+# Route a query
+curl -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "translate hello to French", "agentId": "openclaw"}'
 ```
+
+For complete integration guide including deployment options, API documentation, examples, and troubleshooting, see **[OPENCLAW_INTEGRATION.md](./OPENCLAW_INTEGRATION.md)**.
 
 ## Multi-hop Planner
 
