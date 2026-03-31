@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import 'dotenv/config';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { startAgentGateway } from '../agent-protocol.js';

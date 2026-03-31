@@ -199,6 +199,9 @@ importers:
       discord.js:
         specifier: ^14.15.0
         version: 14.25.1
+      dotenv:
+        specifier: ^16.4.0
+        version: 16.6.1
       express:
         specifier: ^4.19.2
         version: 4.22.1
