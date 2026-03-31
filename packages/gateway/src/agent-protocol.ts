@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
+import { syncFromCloud } from '@agentoctopus/registry';
 
 /**
  * OpenClaw-compatible agent-to-agent protocol.
@@ -107,6 +108,52 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
   /** GET /agent/health — liveness + skill count */
   router.get('/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok', skills: engine.registry.getAll().length });
+  });
+
+  /** GET /agent/skills — list all registered skills */
+  router.get('/skills', (_req: Request, res: Response) => {
+    const skills = engine.registry.getAll().map((s) => ({
+      name: s.manifest.name,
+      description: s.manifest.description,
+      adapter: s.manifest.adapter,
+      tags: s.manifest.tags,
+      rating: s.rating,
+      invocations: s.manifest.invocations,
+    }));
+    res.json({ skills });
+  });
+
+  /** GET /agent/skills/export — full skill data for cloud-to-local sync */
+  router.get('/skills/export', (_req: Request, res: Response) => {
+    const skills = engine.registry.getAll().map((s) => {
+      const files = engine.registry.getSkillFiles(s.manifest.name);
+      return {
+        name: s.manifest.name,
+        version: s.manifest.version,
+        skillMd: files?.skillMd ?? '',
+        scripts: files?.scripts ?? {},
+      };
+    });
+    res.json({ skills, exportedAt: new Date().toISOString() });
+  });
+
+  /** POST /agent/sync — trigger skill sync from a cloud instance */
+  router.post('/sync', async (req: Request, res: Response) => {
+    const { cloudUrl, force } = req.body as { cloudUrl?: string; force?: boolean };
+    const url = cloudUrl ?? process.env.CLOUD_URL;
+
+    if (!url) {
+      res.status(400).json({ success: false, error: 'cloudUrl is required (body or CLOUD_URL env)' });
+      return;
+    }
+
+    try {
+      const skillsDir = process.env.REGISTRY_PATH ?? 'registry/skills';
+      const result = await syncFromCloud(url, skillsDir, force);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      res.status(500).json({ success: false, error: (err as Error).message });
+    }
   });
 
   return router;

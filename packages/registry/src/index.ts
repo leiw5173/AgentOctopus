@@ -3,3 +3,4 @@ export { SkillManifestSchema, type SkillManifest, type Adapter, type Auth } from
 export { RatingStore, type RatingEntry, type RatingsStore } from './rating.js';
 export type { LoadedSkill } from './registry.js';
 export { fetchRemoteCatalog, type CatalogEntry, type LoadedCatalogSkill } from './catalog.js';
+export { syncFromCloud, type SyncResult, type SkillExportEntry, type SkillExportResponse } from './sync.js';
