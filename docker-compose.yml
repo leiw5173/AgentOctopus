@@ -1,0 +1,54 @@
+services:
+  # ── Cloud deployment ────────────────────────────────────────
+  cloud-gateway:
+    build:
+      context: .
+      target: cloud
+    ports:
+      - "3002:3002"
+    env_file: .env
+    environment:
+      - DEPLOY_MODE=cloud
+      - AGENT_GATEWAY_PORT=3002
+    volumes:
+      - registry-data:/app/registry
+    profiles: ["cloud"]
+    restart: unless-stopped
+
+  cloud-web:
+    build:
+      context: .
+      target: cloud
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      - NODE_ENV=production
+    command: ["node", "node_modules/.bin/next", "start", "-p", "3000"]
+    working_dir: /app/apps/web
+    volumes:
+      - registry-data:/app/registry
+    profiles: ["cloud"]
+    restart: unless-stopped
+
+  # ── Local deployment ────────────────────────────────────────
+  local-gateway:
+    build:
+      context: .
+      target: local
+    ports:
+      - "3002:3002"
+    env_file: .env
+    environment:
+      - DEPLOY_MODE=local
+      - AGENT_GATEWAY_PORT=3002
+      - CLOUD_URL=${CLOUD_URL:-}
+      - SYNC_ON_STARTUP=${SYNC_ON_STARTUP:-true}
+    volumes:
+      - local-registry:/app/registry
+    profiles: ["local"]
+    restart: unless-stopped
+
+volumes:
+  registry-data:
+  local-registry:
