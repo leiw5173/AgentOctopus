@@ -1,6 +1,6 @@
 {
   "name": "agentoctopus",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Intelligent routing layer that connects user needs to Skills and MCPs — install once, use everything",
   "type": "module",
   "main": "./dist/index.js",
