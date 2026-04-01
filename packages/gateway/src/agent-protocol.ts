@@ -1,29 +1,105 @@
 import express, { type Request, type Response } from 'express';
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
+import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, validateApiKey } from './auth-middleware.js';
+import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
+import { auditLogger, closeAuditLog } from './audit-logger.js';
 import { syncFromCloud } from '@agentoctopus/registry';
 
 /**
- * OpenClaw-compatible agent-to-agent protocol.
+ * OpenClaw-compatible agent-to-agent protocol with security middleware.
  *
- * POST /agent/ask
- *   Body: { query: string; sessionId?: string; agentId?: string; metadata?: object }
- *   Response: { success: boolean; response: string; skill: string | null; sessionId: string; confidence: number | null }
+ * Public endpoints (no auth required):
+ *   GET  /agent/health       — liveness + skill count
+ *   POST /agent/register     — self-service API key registration (free tier)
  *
- * POST /agent/feedback
- *   Body: { skillName: string; positive: boolean; comment?: string }
- *   Response: { success: boolean }
+ * Authenticated endpoints:
+ *   POST /agent/ask          — route query to best skill
+ *   POST /agent/feedback     — record thumbs up/down
  *
- * GET /agent/health
- *   Response: { status: "ok"; skills: number }
+ * Admin endpoints (admin API key required):
+ *   POST /agent/keys/create  — create a new API key
+ *   POST /agent/keys/revoke  — revoke an API key
+ *   GET  /agent/keys         — list all API keys
  */
 export async function createAgentRouter(rootDir?: string): Promise<express.Router> {
   const engine = await bootstrapEngine(rootDir);
   const router = express.Router();
 
-  router.use(express.json());
+  // Load API keys store
+  loadApiKeys();
 
-  /** POST /agent/ask — main agent-to-agent endpoint */
+  // ── Global middleware (order matters) ──────────────────────────────────
+  router.use(express.json());
+  router.use(auditLogger);     // Log all requests
+  router.use(authMiddleware);  // Validate API key (skips public paths)
+  router.use(rateLimiter);     // Rate-limit by key/IP
+
+  // ── CORS ───────────────────────────────────────────────────────────────
+  router.use((_req: Request, res: Response, next) => {
+    const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS?.split(',') ?? ['*'];
+    const origin = _req.headers.origin;
+
+    if (allowedOrigins.includes('*')) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
+    res.setHeader('Access-Control-Max-Age', '86400');
+
+    if (_req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+
+    next();
+  });
+
+  // ── Public: Health ─────────────────────────────────────────────────────
+
+  router.get('/health', (_req: Request, res: Response) => {
+    res.json({
+      status: 'ok',
+      skills: engine.registry.getAll().length,
+      version: '0.3.4',
+      auth: process.env.AUTH_ENABLED !== 'false',
+    });
+  });
+
+  // ── Public: Self-service registration ──────────────────────────────────
+
+  router.post('/register', (req: Request, res: Response) => {
+    const { email } = req.body as { email?: string };
+
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      res.status(400).json({ success: false, error: 'Valid email is required' });
+      return;
+    }
+
+    try {
+      const { key, entry } = createApiKey({ email, tier: 'free' });
+
+      res.status(201).json({
+        success: true,
+        apiKey: key,
+        tier: entry.tier,
+        limits: {
+          requestsPerMinute: 10,
+          requestsPerDay: 100,
+        },
+        message: 'Store this API key securely — it will not be shown again.',
+        upgrade: 'https://api.agentoctopus.dev/billing',
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, error: (err as Error).message });
+    }
+  });
+
+  // ── Authenticated: Ask ─────────────────────────────────────────────────
+
   router.post('/ask', async (req: Request, res: Response) => {
     const { query, sessionId, agentId = 'external-agent', metadata = {} } = req.body as {
       query?: string;
@@ -88,7 +164,8 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     }
   });
 
-  /** POST /agent/feedback — record thumbs up/down from external agent */
+  // ── Authenticated: Feedback ────────────────────────────────────────────
+
   router.post('/feedback', async (req: Request, res: Response) => {
     const { skillName, positive, comment } = req.body as {
       skillName?: string;
@@ -105,9 +182,50 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     res.json({ success: true });
   });
 
-  /** GET /agent/health — liveness + skill count */
-  router.get('/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok', skills: engine.registry.getAll().length });
+  // ── Admin: Key Management ──────────────────────────────────────────────
+
+  router.post('/keys/create', (req: Request, res: Response) => {
+    const caller = (req as any).apiKeyEntry;
+    if (!caller || caller.tier !== 'admin') {
+      res.status(403).json({ success: false, error: 'Admin access required' });
+      return;
+    }
+
+    const { email, tier, description } = req.body as {
+      email?: string;
+      tier?: string;
+      description?: string;
+    };
+
+    if (!email) {
+      res.status(400).json({ success: false, error: 'email is required' });
+      return;
+    }
+
+    const { key, entry } = createApiKey({
+      email,
+      tier: (tier as any) || 'free',
+      description,
+    });
+
+    res.status(201).json({ success: true, apiKey: key, entry });
+  });
+
+  router.post('/keys/revoke', (req: Request, res: Response) => {
+    const caller = (req as any).apiKeyEntry;
+    if (!caller || caller.tier !== 'admin') {
+      res.status(403).json({ success: false, error: 'Admin access required' });
+      return;
+    }
+
+    const { apiKey } = req.body as { apiKey?: string };
+    if (!apiKey) {
+      res.status(400).json({ success: false, error: 'apiKey is required' });
+      return;
+    }
+
+    const revoked = revokeApiKey(apiKey);
+    res.json({ success: revoked, message: revoked ? 'Key revoked' : 'Key not found' });
   });
 
   /** GET /agent/skills — list all registered skills */
@@ -168,7 +286,20 @@ export async function startAgentGateway(rootDir?: string, port = 3002): Promise<
   const router = await createAgentRouter(rootDir);
   app.use('/agent', router);
 
+  // Graceful shutdown
+  const shutdown = () => {
+    console.log('[Agent Gateway] Shutting down...');
+    flushApiKeys();
+    closeAuditLog();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
   app.listen(port, () => {
-    console.log(`[Agent Gateway] Listening on port ${port}`);
+    const authStatus = process.env.AUTH_ENABLED !== 'false' ? '🔒 auth ON' : '🔓 auth OFF';
+    const rateStatus = process.env.RATE_LIMIT_ENABLED !== 'false' ? '⏱ rate-limit ON' : '⏱ rate-limit OFF';
+    console.log(`[Agent Gateway] Listening on port ${port} [${authStatus}] [${rateStatus}]`);
   });
 }

@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/cli",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "AgentOctopus CLI — route natural language queries to skills via `octopus ask`",
   "type": "module",
   "bin": {
@@ -20,16 +20,18 @@
   "dependencies": {
     "@agentoctopus/core": "workspace:*",
     "@agentoctopus/registry": "workspace:*",
-    "commander": "^12.0.0",
+    "@inquirer/prompts": "^8.3.2",
     "chalk": "^5.3.0",
-    "ora": "^8.0.1",
+    "commander": "^12.0.0",
     "dotenv": "^16.4.0",
+    "inquirer": "^13.3.2",
+    "ora": "^8.0.1",
     "readline": "^1.3.0"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",
-    "typescript": "^5.4.0",
     "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
     "vitest": "^1.5.0"
   },
   "publishConfig": {
@@ -40,5 +42,13 @@
     "type": "git",
     "url": "https://github.com/leiw5173/AgentOctopus"
   },
-  "keywords": ["ai", "agent", "cli", "llm", "routing", "mcp", "skills"]
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "llm",
+    "routing",
+    "mcp",
+    "skills"
+  ]
 }

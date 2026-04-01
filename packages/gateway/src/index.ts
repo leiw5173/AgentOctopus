@@ -5,3 +5,22 @@ export { startDiscordGateway, type DiscordGatewayOptions } from './discord.js';
 export { startTelegramGateway, type TelegramGatewayOptions } from './telegram.js';
 export { createAgentRouter, startAgentGateway } from './agent-protocol.js';
 export { getDeployMode, isCloudMode, isLocalMode, type DeployMode } from './deploy-mode.js';
+
+// Security middleware
+export {
+  authMiddleware,
+  loadApiKeys,
+  createApiKey,
+  revokeApiKey,
+  upgradeApiKey,
+  validateApiKey,
+  flushApiKeys,
+  generateApiKey,
+  TIER_LIMITS,
+  type ApiKeyEntry,
+  type ApiKeyTier,
+  type ApiKeysStore,
+} from './auth-middleware.js';
+
+export { rateLimiter, resetRateLimiter } from './rate-limiter.js';
+export { auditLogger, closeAuditLog, resetAuditLogger, type AuditEntry } from './audit-logger.js';

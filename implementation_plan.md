@@ -182,10 +182,13 @@ AgentOctopus/
 │       │   ├── slack.ts            # ✅ Slack bot adapter (@slack/bolt)
 │       │   ├── discord.ts          # ✅ Discord bot adapter (discord.js)
 │       │   ├── telegram.ts         # ✅ Telegram bot adapter (telegraf)
-│       │   ├── agent-protocol.ts   # ✅ Agent-to-agent HTTP protocol
+│       │   ├── agent-protocol.ts   # ✅ Agent-to-agent HTTP protocol + security
+│       │   ├── auth-middleware.ts  # ✅ API key auth + tier management
+│       │   ├── rate-limiter.ts     # ✅ Sliding-window rate limiting
+│       │   ├── audit-logger.ts     # ✅ Structured JSONL request logging
 │       │   └── index.ts            # ✅ Package entry point
 │       └── tests/
-│           └── gateway.test.ts     # ✅ 10 tests
+│           └── gateway.test.ts     # ✅ 11 tests
 │
 └── registry/
     └── skills/                 # Built-in SKILL.md manifests
@@ -282,6 +285,22 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] Public skill marketplace / registry — own REST API (list, search, publish, install) with web browse UI.
 - [x] SDK for publishing community skills — `octopus publish` CLI command reads SKILL.md and publishes to marketplace.
 
+### Phase 6 — Onboarding & Cloud Security ✅ Complete
+- [x] Interactive setup wizard (`octopus onboard`) — 5-step guided configuration.
+- [x] Auto-detect: `octopus ask`/`start` triggers onboard if `.env` is missing.
+- [x] API key authentication middleware — file-based key store with tier management.
+- [x] Sliding-window rate limiter — tier-aware (free/pro/enterprise) with standard headers.
+- [x] Audit logger — structured JSONL logging of all gateway requests.
+- [x] Self-service key registration endpoint (`POST /agent/register`).
+- [x] CORS configuration and admin key management endpoints.
+
+### Phase 7 — Payment & Billing (Planned)
+- [ ] Cloudflare Tunnel for HTTPS on cloud gateway.
+- [ ] Stripe integration for Pro/Enterprise subscriptions.
+- [ ] 支付宝/微信支付 integration for Chinese users.
+- [ ] Billing dashboard and `octopus billing` CLI command.
+- [ ] Webhook handlers for subscription lifecycle events.
+
 ---
 
 ## Verification Plan
@@ -298,7 +317,7 @@ pnpm test
 # packages/core      — 14 tests ✅  (router, executor, planner, integration)
 # apps/cli           — 3 tests  ✅
 # apps/web           — 6 tests  ✅  (POST /api/ask + /api/feedback)
-# packages/gateway   — 11 tests ✅  (session, agent-protocol, engine)
+# packages/gateway   — 11 tests ✅  (session, agent-protocol, engine, security)
 ```
 
 ### Manual CLI Verification (Phase 1 ✅)
