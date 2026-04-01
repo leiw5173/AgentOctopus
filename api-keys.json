@@ -1,0 +1,43 @@
+{
+  "keys": {
+    "ak_MzaBDNQogWNNYf3YFddwcU-Z9pxhbhFm": {
+      "userId": "user_43b5ab219d826e0e",
+      "email": "test@example.com",
+      "tier": "free",
+      "createdAt": "2026-04-01T06:13:17.077Z",
+      "usage": {
+        "daily": 0,
+        "monthly": 0,
+        "lastDailyReset": "2026-04-01",
+        "lastMonthlyReset": "2026-04"
+      },
+      "active": true
+    },
+    "ak_Q6gQKcol3uKTbbpqnlawscpQBx8iz4Y8": {
+      "userId": "user_fa78882b5733d2b9",
+      "email": "test@example.com",
+      "tier": "free",
+      "createdAt": "2026-04-01T06:13:51.836Z",
+      "usage": {
+        "daily": 1,
+        "monthly": 1,
+        "lastDailyReset": "2026-04-01",
+        "lastMonthlyReset": "2026-04"
+      },
+      "active": true
+    },
+    "ak_BVk0-RenVOi_WzH3T3dSaRf-1qNtwsqZ": {
+      "userId": "user_1cc967249ff2a350",
+      "email": "test@example.com",
+      "tier": "free",
+      "createdAt": "2026-04-01T06:14:22.492Z",
+      "usage": {
+        "daily": 3,
+        "monthly": 3,
+        "lastDailyReset": "2026-04-01",
+        "lastMonthlyReset": "2026-04"
+      },
+      "active": true
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/gateway",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "AgentOctopus gateways: Slack, Discord, Telegram bots and agent-to-agent HTTP protocol",
   "type": "module",
   "main": "./dist/index.js",

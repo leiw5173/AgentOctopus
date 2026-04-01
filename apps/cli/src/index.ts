@@ -11,6 +11,7 @@ import { SkillRegistry } from '@agentoctopus/registry';
 import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
+import { runOnboarding, ensureOnboarded } from './onboard.js';
 import { fileURLToPath } from 'url';
 
 // Load env
@@ -29,9 +30,30 @@ program
   .version(cliPkg.version);
 
 program
+  .command('onboard')
+  .description('Interactive setup wizard — configure LLM, skills, and execution mode')
+  .action(async () => {
+    try {
+      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+      await runOnboarding(rootDir);
+    } catch (err) {
+      if ((err as Error).name === 'ExitPromptError') {
+        console.log(chalk.gray('\n  Setup cancelled.\n'));
+      } else {
+        console.error(chalk.red(`Setup failed: ${err}`));
+        process.exitCode = 1;
+      }
+    }
+  });
+
+program
   .command('start')
   .description('Start the web app and agent gateway together (requires source checkout)')
   .action(async () => {
+    // Auto-trigger onboarding if .env is missing
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
     // Check if we're in the monorepo (pnpm-workspace.yaml exists)
     const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
     const wsFile = path.join(rootDir, 'pnpm-workspace.yaml');
@@ -134,6 +156,10 @@ program
   .command('ask <query>')
   .description('Ask AgentOctopus to route your request to the best skill')
   .action(async (query: string) => {
+    // Auto-trigger onboarding if .env is missing
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
     console.log(chalk.bold(`\n🐙 Request: "${query}"\n`));
 
     const spinner = ora('Loading registry and embedding skills...').start();

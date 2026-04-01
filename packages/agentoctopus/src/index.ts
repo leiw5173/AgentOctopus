@@ -47,7 +47,7 @@ export type {
   LLMConfig,
 } from '@agentoctopus/core';
 
-// Gateway — IM bots, agent protocol, sessions
+// Gateway — IM bots, agent protocol, sessions, security
 export {
   bootstrapEngine,
   resetEngine,
@@ -58,6 +58,21 @@ export {
   startTelegramGateway,
   createAgentRouter,
   startAgentGateway,
+  // Security middleware
+  authMiddleware,
+  loadApiKeys,
+  createApiKey,
+  revokeApiKey,
+  upgradeApiKey,
+  validateApiKey,
+  flushApiKeys,
+  generateApiKey,
+  TIER_LIMITS,
+  rateLimiter,
+  resetRateLimiter,
+  auditLogger,
+  closeAuditLog,
+  resetAuditLogger,
 } from '@agentoctopus/gateway';
 export type {
   OctopusEngine,
@@ -66,4 +81,11 @@ export type {
   SlackGatewayOptions,
   DiscordGatewayOptions,
   TelegramGatewayOptions,
+  ApiKeyEntry,
+  ApiKeyTier,
+  ApiKeysStore,
+  AuditEntry,
 } from '@agentoctopus/gateway';
+
+// Onboarding
+export { runOnboarding, ensureOnboarded } from '@agentoctopus/cli/dist/onboard.js';

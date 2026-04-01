@@ -56,6 +56,9 @@ npm install @agentoctopus/cli       # CLI only
 # Install dependencies once
 pnpm install
 
+# Run the interactive setup wizard
+pnpm exec octopus onboard
+
 # Start the full service
 pnpm exec octopus start
 ```
@@ -72,6 +75,24 @@ pnpm build
 pnpm exec octopus ask "translate hello to French"
 pnpm exec octopus list
 ```
+
+## Onboarding
+
+First-time setup is guided by an interactive wizard:
+
+```bash
+octopus onboard
+```
+
+The wizard walks you through:
+
+1. **LLM Provider** — choose OpenAI (or compatible), Google Gemini, or Ollama (local)
+2. **Embedding Config** — same provider or separate
+3. **Execution Mode** — local only, cloud only, or hybrid
+4. **Skill Selection** — enable/disable installed skills
+5. **Review & Save** — writes `.env` for you
+
+If you run `octopus ask` or `octopus start` without a `.env` file, the wizard launches automatically.
 
 ## REST API
 
@@ -203,7 +224,13 @@ Steps without dependencies run in parallel. When a step depends on a prior step'
 
 ## Configuration
 
-Copy `.env.example` and fill in your values:
+The easiest way to configure AgentOctopus is with the setup wizard:
+
+```bash
+octopus onboard
+```
+
+Or manually copy `.env.example` and fill in your values:
 
 ```bash
 cp .env.example .env
@@ -212,7 +239,7 @@ cp .env.example .env
 ```env
 # LLM backend
 LLM_PROVIDER=openai          # openai | gemini | ollama
-LLM_MODEL=gpt-5.4
+LLM_MODEL=gpt-4o-mini
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://your-openai-compatible-base-url/v1
 
@@ -223,6 +250,11 @@ EMBED_API_KEY=
 EMBED_BASE_URL=https://your-embedding-base-url/v1
 RERANK_MODEL=gpt-4o-mini
 
+# Execution mode
+EXECUTION_MODE=local         # local | cloud | hybrid
+CLOUD_GATEWAY_URL=https://api.agentoctopus.dev
+CLOUD_API_KEY=
+
 # Optional alternate providers
 GEMINI_API_KEY=
 OLLAMA_BASE_URL=http://localhost:11434
@@ -231,6 +263,10 @@ OLLAMA_MODEL=llama3.2
 # Registry paths (optional, defaults to ./registry/)
 REGISTRY_PATH=./registry/skills
 RATINGS_PATH=./registry/ratings.json
+
+# Security (cloud gateway)
+AUTH_ENABLED=true
+RATE_LIMIT_ENABLED=true
 
 # IM bot tokens
 SLACK_BOT_TOKEN=xoxb-...
@@ -242,12 +278,65 @@ TELEGRAM_BOT_TOKEN=...
 
 General questions that do not match a registered skill fall back to the configured chat model directly. Skill routing uses embeddings plus an LLM reranker, so if you split providers you should ensure both the chat and embedding endpoints are reachable.
 
+## Cloud Gateway Security
+
+The agent gateway (`/agent/*` endpoints) includes built-in security for production deployment:
+
+### API Key Authentication
+
+All authenticated endpoints require an API key:
+
+```bash
+# Register for a free API key
+curl -X POST https://your-gateway/agent/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "you@example.com"}'
+# → { "apiKey": "ak_...", "tier": "free", "limits": { ... } }
+
+# Use the key in requests
+curl -X POST https://your-gateway/agent/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_...' \
+  -d '{"query": "translate hello to French"}'
+```
+
+Keys can also be passed via `X-API-Key` header or `?apiKey=` query parameter.
+
+### Rate Limiting
+
+Tier-based sliding-window rate limiting with standard headers:
+
+| Tier | Requests/min | Requests/day | Price |
+|------|-------------|-------------|-------|
+| Free | 10 | 100 | $0/mo |
+| Pro | 60 | 5,000 | $19/mo |
+| Enterprise | 300 | 50,000 | $99/mo |
+
+Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`.
+
+### Audit Logging
+
+All requests are logged to `logs/audit.jsonl` with:
+- Timestamp, HTTP method, path, IP address
+- Masked API key, user ID, tier
+- Status code, response time, query content
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AUTH_ENABLED` | `true` | Enable/disable API key authentication |
+| `RATE_LIMIT_ENABLED` | `true` | Enable/disable rate limiting |
+| `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
+| `API_KEYS_PATH` | `./api-keys.json` | Path to API keys store |
+| `AUDIT_LOG_DIR` | `./logs` | Directory for audit log files |
+
 ## Architecture
 
 ```
 AgentOctopus/
 ├── apps/
-│   ├── cli/           # CLI entry point (`octopus ask/list/add/publish`)
+│   ├── cli/           # CLI entry point (`octopus ask/list/add/publish/onboard`)
 │   └── web/           # Next.js web UI, REST API, and marketplace
 │       ├── /           # Chat interface with skills sidebar
 │       └── /marketplace  # Skill marketplace browser
@@ -256,7 +345,10 @@ AgentOctopus/
 │   ├── core/          # Router + Executor + Planner + LLM client
 │   ├── registry/      # Skill manifest loader + rating store + remote catalog
 │   ├── adapters/      # HTTP, MCP stdio, subprocess adapters
-│   └── gateway/       # IM bots (Slack/Discord/Telegram) + agent protocol + sessions
+│   └── gateway/       # IM bots + agent protocol + security middleware
+│       ├── auth-middleware.ts   # API key authentication + tier management
+│       ├── rate-limiter.ts      # Sliding-window rate limiting
+│       └── audit-logger.ts      # Structured request logging (JSONL)
 └── registry/
     ├── skills/        # Built-in SKILL.md manifests
     └── marketplace/   # Published skills + index.json
