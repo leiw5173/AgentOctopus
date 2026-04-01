@@ -1,5 +1,5 @@
 import path from 'path';
-import { SkillRegistry } from '@agentoctopus/registry';
+import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
 import { Router, Executor, createChatClient, type ChatClient, type LLMConfig } from '@agentoctopus/core';
 
 export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
@@ -23,6 +23,20 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   const root = rootDir ?? process.env.OCTOPUS_ROOT ?? process.cwd();
   const skillsDir = process.env.REGISTRY_PATH ?? path.join(root, 'registry', 'skills');
   const ratingsPath = process.env.RATINGS_PATH ?? path.join(root, 'registry', 'ratings.json');
+
+  // Sync skills from cloud before loading registry (local mode)
+  const cloudUrl = process.env.CLOUD_URL;
+  if (cloudUrl && process.env.SYNC_ON_STARTUP !== 'false') {
+    try {
+      const result = await syncFromCloud(cloudUrl, skillsDir);
+      const total = result.added.length + result.updated.length;
+      if (total > 0) {
+        console.log(`[Engine] Synced ${total} skill(s) from ${cloudUrl} (added: ${result.added.length}, updated: ${result.updated.length})`);
+      }
+    } catch (err) {
+      console.warn(`[Engine] Startup sync from ${cloudUrl} failed: ${(err as Error).message}`);
+    }
+  }
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
   await registry.load();

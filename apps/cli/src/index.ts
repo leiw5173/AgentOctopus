@@ -7,7 +7,7 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import readline from 'readline';
 
-import { SkillRegistry } from '@agentoctopus/registry';
+import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
 import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
@@ -375,6 +375,42 @@ program
       }
     } catch (err) {
       spinner.fail(`Publish failed: ${(err as Error).message}`);
+    }
+  });
+
+program
+  .command('sync')
+  .description('Sync skills from a cloud AgentOctopus instance')
+  .requiredOption('--cloud-url <url>', 'URL of the cloud AgentOctopus instance')
+  .option('--force', 'Overwrite existing skills even if versions match')
+  .action(async (options: { cloudUrl: string; force?: boolean }) => {
+    const spinner = ora(`Syncing skills from ${options.cloudUrl}...`).start();
+    try {
+      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+
+      const result = await syncFromCloud(options.cloudUrl, skillsDir, options.force);
+      spinner.succeed('Sync complete');
+
+      if (result.added.length > 0) {
+        console.log(chalk.green(`  Added: ${result.added.join(', ')}`));
+      }
+      if (result.updated.length > 0) {
+        console.log(chalk.cyan(`  Updated: ${result.updated.join(', ')}`));
+      }
+      if (result.skipped.length > 0) {
+        console.log(chalk.gray(`  Skipped: ${result.skipped.join(', ')}`));
+      }
+      if (result.errors.length > 0) {
+        console.log(chalk.red(`  Errors: ${result.errors.join(', ')}`));
+      }
+
+      const total = result.added.length + result.updated.length;
+      if (total > 0) {
+        console.log(chalk.yellow('\n  Restart the server to pick up synced skills.'));
+      }
+    } catch (err) {
+      spinner.fail(`Sync failed: ${(err as Error).message}`);
     }
   });
 

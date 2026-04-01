@@ -90,6 +90,29 @@ export class SkillRegistry {
     }
   }
 
+  /**
+   * Read raw SKILL.md and script files for a skill, used by the export endpoint.
+   */
+  getSkillFiles(skillName: string): { skillMd: string; scripts: Record<string, string> } | undefined {
+    const skill = this.skills.get(skillName);
+    if (!skill) return undefined;
+
+    const skillMd = fs.readFileSync(path.join(skill.dirPath, 'SKILL.md'), 'utf-8');
+    const scripts: Record<string, string> = {};
+
+    const scriptsDir = path.join(skill.dirPath, 'scripts');
+    if (fs.existsSync(scriptsDir)) {
+      for (const file of fs.readdirSync(scriptsDir)) {
+        const filePath = path.join(scriptsDir, file);
+        if (fs.statSync(filePath).isFile()) {
+          scripts[file] = fs.readFileSync(filePath, 'utf-8');
+        }
+      }
+    }
+
+    return { skillMd, scripts };
+  }
+
   getRatingStore(): RatingStore {
     return this.ratingStore;
   }

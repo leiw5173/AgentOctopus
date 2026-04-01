@@ -420,3 +420,78 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 | 3.6 | `POST /agent/feedback` succeeds | ☐ |
 | 3.7 | `POST /agent/feedback` 400 on missing field | ☐ |
 | 3.8 | Gateway unit tests — 10 green | ☐ |
+
+## Phase 4 — Deployment & Skill Sync
+
+### 4.1 GET /agent/skills/export
+
+```bash
+curl -s http://localhost:3002/agent/skills/export | jq '.skills | length'
+```
+
+**Expected:** Returns number of skills (e.g., `3`), each with `name`, `version`, `skillMd`, `scripts` fields.
+
+---
+
+### 4.2 POST /agent/sync — sync from cloud
+
+Start a cloud instance on port 3002, then in a separate terminal start a local instance on port 3003:
+
+```bash
+# Cloud instance
+DEPLOY_MODE=cloud AGENT_GATEWAY_PORT=3002 node packages/gateway/dist/bin/start-agent-gateway.js
+
+# Local instance (separate terminal, empty registry)
+DEPLOY_MODE=local AGENT_GATEWAY_PORT=3003 REGISTRY_PATH=/tmp/octopus-test-skills node packages/gateway/dist/bin/start-agent-gateway.js
+```
+
+Trigger sync:
+```bash
+curl -s -X POST http://localhost:3003/agent/sync \
+  -H 'Content-Type: application/json' \
+  -d '{"cloudUrl": "http://localhost:3002"}' | jq .
+```
+
+**Expected:** `{ "success": true, "added": ["weather", "translation", "ip-lookup"], "updated": [], "skipped": [], "errors": [] }`
+
+---
+
+### 4.3 CLI sync
+
+```bash
+node apps/cli/dist/index.js sync --cloud-url http://localhost:3002
+```
+
+**Expected:** Output shows added/updated/skipped skills.
+
+---
+
+### 4.4 Docker build (cloud)
+
+```bash
+docker compose --profile cloud build
+```
+
+**Expected:** Build completes without errors.
+
+---
+
+### 4.5 Docker build (local)
+
+```bash
+docker compose --profile local build
+```
+
+**Expected:** Build completes without errors.
+
+---
+
+## Pass / Fail Checklist (continued)
+
+| # | Test | Pass |
+|---|---|---|
+| 4.1 | `GET /agent/skills/export` returns full skill data | ☐ |
+| 4.2 | `POST /agent/sync` syncs skills from cloud | ☐ |
+| 4.3 | `octopus sync` CLI command works | ☐ |
+| 4.4 | Docker cloud build succeeds | ☐ |
+| 4.5 | Docker local build succeeds | ☐ |
