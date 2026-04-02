@@ -50,6 +50,26 @@ npm install @agentoctopus/core      # router + executor + LLM client
 npm install @agentoctopus/cli       # CLI only
 ```
 
+## Quick Start (global install)
+
+```bash
+# Install globally
+npm install -g agentoctopus
+
+# Run the interactive setup wizard
+octopus onboard
+
+# Start the gateway server
+octopus start
+# → Agent gateway on http://localhost:3002/agent/health
+```
+
+```bash
+# Or use the CLI directly
+octopus ask "translate hello to French"
+octopus list
+```
+
 ## Quick Start (from source)
 
 ```bash
@@ -59,15 +79,10 @@ pnpm install
 # Run the interactive setup wizard
 pnpm exec octopus onboard
 
-# Start the full service
+# Start the gateway server
 pnpm exec octopus start
+# → Agent gateway on http://localhost:3002/agent/health
 ```
-
-This starts:
-
-- Web UI + Chat on `http://localhost:3000`
-- Skill Marketplace on `http://localhost:3000/marketplace`
-- Agent gateway on `http://localhost:3002`
 
 ```bash
 # Or use the CLI directly
@@ -96,13 +111,13 @@ If you run `octopus ask` or `octopus start` without a `.env` file, the wizard la
 
 ## REST API
 
-Start the service and call the API:
+Start the gateway and call the API:
 
 ```bash
-pnpm exec octopus start
+octopus start
 
 # Route a query
-curl -X POST http://localhost:3000/api/ask \
+curl -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
   -d '{"query": "translate hello to French"}'
 # → { "success": true, "skill": "translation", "confidence": 0.97, "response": "Bonjour" }

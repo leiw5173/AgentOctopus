@@ -404,6 +404,8 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 | 1.4 | CLI IP lookup returns geolocation | ☐ |
 | 1.5 | `ratings.json` updated after feedback | ☐ |
 | 1.6 | `pnpm test` — 35 tests all green | ☐ |
+| 1.7 | `octopus start` (global install, outside repo) starts gateway on :3002 without error | ☐ |
+| 1.8 | `curl http://localhost:3002/agent/health` returns JSON with skill count after `octopus start` | ☐ |
 | 2.1 | `POST /api/ask` weather | ☐ |
 | 2.2 | `POST /api/ask` translation | ☐ |
 | 2.3 | `POST /api/ask` IP lookup | ☐ |

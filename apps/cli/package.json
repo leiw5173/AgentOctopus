@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/cli",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "AgentOctopus CLI — route natural language queries to skills via `octopus ask`",
   "type": "module",
   "bin": {
@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@agentoctopus/core": "workspace:*",
+    "@agentoctopus/gateway": "workspace:*",
     "@agentoctopus/registry": "workspace:*",
     "@inquirer/prompts": "^8.3.2",
     "chalk": "^5.3.0",
