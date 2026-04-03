@@ -24,7 +24,8 @@ export class SkillRegistry {
   }
 
   async load(): Promise<void> {
-    const pattern = path.join(this.skillsDir, '**', 'SKILL.md');
+    // glob requires forward slashes on all platforms (including Windows)
+    const pattern = this.skillsDir.replace(/\\/g, '/') + '/**/SKILL.md';
     const files = await glob(pattern);
 
     for (const file of files) {
