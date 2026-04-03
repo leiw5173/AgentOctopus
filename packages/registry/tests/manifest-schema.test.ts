@@ -39,4 +39,21 @@ describe('SkillManifestSchema', () => {
     const parsed = SkillManifestSchema.parse(raw);
     expect(parsed.credentials).toBeUndefined();
   });
+
+  it('defaults credential required to true when omitted', () => {
+    const parsed = SkillManifestSchema.parse({
+      name: 'x-search',
+      description: 'Search X',
+      credentials: [{ key: 'XAI_API_KEY', label: 'xAI API Key' }],
+    });
+    expect(parsed.credentials![0]!.required).toBe(true);
+  });
+
+  it('rejects credential with invalid key format', () => {
+    expect(() => SkillManifestSchema.parse({
+      name: 'test',
+      description: 'test',
+      credentials: [{ key: 'invalid key with spaces', label: 'label' }],
+    })).toThrowError();
+  });
 });

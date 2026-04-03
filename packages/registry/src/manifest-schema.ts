@@ -4,6 +4,12 @@ export const AuthSchema = z.enum(['none', 'api_key', 'oauth', 'bearer']);
 export const AdapterSchema = z.enum(['http', 'mcp', 'subprocess', 'openai']);
 export const HostingSchema = z.enum(['cloud', 'local', 'both']);
 
+const CredentialSchema = z.object({
+  key: z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'credential key must be a valid env-var name (e.g. XAI_API_KEY)'),
+  label: z.string(),
+  required: z.boolean().default(true),
+});
+
 export const SkillManifestSchema = z.object({
   name: z.string(),
   description: z.string(),
@@ -20,14 +26,10 @@ export const SkillManifestSchema = z.object({
   enabled: z.boolean().default(true),
   // optional LLM-based skill (no endpoint, uses system LLM)
   llm_powered: z.boolean().default(false),
-  credentials: z.array(z.object({
-    key: z.string(),
-    label: z.string(),
-    required: z.boolean().default(true),
-  })).optional(),
+  credentials: z.array(CredentialSchema).optional(),
 });
 
 export type SkillManifest = z.infer<typeof SkillManifestSchema>;
 export type Adapter = z.infer<typeof AdapterSchema>;
 export type Auth = z.infer<typeof AuthSchema>;
-export type SkillCredential = { key: string; label: string; required: boolean };
+export type SkillCredential = z.infer<typeof CredentialSchema>;
