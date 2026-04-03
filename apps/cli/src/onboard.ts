@@ -2,6 +2,8 @@ import { input, select, confirm, checkbox, password } from '@inquirer/prompts';
 import chalk from 'chalk';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { loadOctopusConfig, saveOctopusConfig, getDefaultHome } from './config.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +27,12 @@ interface OnboardConfig {
   disabledSkills: string[];
 }
 
+interface DiscoveredSkill {
+  name: string;
+  description: string;
+  credentials: Array<{ key: string; label: string; required: boolean }>;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function printBanner() {
@@ -44,11 +52,10 @@ function printStep(step: number, total: number, title: string) {
   console.log('');
 }
 
-function discoverSkills(rootDir: string): Array<{ name: string; description: string }> {
-  const skillsDir = path.join(rootDir, 'registry', 'skills');
+function discoverSkills(skillsDir: string): DiscoveredSkill[] {
   if (!fs.existsSync(skillsDir)) return [];
 
-  const skills: Array<{ name: string; description: string }> = [];
+  const skills: DiscoveredSkill[] = [];
 
   for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -59,18 +66,83 @@ function discoverSkills(rootDir: string): Array<{ name: string; description: str
     const content = fs.readFileSync(skillMdPath, 'utf8');
     const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
     let description = entry.name;
+    let credentials: Array<{ key: string; label: string; required: boolean }> = [];
 
     if (fmMatch) {
-      const descLine = fmMatch[1]!.split('\n').find((l) => l.startsWith('description:'));
+      const lines = fmMatch[1]!.split('\n');
+      const descLine = lines.find((l) => l.startsWith('description:'));
       if (descLine) {
         description = descLine.slice('description:'.length).trim();
       }
+      // Parse credentials block (YAML list)
+      const credStart = lines.findIndex((l) => l.trim() === 'credentials:');
+      if (credStart !== -1) {
+        for (let i = credStart + 1; i < lines.length; i++) {
+          const line = lines[i]!;
+          if (!line.startsWith('  -') && !line.startsWith('    ')) break;
+          const keyMatch = line.match(/key:\s*["']?([^"'\n]+)["']?/);
+          const labelMatch = line.match(/label:\s*["']?([^"'\n]+)["']?/);
+          const requiredMatch = line.match(/required:\s*(true|false)/);
+          if (keyMatch && labelMatch) {
+            credentials.push({
+              key: keyMatch[1]!.trim(),
+              label: labelMatch[1]!.trim(),
+              required: requiredMatch ? requiredMatch[1] === 'true' : true,
+            });
+          }
+        }
+      }
     }
 
-    skills.push({ name: entry.name, description });
+    skills.push({ name: entry.name, description, credentials });
   }
 
   return skills;
+}
+
+function getBundledSkillsDir(): string {
+  const __dir = path.dirname(fileURLToPath(import.meta.url));
+  return path.join(__dir, '..', 'skills');
+}
+
+async function copyBundledSkills(targetSkillsDir: string): Promise<{ copied: string[]; skipped: string[] }> {
+  const bundledDir = getBundledSkillsDir();
+  const copied: string[] = [];
+  const skipped: string[] = [];
+
+  if (!fs.existsSync(bundledDir)) {
+    return { copied, skipped };
+  }
+
+  for (const entry of fs.readdirSync(bundledDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const src = path.join(bundledDir, entry.name);
+    const dst = path.join(targetSkillsDir, entry.name);
+
+    if (fs.existsSync(dst)) {
+      skipped.push(entry.name);
+      continue;
+    }
+
+    fs.mkdirSync(dst, { recursive: true });
+    copyDir(src, dst);
+    copied.push(entry.name);
+  }
+
+  return { copied, skipped };
+}
+
+function copyDir(src: string, dst: string): void {
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const dstPath = path.join(dst, entry.name);
+    if (entry.isDirectory()) {
+      fs.mkdirSync(dstPath, { recursive: true });
+      copyDir(srcPath, dstPath);
+    } else {
+      fs.copyFileSync(srcPath, dstPath);
+    }
+  }
 }
 
 function generateEnvContent(config: OnboardConfig): string {
@@ -148,9 +220,37 @@ function generateEnvContent(config: OnboardConfig): string {
 export async function runOnboarding(rootDir?: string): Promise<void> {
   const root = rootDir || process.env.OCTOPUS_ROOT || process.cwd();
   const envPath = path.join(root, '.env');
-  const totalSteps = 5;
+  const totalSteps = 6;
 
   printBanner();
+
+  // ── Step 0: Skills Directory ────────────────────────────────────────────
+  printStep(0, totalSteps, 'Skills Directory');
+
+  const defaultSkillsDir = path.join(getDefaultHome(), 'skills');
+
+  const chosenSkillsDir = await input({
+    message: 'Where should AgentOctopus store your skills?',
+    default: defaultSkillsDir,
+  });
+
+  const resolvedSkillsDir = path.resolve(chosenSkillsDir);
+  fs.mkdirSync(resolvedSkillsDir, { recursive: true });
+
+  console.log(chalk.gray('\n  Copying bundled skills...'));
+  const { copied, skipped } = await copyBundledSkills(resolvedSkillsDir);
+
+  if (copied.length > 0) {
+    console.log(chalk.green(`  Installed: ${copied.join(', ')}`));
+  }
+  if (skipped.length > 0) {
+    console.log(chalk.gray(`  Already exists (skipped): ${skipped.join(', ')}`));
+  }
+  console.log('');
+
+  // Save config early so bootstrap() can find skills
+  const ratingsPath = path.join(getDefaultHome(), 'ratings.json');
+  saveOctopusConfig({ skillsDir: resolvedSkillsDir, ratingsPath, credentials: {} });
 
   // Check if .env already exists
   if (fs.existsSync(envPath)) {
@@ -334,21 +434,20 @@ export async function runOnboarding(rootDir?: string): Promise<void> {
     }
   }
 
-  // ── Step 4: Skill Selection ────────────────────────────────────────────
+  // ── Step 5: Skill Selection ────────────────────────────────────────────
+  printStep(5, totalSteps, 'Skill Selection');
 
-  printStep(4, totalSteps, 'Skill Selection');
-
-  const availableSkills = discoverSkills(root);
+  const availableSkills = discoverSkills(resolvedSkillsDir);
 
   if (availableSkills.length === 0) {
-    console.log(chalk.gray('  No skills found in registry. Skipping skill selection.'));
-    console.log(chalk.gray('  You can install skills later with: ') + chalk.yellow('octopus add <skill>'));
+    console.log(chalk.gray('  No skills found. Skipping skill selection.'));
+    console.log(chalk.gray('  Install skills later with: ') + chalk.yellow('octopus skill add <skill>'));
   } else {
     const enabledSkills = await checkbox({
       message: 'Select skills to enable:',
       choices: availableSkills.map((s) => ({
         value: s.name,
-        name: `${s.name} — ${chalk.gray(s.description)}`,
+        name: `${s.name}${s.credentials.length > 0 ? ' 🔑' : ''} — ${chalk.gray(s.description)}`,
         checked: true,
       })),
     });
@@ -356,11 +455,35 @@ export async function runOnboarding(rootDir?: string): Promise<void> {
     config.disabledSkills = availableSkills
       .map((s) => s.name)
       .filter((name) => !enabledSkills.includes(name));
+
+    // Prompt for credentials of enabled skills that need them
+    const collectedCredentials: Record<string, string> = {};
+    for (const skill of availableSkills) {
+      if (config.disabledSkills.includes(skill.name)) continue;
+      for (const cred of skill.credentials) {
+        if (collectedCredentials[cred.key]) continue;
+        console.log('');
+        console.log(chalk.cyan(`  Skill "${skill.name}" requires an API key:`));
+        const value = await password({
+          message: `  ${cred.label}:`,
+          mask: '*',
+          validate: cred.required ? (v) => (v.length > 0 ? true : 'This key is required') : undefined,
+        });
+        if (value) collectedCredentials[cred.key] = value;
+      }
+    }
+
+    // Persist collected credentials into octopus.json
+    if (Object.keys(collectedCredentials).length > 0) {
+      const existing = loadOctopusConfig() ?? { skillsDir: resolvedSkillsDir, ratingsPath, credentials: {} };
+      existing.credentials = { ...existing.credentials, ...collectedCredentials };
+      saveOctopusConfig(existing);
+    }
   }
 
-  // ── Step 5: Review & Save ──────────────────────────────────────────────
+  // ── Step 6: Review & Save ──────────────────────────────────────────────
 
-  printStep(5, totalSteps, 'Review & Save');
+  printStep(6, totalSteps, 'Review & Save');
 
   console.log(chalk.white.bold('  Configuration Summary:'));
   console.log('');
@@ -396,7 +519,7 @@ export async function runOnboarding(rootDir?: string): Promise<void> {
   fs.writeFileSync(envPath, envContent, 'utf8');
 
   console.log('');
-  console.log(chalk.green.bold('  ✅ Configuration saved to .env'));
+  console.log(chalk.green.bold('  Configuration saved to .env'));
   console.log('');
   console.log(chalk.gray('  Next steps:'));
   console.log(chalk.white('    1. ') + chalk.cyan('octopus ask "translate hello to French"') + chalk.gray('  — test routing'));
@@ -417,7 +540,7 @@ export async function ensureOnboarded(rootDir?: string): Promise<boolean> {
     return true;
   }
 
-  console.log(chalk.yellow('\n  ⚠  No .env file found. Let\'s set up AgentOctopus first.\n'));
+  console.log(chalk.yellow('\n  No .env file found. Let\'s set up AgentOctopus first.\n'));
 
   const runSetup = await confirm({
     message: 'Run setup wizard now?',
