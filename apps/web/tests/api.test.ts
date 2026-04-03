@@ -17,7 +17,10 @@ vi.mock('@agentoctopus/core', () => ({
       adapterResult: { success: true },
       formattedOutput: 'mock API output'
     })
-  }))
+  })),
+  createChatClient: vi.fn().mockReturnValue({
+    chat: vi.fn().mockResolvedValue('mock direct answer')
+  })
 }));
 
 // Mock @agentoctopus/registry
