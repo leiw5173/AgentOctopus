@@ -19,4 +19,24 @@ describe('SkillManifestSchema', () => {
     const raw = { name: 'test-skill' };
     expect(() => SkillManifestSchema.parse(raw)).toThrowError();
   });
+
+  it('parses credentials field', () => {
+    const raw = {
+      name: 'x-search',
+      description: 'Search X',
+      credentials: [
+        { key: 'XAI_API_KEY', label: 'xAI API Key', required: true },
+      ],
+    };
+    const parsed = SkillManifestSchema.parse(raw);
+    expect(parsed.credentials).toHaveLength(1);
+    expect(parsed.credentials![0]!.key).toBe('XAI_API_KEY');
+    expect(parsed.credentials![0]!.required).toBe(true);
+  });
+
+  it('accepts manifest without credentials (optional)', () => {
+    const raw = { name: 'weather', description: 'Weather skill' };
+    const parsed = SkillManifestSchema.parse(raw);
+    expect(parsed.credentials).toBeUndefined();
+  });
 });

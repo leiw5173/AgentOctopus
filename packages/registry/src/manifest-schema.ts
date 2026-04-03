@@ -20,8 +20,14 @@ export const SkillManifestSchema = z.object({
   enabled: z.boolean().default(true),
   // optional LLM-based skill (no endpoint, uses system LLM)
   llm_powered: z.boolean().default(false),
+  credentials: z.array(z.object({
+    key: z.string(),
+    label: z.string(),
+    required: z.boolean().default(true),
+  })).optional(),
 });
 
 export type SkillManifest = z.infer<typeof SkillManifestSchema>;
 export type Adapter = z.infer<typeof AdapterSchema>;
 export type Auth = z.infer<typeof AuthSchema>;
+export type SkillCredential = { key: string; label: string; required: boolean };
