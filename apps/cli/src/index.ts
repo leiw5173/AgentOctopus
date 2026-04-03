@@ -76,12 +76,25 @@ program
  */
 async function bootstrap() {
   const octopusConfig = loadOctopusConfig();
+
+  // Only honour REGISTRY_PATH / RATINGS_PATH when they are absolute paths or
+  // actually exist on disk — relative paths from a stale .env (e.g. the
+  // ./registry/skills default written by older CLI versions) would otherwise
+  // shadow the user-configured octopus.json skillsDir.
+  const rawRegistryPath = process.env.REGISTRY_PATH;
+  const resolvedRegistryPath = rawRegistryPath ? path.resolve(rawRegistryPath) : undefined;
+  const useEnvRegistry = resolvedRegistryPath && fs.existsSync(resolvedRegistryPath);
+
+  const rawRatingsPath = process.env.RATINGS_PATH;
+  const resolvedRatingsPath = rawRatingsPath ? path.resolve(rawRatingsPath) : undefined;
+  const useEnvRatings = resolvedRatingsPath && fs.existsSync(resolvedRatingsPath);
+
   const skillsDir =
-    process.env.REGISTRY_PATH ||
+    (useEnvRegistry ? resolvedRegistryPath : undefined) ||
     octopusConfig?.skillsDir ||
     path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'skills');
   const ratingsPath =
-    process.env.RATINGS_PATH ||
+    (useEnvRatings ? resolvedRatingsPath : undefined) ||
     octopusConfig?.ratingsPath ||
     path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'ratings.json');
 
