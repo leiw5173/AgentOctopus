@@ -29,6 +29,9 @@ importers:
       '@agentoctopus/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@agentoctopus/gateway':
+        specifier: workspace:*
+        version: link:../../packages/gateway
       '@agentoctopus/registry':
         specifier: workspace:*
         version: link:../../packages/registry

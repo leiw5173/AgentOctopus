@@ -1,4 +1,6 @@
-import { App, type AppOptions } from '@slack/bolt';
+import boltPkg from '@slack/bolt';
+const { App } = boltPkg;
+type AppOptions = ConstructorParameters<typeof App>[0];
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 
