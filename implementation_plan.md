@@ -294,6 +294,15 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] Self-service key registration endpoint (`POST /agent/register`).
 - [x] CORS configuration and admin key management endpoints.
 
+### Phase 8 — Bundled Skills & Skill Authoring ✅ Complete
+- [x] Four built-in skills (weather, translation, ip-lookup, x-search) bundled inside `@agentoctopus/cli` and copied to `~/.agentoctopus/skills/` during `octopus onboard`.
+- [x] `octopus onboard` Step 0 copies bundled skills before LLM/env config steps.
+- [x] Credential prompts for skills that require API keys (x-search → `XAI_API_KEY`); stored in `~/.agentoctopus/octopus.json`.
+- [x] `bootstrap()` reads skills directory and config from `~/.agentoctopus/octopus.json`.
+- [x] `octopus skill create` — AI-assisted wizard: Q&A → LLM-generated `SKILL.md` → review/regenerate/accept flow.
+- [x] `octopus skill create --template` — blank scaffold (`SKILL.md` + `scripts/invoke.js`) with no prompts.
+- [x] `octopus skill list` alias for `octopus list`.
+
 ### Phase 7 — Payment & Billing (Planned)
 - [ ] Cloudflare Tunnel for HTTPS on cloud gateway.
 - [ ] Stripe integration for Pro/Enterprise subscriptions.

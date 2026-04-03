@@ -497,3 +497,93 @@ docker compose --profile local build
 | 4.3 | `octopus sync` CLI command works | ☐ |
 | 4.4 | Docker cloud build succeeds | ☐ |
 | 4.5 | Docker local build succeeds | ☐ |
+
+## Phase 5 — Bundled Skills & Skill Creation
+
+### 5.1 `octopus onboard` — bundled skills copied
+
+Run the onboarding wizard and confirm all four bundled skills appear in the target skills directory:
+
+```bash
+octopus onboard
+# Follow prompts; accept default skills directory (~/.agentoctopus/skills/)
+ls ~/.agentoctopus/skills/
+```
+
+**Expected:** Directories for `weather`, `translation`, `ip-lookup`, and `x-search` are present, each containing a `SKILL.md`.
+
+---
+
+### 5.2 `octopus onboard` — credential prompt for x-search
+
+Re-run onboarding, enable `x-search` in the skill selection step, and enter a dummy or real `XAI_API_KEY`:
+
+```bash
+octopus onboard
+# Enable x-search when prompted; enter an API key value
+cat ~/.agentoctopus/octopus.json
+```
+
+**Expected:** `octopus.json` contains an entry for `XAI_API_KEY`.
+
+---
+
+### 5.3 `octopus skill create --template`
+
+```bash
+octopus skill create --template
+```
+
+**Expected:**
+- No prompts shown.
+- A `SKILL.md` and `scripts/invoke.js` scaffold are written to `<skillsDir>/my-skill/` (or the name chosen).
+- Both files contain placeholder content ready to fill in.
+
+---
+
+### 5.4 `octopus skill create` (AI wizard)
+
+```bash
+octopus skill create
+```
+
+**Expected:**
+- Wizard prompts for skill name, description, and other details.
+- LLM generates a `SKILL.md` manifest; content is displayed for review.
+- On confirming "Yes", files are written to the skills directory.
+- Option to regenerate with additional notes is available.
+
+---
+
+### 5.5 `octopus skill list`
+
+```bash
+octopus skill list
+```
+
+**Expected:** Output is equivalent to `octopus list` — lists all skills in the active skills directory with names, ratings, adapter type, and invocation count.
+
+---
+
+### 5.6 `bootstrap()` reads from `octopus.json`
+
+After completing `octopus onboard`, run a query that exercises the bundled skills directory:
+
+```bash
+octopus ask "weather in Tokyo"
+```
+
+**Expected:** The query routes to the `weather` skill loaded from `~/.agentoctopus/skills`, not from the repo `registry/skills/` directory.
+
+---
+
+## Pass / Fail Checklist (Phase 5)
+
+| # | Test | Pass |
+|---|---|---|
+| 5.1 | `octopus onboard` — Step 0 copies bundled skills | ☐ |
+| 5.2 | `octopus onboard` — credential prompt for x-search saves `XAI_API_KEY` to `octopus.json` | ☐ |
+| 5.3 | `octopus skill create --template` writes `SKILL.md` + `scripts/invoke.js` scaffold | ☐ |
+| 5.4 | `octopus skill create` (AI wizard) prompts, generates, and writes `SKILL.md` on "Yes" | ☐ |
+| 5.5 | `octopus skill list` shows same output as `octopus list` | ☐ |
+| 5.6 | After `octopus onboard`, `octopus ask "weather in Tokyo"` uses `~/.agentoctopus/skills` | ☐ |

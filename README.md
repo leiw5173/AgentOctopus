@@ -443,6 +443,55 @@ adapter: http
 ...
 ```
 
+## Bundled Skills & User Home
+
+When you install `@agentoctopus/cli` globally and run `octopus onboard`, the wizard copies four built-in skills to your chosen skills directory (default: `~/.agentoctopus/skills/`):
+
+| Skill | What it does | Requires |
+|---|---|---|
+| `weather` | Current weather for any city via wttr.in | Nothing |
+| `translation` | Text translation via MyMemory API | Nothing |
+| `ip-lookup` | IP/domain geolocation via ip-api.com | Nothing |
+| `x-search` | Search X (Twitter) posts via xAI Grok API | `XAI_API_KEY` |
+
+Skills that require API keys show a 🔑 during onboarding — the wizard prompts for them and stores them in `~/.agentoctopus/octopus.json`.
+
+### User home directory
+
+```
+~/.agentoctopus/
+  skills/          ← active skill registry (user-owned)
+  ratings.json     ← persisted ratings
+  octopus.json     ← machine-level config: skills dir path + API key credentials
+```
+
+To change the skills directory or update credentials, re-run `octopus onboard`.
+
+## Creating Skills
+
+### AI-assisted wizard
+
+```bash
+octopus skill create
+```
+
+Walks you through a short Q&A, then uses your configured LLM to generate a `SKILL.md` manifest. You can review, regenerate with notes, or fall back to a template. For API-based skills it also writes a `scripts/invoke.js` stub.
+
+### Template scaffold
+
+```bash
+octopus skill create --template
+```
+
+Writes a blank `SKILL.md` and `scripts/invoke.js` immediately — no prompts, no AI. Fill them in manually.
+
+### Installing from ClaWHub
+
+```bash
+octopus skill add <slug>       # install a community skill
+octopus skill search <query>   # find skills on clawhub.ai
+```
+
 ## Deployment
 
 AgentOctopus supports two deployment modes: **cloud** (centralized server for all users) and **local** (self-hosted, free, with skill sync from cloud).
