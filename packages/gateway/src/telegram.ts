@@ -1,4 +1,6 @@
-import { Telegraf, type Context } from 'telegraf';
+import telegrafPkg from 'telegraf';
+const { Telegraf } = telegrafPkg;
+type Context = import('telegraf').Context;
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 
