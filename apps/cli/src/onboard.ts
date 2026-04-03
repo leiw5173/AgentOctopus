@@ -202,11 +202,6 @@ function generateEnvContent(config: OnboardConfig): string {
     lines.push(`CLOUD_API_KEY=${config.cloudApiKey || ''}`);
   }
 
-  lines.push('');
-  lines.push('# Registry');
-  lines.push('REGISTRY_PATH=./registry/skills');
-  lines.push('RATINGS_PATH=./registry/ratings.json');
-
   if (config.disabledSkills.length > 0) {
     lines.push(`DISABLED_SKILLS=${config.disabledSkills.join(',')}`);
   }
