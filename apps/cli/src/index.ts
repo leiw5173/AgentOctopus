@@ -13,6 +13,7 @@ import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
 import { loadOctopusConfig } from './config.js';
+import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { fileURLToPath } from 'url';
 
 // Load env
@@ -413,6 +414,20 @@ program
 const skillCmd = program
   .command('skill')
   .description('Manage skills — create, install, remove, search, publish, list');
+
+skillCmd
+  .command('create')
+  .description('Create a new skill with AI assistance (or use --template for a blank scaffold)')
+  .option('--template', 'Skip AI and write a blank scaffold instead')
+  .action(async (options: { template?: boolean }) => {
+    if (options.template) {
+      await runSkillTemplate();
+    } else {
+      const onboarded = await ensureOnboarded();
+      if (!onboarded) return;
+      await runSkillCreateWizard();
+    }
+  });
 
 skillCmd
   .command('list')
