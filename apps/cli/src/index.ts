@@ -409,4 +409,60 @@ program
     }
   });
 
+// ── octopus skill <subcommand> ─────────────────────────────────────────────
+const skillCmd = program
+  .command('skill')
+  .description('Manage skills — create, install, remove, search, publish, list');
+
+skillCmd
+  .command('list')
+  .description('List all available skills')
+  .action(async () => {
+    await program.parseAsync(['', '', 'list'], { from: 'user' });
+  });
+
+skillCmd
+  .command('add <slug>')
+  .description('Install a skill from ClaWHub (clawhub.ai)')
+  .option('--version <version>', 'Install a specific version')
+  .option('--force', 'Overwrite existing skill')
+  .option('--registry <url>', 'Custom ClaWHub registry URL')
+  .action(async (slug: string, options: { version?: string; force?: boolean; registry?: string }) => {
+    const args = ['', '', 'add', slug];
+    if (options.version) args.push('--version', options.version);
+    if (options.force) args.push('--force');
+    if (options.registry) args.push('--registry', options.registry);
+    await program.parseAsync(args, { from: 'user' });
+  });
+
+skillCmd
+  .command('remove <name>')
+  .description('Remove an installed skill')
+  .action(async (name: string) => {
+    await program.parseAsync(['', '', 'remove', name], { from: 'user' });
+  });
+
+skillCmd
+  .command('search <query>')
+  .description('Search for skills on ClaWHub')
+  .option('--registry <url>', 'Custom ClaWHub registry URL')
+  .action(async (query: string, options: { registry?: string }) => {
+    const args = ['', '', 'search', query];
+    if (options.registry) args.push('--registry', options.registry);
+    await program.parseAsync(args, { from: 'user' });
+  });
+
+skillCmd
+  .command('publish [dir]')
+  .description('Publish a skill to the marketplace')
+  .option('--server <url>', 'Marketplace server URL', 'http://localhost:3000')
+  .option('--author <name>', 'Author name')
+  .action(async (dir: string | undefined, options: { server: string; author?: string }) => {
+    const args = ['', '', 'publish'];
+    if (dir) args.push(dir);
+    args.push('--server', options.server);
+    if (options.author) args.push('--author', options.author);
+    await program.parseAsync(args, { from: 'user' });
+  });
+
 program.parse();
