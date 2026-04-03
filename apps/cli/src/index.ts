@@ -12,6 +12,7 @@ import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
+import { loadOctopusConfig } from './config.js';
 import { fileURLToPath } from 'url';
 
 // Load env
@@ -73,9 +74,22 @@ program
  * Helper to bootstrap the core Octopus engine
  */
 async function bootstrap() {
-  const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-  const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
-  const ratingsPath = process.env.RATINGS_PATH || path.join(rootDir, 'registry', 'ratings.json');
+  const octopusConfig = loadOctopusConfig();
+  const skillsDir =
+    process.env.REGISTRY_PATH ||
+    octopusConfig?.skillsDir ||
+    path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'skills');
+  const ratingsPath =
+    process.env.RATINGS_PATH ||
+    octopusConfig?.ratingsPath ||
+    path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'ratings.json');
+
+  // Merge stored credentials into process.env so scripts/invoke.js can read them
+  if (octopusConfig?.credentials) {
+    for (const [key, value] of Object.entries(octopusConfig.credentials)) {
+      if (!process.env[key]) process.env[key] = value;
+    }
+  }
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
   await registry.load();
