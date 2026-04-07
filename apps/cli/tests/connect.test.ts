@@ -77,4 +77,18 @@ describe('extractOpenClawConfig', () => {
     const result = extractOpenClawConfig(tmpDir);
     expect(result!.model).toBe('openrouter/auto');
   });
+
+  it('uses provider-aware default baseUrl when models.json is absent', () => {
+    const agentDir = path.join(tmpDir, 'agents', 'main', 'agent');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, 'auth-profiles.json'),
+      JSON.stringify({ version: 1, profiles: { 'openrouter:default': { type: 'api_key', provider: 'openrouter', key: 'sk-or-test-999' } } })
+    );
+    // No models.json written
+
+    const result = extractOpenClawConfig(tmpDir);
+    expect(result).not.toBeNull();
+    expect(result!.baseUrl).toBe('https://openrouter.ai/api/v1');
+  });
 });

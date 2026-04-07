@@ -11,6 +11,7 @@ interface OpenClawAuthProfiles {
     provider: string;
     key: string;
   }>;
+  lastGood?: Record<string, string>;
 }
 
 interface OpenClawModels {
@@ -63,7 +64,11 @@ export function extractOpenClawConfig(openClawHome: string): OpenClawExtracted |
   } catch { /* optional */ }
 
   const profiles = authProfiles.profiles ?? {};
-  const entry = Object.values(profiles).find(p => p.key && p.provider);
+  // Prefer the "lastGood" active profile if present; fall back to first match.
+  // lastGood maps provider name → profile key (e.g. { openrouter: "openrouter:default" }).
+  const lastGood = authProfiles.lastGood ?? {};
+  const lastGoodKey = Object.values(lastGood).find(key => profiles[key]?.key && profiles[key]?.provider);
+  const entry = (lastGoodKey ? profiles[lastGoodKey] : undefined) ?? Object.values(profiles).find(p => p.key && p.provider);
   if (!entry) return null;
 
   const provider: 'openai' | 'gemini' | 'ollama' =
@@ -72,8 +77,23 @@ export function extractOpenClawConfig(openClawHome: string): OpenClawExtracted |
     entry.provider === 'ollama' ? 'ollama' :
     'openai';
 
-  const baseUrl = models.providers[entry.provider]?.baseUrl ?? 'https://api.openai.com/v1';
-  const model = mainConfig.agents?.defaults?.model?.primary ?? 'openrouter/auto';
+  // Provider-aware baseUrl defaults so Gemini/Ollama users get the right endpoint.
+  const providerDefaults: Record<string, string> = {
+    openrouter: 'https://openrouter.ai/api/v1',
+    openai: 'https://api.openai.com/v1',
+    gemini: 'https://generativelanguage.googleapis.com/v1beta',
+    ollama: 'http://localhost:11434',
+  };
+  const baseUrl = models.providers[entry.provider]?.baseUrl ?? providerDefaults[entry.provider] ?? 'https://api.openai.com/v1';
+
+  // Provider-aware model defaults.
+  const modelDefaults: Record<string, string> = {
+    openrouter: 'openrouter/auto',
+    openai: 'gpt-4o-mini',
+    gemini: 'gemini-1.5-flash',
+    ollama: 'llama3.2',
+  };
+  const model = mainConfig.agents?.defaults?.model?.primary ?? modelDefaults[entry.provider] ?? 'openrouter/auto';
 
   return { provider, apiKey: entry.key, baseUrl, model };
 }
@@ -111,7 +131,14 @@ export async function connectOpenClaw(): Promise<void> {
   credentials['OPENAI_API_KEY'] = extracted.apiKey;
   credentials['OPENAI_BASE_URL'] = extracted.baseUrl;
   credentials['EMBED_PROVIDER'] = extracted.provider;
-  credentials['EMBED_MODEL'] = 'text-embedding-3-small';
+  // Provider-aware embed model defaults.
+  const embedModelDefaults: Record<string, string> = {
+    openai: 'text-embedding-3-small',
+    openrouter: 'text-embedding-3-small',
+    gemini: 'text-embedding-004',
+    ollama: 'nomic-embed-text',
+  };
+  credentials['EMBED_MODEL'] = embedModelDefaults[extracted.provider] ?? 'text-embedding-3-small';
   credentials['EMBED_API_KEY'] = extracted.apiKey;
   credentials['EMBED_BASE_URL'] = extracted.baseUrl;
 
