@@ -577,6 +577,21 @@ octopus ask "weather in Tokyo"
 
 ---
 
+### 5.7 `octopus connect openclaw`
+
+```bash
+octopus connect openclaw
+```
+
+**Expected:**
+- Reads `~/.openclaw/agents/main/agent/auth-profiles.json`
+- Prints the found provider, model, and a key prefix (e.g., `sk-...`)
+- Writes all 8 credential keys to `~/.agentoctopus/octopus.json`
+
+> Requires OpenClaw installed with at least one auth profile configured.
+
+---
+
 ## Pass / Fail Checklist (Phase 5)
 
 | # | Test | Pass |
@@ -587,3 +602,4 @@ octopus ask "weather in Tokyo"
 | 5.4 | `octopus skill create` (AI wizard) prompts, generates, and writes `SKILL.md` on "Yes" | ☐ |
 | 5.5 | `octopus skill list` shows same output as `octopus list` | ☐ |
 | 5.6 | After `octopus onboard`, `octopus ask "weather in Tokyo"` uses `~/.agentoctopus/skills` | ☐ |
+| 5.7 | `octopus connect openclaw` reads auth profile, prints provider/model/key-prefix, writes 8 keys to `octopus.json` | ☐ |

@@ -27,6 +27,7 @@ User: "Translate hello to French"
 - **Rating system** — skills are ranked by user feedback; better ones win
 - **Skill marketplace** — built-in marketplace to publish, browse, and install community skills
 - **ClaWHub integration** — install skills from [clawhub.ai](https://clawhub.ai) with `octopus add`
+- **OpenClaw integration** — install AgentOctopus as an OpenClaw skill via `clawhub install agentoctopus`; import your OpenClaw LLM config with `octopus connect openclaw`
 - **Web UI** — chat interface with skills sidebar, dark/light mode, and marketplace browser
 - **Multi-channel** — CLI, REST API, IM bots (Slack/Discord/Telegram), agent-to-agent
 - **Hybrid execution** — skills run in cloud or locally
@@ -90,6 +91,22 @@ pnpm build
 pnpm exec octopus ask "translate hello to French"
 pnpm exec octopus list
 ```
+
+## OpenClaw Integration
+
+Install AgentOctopus as a skill in [OpenClaw](https://openclaw.ai):
+
+```bash
+clawhub install agentoctopus
+```
+
+Then run once to import your OpenClaw LLM config (no re-entry of API keys):
+
+```bash
+octopus connect openclaw
+```
+
+OpenClaw will now route queries to AgentOctopus via `octopus ask`. No server required.
 
 ## Onboarding
 
