@@ -165,7 +165,8 @@ program
 program
   .command('ask <query>')
   .description('Ask AgentOctopus to route your request to the best skill')
-  .action(async (query: string) => {
+  .option('--no-prompt', 'Skip the interactive feedback prompt (for programmatic use)')
+  .action(async (query: string, options: { prompt: boolean }) => {
     // Auto-trigger onboarding if .env is missing
     const onboarded = await ensureOnboarded();
     if (!onboarded) return;
@@ -209,17 +210,19 @@ program
         console.log(result.formattedOutput + '\n');
 
         // Ask for feedback
-        const rl = readline.createInterface({
-          input: process.stdin,
-          output: process.stdout,
-        });
+        if (options.prompt !== false) {
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
 
-        rl.question(chalk.yellow('Was this helpful? (y/n): '), (answer) => {
-          const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
-          engine.registry.recordFeedback(skill.manifest.name, isPositive);
-          console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
-          rl.close();
-        });
+          rl.question(chalk.yellow('Was this helpful? (y/n): '), (answer) => {
+            const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+            engine.registry.recordFeedback(skill.manifest.name, isPositive);
+            console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
+            rl.close();
+          });
+        }
       } else {
         spinner.fail('Execution failed\n');
         console.error(chalk.red('Error:'), result.adapterResult.error);

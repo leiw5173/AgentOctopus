@@ -28,13 +28,13 @@ try {
   let result;
 
   if (bin) {
-    result = execFileSync(bin, ['ask', query], {
+    result = execFileSync(bin, ['ask', '--no-prompt', query], {
       encoding: 'utf8',
       env: process.env,
       timeout: 60000,
     });
   } else {
-    result = execFileSync('npx', ['--yes', '@agentoctopus/cli', 'ask', query], {
+    result = execFileSync('npx', ['--yes', '@agentoctopus/cli', 'ask', '--no-prompt', query], {
       encoding: 'utf8',
       env: process.env,
       timeout: 90000,
