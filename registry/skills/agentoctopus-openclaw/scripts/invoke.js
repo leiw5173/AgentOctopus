@@ -3,7 +3,7 @@
  * AgentOctopus OpenClaw skill — invokes `octopus ask` as a subprocess.
  * No server required. Uses the config written by `octopus connect openclaw`.
  */
-import { execFileSync } from 'child_process';
+const { execFileSync } = require('child_process');
 
 const input = JSON.parse(process.env.OCTOPUS_INPUT || '{}');
 const query = input.query || '';
@@ -13,13 +13,15 @@ if (!query) {
   process.exit(0);
 }
 
-// Resolve the octopus binary — prefer global install, fall back to npx
+// Resolve the octopus binary — prefer global install if it supports --no-prompt,
+// otherwise fall back to npx so we always get a version that has the flag.
 function findOctopusBin() {
   try {
-    execFileSync('octopus', ['--version'], { stdio: 'pipe' });
-    return 'octopus';
+    const help = execFileSync('octopus', ['ask', '--help'], { encoding: 'utf8', stdio: 'pipe' });
+    if (help.includes('--no-prompt')) return 'octopus';
+    return null; // global binary is too old, fall back to npx
   } catch {
-    return null; // will fall back to npx
+    return null;
   }
 }
 
