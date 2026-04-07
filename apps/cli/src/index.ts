@@ -14,6 +14,7 @@ import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
 import { loadOctopusConfig } from './config.js';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
+import { connectOpenClaw } from './connect.js';
 import { fileURLToPath } from 'url';
 
 // Load env
@@ -491,6 +492,20 @@ skillCmd
     args.push('--server', options.server);
     if (options.author) args.push('--author', options.author);
     await program.parseAsync(args, { from: 'user' });
+  });
+
+// ── octopus connect <target> ──────────────────────────────────────────────
+program
+  .command('connect <target>')
+  .description('Import LLM configuration from another AI tool (e.g. openclaw)')
+  .action(async (target: string) => {
+    if (target === 'openclaw') {
+      await connectOpenClaw();
+    } else {
+      console.error(chalk.red(`\n  Unknown connect target: "${target}"`));
+      console.error(chalk.gray('  Supported targets: openclaw\n'));
+      process.exitCode = 1;
+    }
   });
 
 program.parse();
