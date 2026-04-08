@@ -108,6 +108,14 @@ octopus connect openclaw
 
 OpenClaw will now route queries to AgentOctopus via `octopus ask`. No server required.
 
+### Updating an existing install
+
+```bash
+clawhub update agentoctopus
+npm update -g agentoctopus
+octopus connect openclaw   # re-run to refresh config
+```
+
 ## Onboarding
 
 First-time setup is guided by an interactive wizard:
