@@ -49,18 +49,20 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
     baseUrl: provider === 'openai' ? process.env.OPENAI_BASE_URL : process.env.OLLAMA_BASE_URL,
   };
 
-  const embedProvider = (process.env.EMBED_PROVIDER as LLMConfig['provider']) ?? provider;
-  const embedConfig: LLMConfig = {
-    provider: embedProvider,
-    model: process.env.EMBED_MODEL ?? 'text-embedding-3-small',
-    apiKey: process.env.EMBED_API_KEY ?? chatConfig.apiKey,
-    baseUrl: process.env.EMBED_BASE_URL ?? chatConfig.baseUrl,
-  };
-
   const rerankConfig: LLMConfig = {
-    ...embedConfig,
+    ...chatConfig,
     model: process.env.RERANK_MODEL ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
   };
+
+  const embedConfig: LLMConfig | undefined =
+    process.env.EMBED_PROVIDER && process.env.EMBED_API_KEY
+      ? {
+          provider: (process.env.EMBED_PROVIDER as LLMConfig['provider']),
+          model: process.env.EMBED_MODEL ?? 'text-embedding-3-small',
+          apiKey: process.env.EMBED_API_KEY,
+          baseUrl: process.env.EMBED_BASE_URL ?? chatConfig.baseUrl,
+        }
+      : undefined;
 
   const router = new Router(rerankConfig, embedConfig);
   await router.buildIndex(registry.getAll());
