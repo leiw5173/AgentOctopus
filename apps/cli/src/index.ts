@@ -117,13 +117,15 @@ async function bootstrap() {
     baseUrl: provider === 'openai' ? process.env.OPENAI_BASE_URL : process.env.OLLAMA_BASE_URL,
   };
 
-  const embedProvider = (process.env.EMBED_PROVIDER as 'openai' | 'gemini' | 'ollama') || provider;
-  const embedConfig: LLMConfig = {
-    provider: embedProvider,
-    model: process.env.EMBED_MODEL || 'text-embedding-3-small',
-    apiKey: process.env.EMBED_API_KEY || chatConfig.apiKey,
-    baseUrl: process.env.EMBED_BASE_URL || chatConfig.baseUrl,
-  };
+  const embedConfig: LLMConfig | undefined =
+    process.env.EMBED_PROVIDER && process.env.EMBED_API_KEY
+      ? {
+          provider: (process.env.EMBED_PROVIDER as 'openai' | 'gemini' | 'ollama'),
+          model: process.env.EMBED_MODEL || 'text-embedding-3-small',
+          apiKey: process.env.EMBED_API_KEY,
+          baseUrl: process.env.EMBED_BASE_URL || chatConfig.baseUrl,
+        }
+      : undefined;
 
   const router = new Router(chatConfig, embedConfig);
   const executor = new Executor(registry);
