@@ -70,3 +70,13 @@ AgentOctopus then chooses the best downstream installed skill automatically and 
 - "what's the weather in Tokyo"
 - "what country is 8.8.8.8 from"
 - "find the best skill for this request"
+
+## Updating
+
+To update an existing installation:
+
+```bash
+clawhub update agentoctopus
+npm update -g agentoctopus
+octopus connect openclaw
+```
