@@ -91,4 +91,16 @@ describe('extractOpenClawConfig', () => {
     expect(result).not.toBeNull();
     expect(result!.baseUrl).toBe('https://openrouter.ai/api/v1');
   });
+
+  it('sets rawProvider to the original provider name', () => {
+    writeOpenClawFiles(
+      { version: 1, profiles: { 'openrouter:default': { type: 'api', provider: 'openrouter', key: 'sk-test-key' } }, lastGood: { openrouter: 'openrouter:default' } },
+      { providers: { openrouter: { baseUrl: 'https://openrouter.ai/api/v1' } } }
+    );
+
+    const result = extractOpenClawConfig(tmpDir);
+    expect(result).not.toBeNull();
+    expect(result!.rawProvider).toBe('openrouter');
+    expect(result!.provider).toBe('openai'); // mapped
+  });
 });
