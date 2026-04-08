@@ -72,16 +72,20 @@ interface RoutingResultCandidate {
 export class Router {
   private index: VectorEntry[] = [];
   private chatClient: ChatClient;
-  private embedClient: EmbedClient;
+  private embedClient: EmbedClient | null;
 
-  constructor(chatConfig: LLMConfig, embedConfig: LLMConfig) {
+  constructor(chatConfig: LLMConfig, embedConfig?: LLMConfig) {
     this.chatClient = createChatClient(chatConfig);
-    this.embedClient = createEmbedClient(embedConfig);
+    this.embedClient = embedConfig ? createEmbedClient(embedConfig) : null;
   }
 
   async buildIndex(skills: LoadedSkill[]): Promise<void> {
     this.index = [];
     for (const skill of skills) {
+      if (!this.embedClient) {
+        this.index.push({ skill, embedding: [] });
+        continue;
+      }
       const text = skillToText(skill);
       try {
         const embedding = await this.embedClient.embed(text);
@@ -95,24 +99,37 @@ export class Router {
   async route(query: string, topK = 3): Promise<RoutingResult[]> {
     if (this.index.length === 0) return [];
 
-    let queryEmbedding: number[];
-    try {
-      queryEmbedding = await this.embedClient.embed(query);
-    } catch (err) {
-      console.error(`[Router] Failed to embed query: ${(err as Error).message || err}`);
-      return [];
+    const eligible = this.index.filter(({ skill }) => isSkillEligible(skill, query));
+    if (eligible.length === 0) return [];
+
+    let candidates: RoutingResultCandidate[];
+
+    const isLLMOnly = !this.embedClient || eligible.every(e => e.embedding.length === 0);
+
+    if (isLLMOnly) {
+      // No embed client or all embeddings empty — skip cosine scoring, use all eligible skills
+      candidates = eligible.map(({ skill }) => ({ skill, score: 1.0 }));
+    } else {
+      let queryEmbedding: number[] = [];
+      try {
+        queryEmbedding = await this.embedClient!.embed(query);
+      } catch (err) {
+        console.warn(`[Router] Failed to embed query, falling back to LLM-only: ${(err as Error).message || err}`);
+      }
+
+      if (queryEmbedding.length > 0) {
+        const scored = eligible.map(({ skill, embedding }) => {
+          const cosine = cosineSimilarity(queryEmbedding, embedding);
+          const ratingBoost = (skill.rating / 5) * RATING_WEIGHT;
+          return { skill, score: cosine + ratingBoost };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        candidates = scored.slice(0, topK);
+      } else {
+        candidates = eligible.map(({ skill }) => ({ skill, score: 1.0 }));
+      }
     }
 
-    const scored = this.index
-      .filter(({ skill }) => isSkillEligible(skill, query))
-      .map(({ skill, embedding }) => {
-        const cosine = cosineSimilarity(queryEmbedding, embedding);
-        const ratingBoost = (skill.rating / 5) * RATING_WEIGHT;
-        return { skill, score: cosine + ratingBoost };
-      });
-
-    scored.sort((a, b) => b.score - a.score);
-    const candidates = scored.slice(0, topK);
     if (candidates.length === 0) return [];
 
     const candidateList = candidates
