@@ -19,10 +19,10 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────
-  # Job 1: Lint & Type-check
+  # Job 1: Lint
   # ─────────────────────────────────────────────
-  lint-and-typecheck:
-    name: 🔍 Lint & Type-check
+  lint:
+    name: 🔍 Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -42,11 +42,6 @@ jobs:
 
       - name: Run linter (all workspaces)
         run: pnpm -r lint
-        # Continue even if some packages lack a lint script
-        continue-on-error: false
-
-      - name: Run TypeScript type-check (all workspaces)
-        run: pnpm -r exec tsc --noEmit
 
   # ─────────────────────────────────────────────
   # Job 2: Test
@@ -54,7 +49,7 @@ jobs:
   test:
     name: 🧪 Unit Tests
     runs-on: ubuntu-latest
-    needs: lint-and-typecheck
+    needs: lint
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -80,9 +75,9 @@ jobs:
   # Job 3: Build
   # ─────────────────────────────────────────────
   build:
-    name: 🔨 Build
+    name: 🔨 Build (+ Type-check)
     runs-on: ubuntu-latest
-    needs: [lint-and-typecheck, test]
+    needs: [lint, test]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
