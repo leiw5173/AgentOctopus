@@ -39,7 +39,7 @@ export async function POST(req: Request) {
     // Increment download count
     if (fs.existsSync(MARKETPLACE_INDEX)) {
       const index = JSON.parse(fs.readFileSync(MARKETPLACE_INDEX, 'utf8'));
-      const entry = index.find((s: any) => s.slug === slug);
+      const entry = index.find((s: { slug: string }) => s.slug === slug);
       if (entry) {
         entry.downloads = (entry.downloads || 0) + 1;
         fs.writeFileSync(MARKETPLACE_INDEX, JSON.stringify(index, null, 2));
@@ -50,7 +50,8 @@ export async function POST(req: Request) {
       success: true,
       message: `Skill "${slug}" installed to ${targetDir}. Restart the server to activate.`,
     });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
