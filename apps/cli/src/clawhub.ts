@@ -14,6 +14,10 @@ import { inflateRawSync } from 'zlib';
 const DEFAULT_REGISTRY = 'https://clawhub.ai';
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 2000;
+const AWESOME_README_URL =
+  'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/README.md';
+const AWESOME_CATEGORY_BASE =
+  'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/categories/';
 
 // --- Types matching the actual ClaWHub v1 API response ---
 
@@ -299,4 +303,75 @@ function parseZipEntries(buffer: Buffer): ZipEntry[] {
   }
 
   return entries;
+}
+
+/**
+ * Fetch skill slugs from the awesome-openclaw-skills GitHub repository.
+ *
+ * Parses `clawskills.sh/skills/<slug>` URLs from markdown files.
+ * - No options → fetches README to discover category files, then fetches each one.
+ * - category provided → fetches that single category file only.
+ * - rawUrl provided → fetches that URL directly (used in tests).
+ */
+export async function fetchAwesomeSlugs(options?: {
+  category?: string;
+  rawUrl?: string;
+}): Promise<string[]> {
+  const slugSet = new Set<string>();
+  const SKILL_URL_RE = /https:\/\/clawskills\.sh\/skills\/([\w.%-]+)/g;
+
+  const parseMarkdown = (text: string): void => {
+    SKILL_URL_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = SKILL_URL_RE.exec(text)) !== null) {
+      slugSet.add(m[1]);
+    }
+  };
+
+  if (options?.rawUrl) {
+    const res = await fetchWithRetry(options.rawUrl);
+    if (!res.ok) throw new Error(`Failed to fetch ${options.rawUrl} (${res.status})`);
+    parseMarkdown(await res.text());
+  } else if (options?.category) {
+    // Normalise category name to kebab-case filename
+    const filename =
+      options.category.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') + '.md';
+    const url = `${AWESOME_CATEGORY_BASE}${filename}`;
+    const res = await fetchWithRetry(url);
+    if (!res.ok) {
+      throw new Error(
+        `Category "${options.category}" not found (${res.status}). ` +
+        `Check https://github.com/VoltAgent/awesome-openclaw-skills/tree/main/categories for valid names.`,
+      );
+    }
+    parseMarkdown(await res.text());
+  } else {
+    // Fetch README to discover category file names, then fetch each category
+    const readmeRes = await fetchWithRetry(AWESOME_README_URL);
+    if (!readmeRes.ok) {
+      throw new Error(`Failed to fetch awesome-openclaw-skills README (${readmeRes.status})`);
+    }
+    const readme = await readmeRes.text();
+
+    // Extract category filenames linked in the README, e.g. categories/git-and-github.md
+    const catRe = /categories\/([\w-]+\.md)/g;
+    const catFiles: string[] = [];
+    let cm: RegExpExecArray | null;
+    while ((cm = catRe.exec(readme)) !== null) {
+      if (!catFiles.includes(cm[1])) catFiles.push(cm[1]);
+    }
+
+    if (catFiles.length === 0) {
+      // README doesn't list categories explicitly — parse slugs from the README itself
+      parseMarkdown(readme);
+    } else {
+      for (const file of catFiles) {
+        const res = await fetchWithRetry(`${AWESOME_CATEGORY_BASE}${file}`);
+        if (res.ok) parseMarkdown(await res.text());
+        // Silently skip category files that 404 — list may evolve
+      }
+    }
+  }
+
+  return Array.from(slugSet);
 }
