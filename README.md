@@ -26,7 +26,7 @@ User: "Translate hello to French"
 - **Confidence scoring** — normalized 0-1 confidence on every routing result
 - **Rating system** — skills are ranked by user feedback; better ones win
 - **Skill marketplace** — built-in marketplace to publish, browse, and install community skills
-- **ClaWHub integration** — install skills from [clawhub.ai](https://clawhub.ai) with `octopus add`
+- **ClaWHub integration** — install skills from [clawhub.ai](https://clawhub.ai) with `octopus add`; bulk-install the [awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills) curated list (5,000+ skills) with `octopus sync-awesome`
 - **OpenClaw integration** — install AgentOctopus as an OpenClaw skill via `clawhub install agentoctopus`; import your OpenClaw LLM config with `octopus connect openclaw`
 - **Web UI** — chat interface with skills sidebar, dark/light mode, and marketplace browser
 - **Multi-channel** — CLI, REST API, IM bots (Slack/Discord/Telegram), agent-to-agent

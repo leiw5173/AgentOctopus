@@ -468,7 +468,50 @@ node apps/cli/dist/index.js sync --cloud-url http://localhost:3002
 
 ---
 
-### 4.4 Docker build (cloud)
+### 4.4 octopus sync-awesome — dry run (no writes)
+
+```bash
+node apps/cli/dist/index.js sync-awesome --dry-run --limit 5
+```
+
+**Expected:** Prints up to 5 skill slugs prefixed with cyan color, then `Total: 5`. No new directories created under `registry/skills/`.
+
+---
+
+### 4.5 octopus sync-awesome — install with limit
+
+```bash
+node apps/cli/dist/index.js sync-awesome --limit 3
+```
+
+**Expected:** Installs 3 skills. Each creates a directory under `registry/skills/<slug>/` containing at minimum `SKILL.md` and `.clawhub-origin.json`. Final line shows `Installed: 3  Skipped: 0  Failed: 0`.
+
+---
+
+### 4.6 octopus sync-awesome — category filter
+
+```bash
+node apps/cli/dist/index.js sync-awesome --category git-and-github --dry-run
+```
+
+**Expected:** Lists only skills from the `git-and-github` category. Slug count is smaller than the full list.
+
+---
+
+### 4.7 octopus sync-awesome — skip already-installed
+
+Run sync-awesome twice without --force:
+
+```bash
+node apps/cli/dist/index.js sync-awesome --limit 2
+node apps/cli/dist/index.js sync-awesome --limit 2
+```
+
+**Expected:** Second run shows `Installed: 0  Skipped: 2  Failed: 0` and each line shows `(already installed, use --force to overwrite)`.
+
+---
+
+### 4.8 Docker build (cloud)
 
 ```bash
 docker compose --profile cloud build
@@ -478,7 +521,7 @@ docker compose --profile cloud build
 
 ---
 
-### 4.5 Docker build (local)
+### 4.9 Docker build (local)
 
 ```bash
 docker compose --profile local build
