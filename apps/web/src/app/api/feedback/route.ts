@@ -46,7 +46,8 @@ export async function POST(req: Request) {
       skillName,
       newRating: updatedSkill?.rating,
     });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

@@ -19,10 +19,10 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────
-  # Job 1: Lint & Type-check
+  # Job 1: Lint
   # ─────────────────────────────────────────────
-  lint-and-typecheck:
-    name: 🔍 Lint & Type-check
+  lint:
+    name: 🔍 Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -30,13 +30,11 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -44,62 +42,26 @@ jobs:
 
       - name: Run linter (all workspaces)
         run: pnpm -r lint
-        # Continue even if some packages lack a lint script
-        continue-on-error: false
-
-      - name: Run TypeScript type-check (all workspaces)
-        run: pnpm -r --if-present exec tsc --noEmit
 
   # ─────────────────────────────────────────────
-  # Job 2: Test
-  # ─────────────────────────────────────────────
-  test:
-    name: 🧪 Unit Tests
-    runs-on: ubuntu-latest
-    needs: lint-and-typecheck
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run tests (all workspaces)
-        run: pnpm -r test
-        env:
-          CI: true
-
-  # ─────────────────────────────────────────────
-  # Job 3: Build
+  # Job 2: Build (+ Type-check)
+  # Runs after lint so dist/ is ready for tests
   # ─────────────────────────────────────────────
   build:
-    name: 🔨 Build
+    name: 🔨 Build (+ Type-check)
     runs-on: ubuntu-latest
-    needs: [lint-and-typecheck, test]
+    needs: lint
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "pnpm"
 
       - name: Install dependencies
@@ -115,3 +77,37 @@ jobs:
           path: |
             packages/*/dist
           retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # Job 3: Test (needs build so dist/ exists)
+  # ─────────────────────────────────────────────
+  test:
+    name: 🧪 Unit Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Restore build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: packages
+
+      - name: Run tests (all workspaces)
+        run: pnpm -r test
+        env:
+          CI: true

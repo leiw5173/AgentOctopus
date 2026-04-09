@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 
 interface MarketplaceSkill {
   slug: string;
@@ -74,23 +75,23 @@ export default function MarketplacePage() {
       <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <a
+            <Link
               href="/"
               className="w-8 h-8 rounded-full bg-black dark:bg-white flex items-center justify-center text-white dark:text-black font-bold text-sm select-none"
             >
               O
-            </a>
+            </Link>
             <div>
               <h1 className="font-semibold text-sm text-black dark:text-white">Skill Marketplace</h1>
               <p className="text-xs text-zinc-400">Browse and install community skills</p>
             </div>
           </div>
-          <a
+          <Link
             href="/"
             className="text-xs px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition"
           >
             Back to Chat
-          </a>
+          </Link>
         </div>
       </header>
 
