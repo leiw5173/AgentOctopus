@@ -47,7 +47,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Type-check all packages
-        run: pnpm -r --if-present exec tsc --noEmit
+        run: pnpm -r exec tsc --noEmit
 
       - name: Run all tests
         run: pnpm -r test
