@@ -10,7 +10,7 @@ import readline from 'readline';
 import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
 import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
-import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
+import { installSkill, searchSkills, fetchSkillMeta, fetchAwesomeSlugs } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
 import { loadOctopusConfig } from './config.js';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
@@ -426,6 +426,88 @@ program
       }
     } catch (err) {
       spinner.fail(`Sync failed: ${(err as Error).message}`);
+    }
+  });
+
+program
+  .command('sync-awesome')
+  .description('Bulk-install skills from the curated awesome-openclaw-skills list (github.com/VoltAgent/awesome-openclaw-skills)')
+  .option('--category <name>', 'Install only skills from one category (e.g. "git-and-github")')
+  .option('--limit <n>', 'Maximum number of skills to install (useful for testing)', parseInt)
+  .option('--force', 'Overwrite already-installed skills')
+  .option('--dry-run', 'Preview slugs that would be installed without installing anything')
+  .option('--registry <url>', 'Custom ClaWHub registry URL')
+  .action(async (options: {
+    category?: string;
+    limit?: number;
+    force?: boolean;
+    dryRun?: boolean;
+    registry?: string;
+  }) => {
+    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+    const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+
+    const spinner = ora(
+      options.category
+        ? `Fetching "${options.category}" skills from awesome-openclaw-skills...`
+        : 'Fetching skill list from awesome-openclaw-skills...',
+    ).start();
+
+    let slugs: string[];
+    try {
+      slugs = await fetchAwesomeSlugs({ category: options.category });
+    } catch (err) {
+      spinner.fail(`Failed to fetch skill list: ${(err as Error).message}`);
+      return;
+    }
+
+    const total = options.limit && options.limit > 0 ? Math.min(options.limit, slugs.length) : slugs.length;
+    slugs = slugs.slice(0, total);
+
+    spinner.succeed(
+      `Found ${slugs.length} skill(s)${options.category ? ` in "${options.category}"` : ''}.`,
+    );
+
+    if (options.dryRun) {
+      console.log(chalk.bold('\n  Dry run — skills that would be installed:\n'));
+      slugs.forEach((s) => console.log(`  ${chalk.cyan(s)}`));
+      console.log(chalk.gray(`\n  Total: ${slugs.length}`));
+      return;
+    }
+
+    const results = { installed: 0, skipped: 0, failed: 0 };
+    const failedSlugs: string[] = [];
+
+    for (let i = 0; i < slugs.length; i++) {
+      const slug = slugs[i];
+      const prefix = chalk.gray(`[${i + 1}/${slugs.length}]`);
+      try {
+        await installSkill(slug, skillsDir, { registryUrl: options.registry, force: options.force });
+        console.log(`${prefix} ${chalk.green('✔')} ${chalk.cyan(slug)}`);
+        results.installed++;
+      } catch (err) {
+        const msg = (err as Error).message ?? '';
+        if (msg.includes('already exists')) {
+          console.log(`${prefix} ${chalk.gray('–')} ${slug} ${chalk.gray('(already installed, use --force to overwrite)')}`);
+          results.skipped++;
+        } else {
+          console.log(`${prefix} ${chalk.red('✘')} ${slug} — ${chalk.red(msg)}`);
+          failedSlugs.push(slug);
+          results.failed++;
+        }
+      }
+    }
+
+    console.log(
+      chalk.bold(
+        `\n  Done. Installed: ${results.installed}  Skipped: ${results.skipped}  Failed: ${results.failed}`,
+      ),
+    );
+    if (failedSlugs.length > 0) {
+      console.log(chalk.red(`  Failed: ${failedSlugs.join(', ')}`));
+    }
+    if (results.installed > 0) {
+      console.log(chalk.yellow('\n  Restart the server to pick up new skills.'));
     }
   });
 
