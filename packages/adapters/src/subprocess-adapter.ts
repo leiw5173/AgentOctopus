@@ -1,5 +1,5 @@
-import { spawn } from 'child_process';
-import path from 'path';
+import * as cp from 'node:child_process';
+import path from 'node:path';
 import type { LoadedSkill } from '@agentoctopus/registry';
 import type { Adapter, AdapterResult } from './adapter.js';
 
@@ -8,7 +8,10 @@ export class SubprocessAdapter implements Adapter {
     const scriptPath = path.join(skill.dirPath, 'scripts', 'invoke.js');
 
     return new Promise((resolve) => {
-      const child = spawn('node', [scriptPath], {
+      // Use process.execPath to ensure we use the current Node binary,
+      // and to bypass Turbopack's constant folding for spawn/exec asset tracing.
+      const cmd = process.execPath;
+      const child = cp.spawn(cmd, [scriptPath], {
         env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
