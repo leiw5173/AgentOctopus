@@ -121,12 +121,32 @@ async function resolveRegistry(registryUrl?: string): Promise<string> {
 
 /**
  * Fetch skill metadata from ClaWHub and normalize the response.
+ *
+ * awesome-openclaw-skills URLs use `{owner}-{slug}` format, but ClaWHub API
+ * only knows the `{slug}` part. If the full string returns 404, progressively
+ * strip leading `{segment}-` prefixes until we get a hit or exhaust candidates.
  */
 export async function fetchSkillMeta(slug: string, registryUrl?: string): Promise<ClaWHubSkillMeta> {
   const base = await resolveRegistry(registryUrl);
-  const res = await fetchWithRetry(`${base}/api/v1/skills/${encodeURIComponent(slug)}`);
-  if (!res.ok) {
-    throw new Error(`Skill "${slug}" not found on ClaWHub (${res.status})`);
+
+  // Build candidate list: [original, strip-1-prefix, strip-2-prefix, ...]
+  const candidates: string[] = [slug];
+  let remainder = slug;
+  while (remainder.includes('-')) {
+    remainder = remainder.slice(remainder.indexOf('-') + 1);
+    candidates.push(remainder);
+  }
+
+  let res: Response | undefined;
+  let resolvedSlug = slug;
+  for (const candidate of candidates) {
+    res = await fetchWithRetry(`${base}/api/v1/skills/${encodeURIComponent(candidate)}`);
+    if (res.ok) { resolvedSlug = candidate; break; }
+    if (res.status !== 404) break; // non-404 error — don't keep trying
+  }
+
+  if (!res || !res.ok) {
+    throw new Error(`Skill "${slug}" not found on ClaWHub (${res?.status ?? 'unknown'})`);
   }
 
   const data = (await res.json()) as ClaWHubApiSkillResponse;
