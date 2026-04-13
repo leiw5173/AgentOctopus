@@ -71,6 +71,23 @@ AgentOctopus then chooses the best downstream installed skill automatically and 
 - "what country is 8.8.8.8 from"
 - "find the best skill for this request"
 
+## Adding more skills
+
+Install individual skills from [ClaWHub](https://clawhub.ai):
+
+```bash
+octopus add <slug>
+```
+
+Or bulk-install the [awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills) curated list (5,000+ skills):
+
+```bash
+octopus sync-awesome
+
+# Filter by category
+octopus sync-awesome --category productivity
+```
+
 ## Updating
 
 To update an existing installation:
