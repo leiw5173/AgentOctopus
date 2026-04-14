@@ -1,0 +1,52 @@
+name: Build Skills Index
+
+on:
+  schedule:
+    # Daily at 02:00 UTC — off-peak, after ClaWHub quiets down
+    - cron: '0 2 * * *'
+  workflow_dispatch: # allow manual trigger
+
+concurrency:
+  group: build-skills-index
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 📦 Build & Publish Skills Index
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to upload release assets
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build skills index
+        run: node scripts/build-skills-index.js
+        env:
+          # Expose the token so the script can optionally log progress
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload index to GitHub Release (skills-index-latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: skills-index-latest
+          name: Skills Index (latest)
+          body: |
+            Pre-built skills index — refreshed daily at 02:00 UTC.
+
+            Download with:
+            ```
+            curl -L https://github.com/leiw5173/AgentOctopus/releases/download/skills-index-latest/skills-index.json.gz | gunzip | jq .
+            ```
+          files: skills-index.json.gz
+          # Overwrite the existing asset on every run
+          make_latest: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
