@@ -21,8 +21,12 @@ If you are new to the project, start with a skill.
 
 ### Prerequisites
 
-- **Node.js 20+** and **pnpm** installed globally (`npm install -g pnpm`)
-- A `.env` file at the repo root with LLM credentials. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full list of required environment variables.
+- **Node.js 22+** and **pnpm** installed globally (`npm install -g pnpm`)
+- A `.env` file at the repo root with LLM credentials. Copy the example and fill in your values:
+  ```bash
+  cp .env.example .env
+  ```
+  See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full list of environment variables.
 
 ### Skill anatomy
 
@@ -111,7 +115,7 @@ Never commit directly to master.
 
 - All existing tests must continue to pass.
 - New behavior must be covered by new tests.
-- Update `CLAUDE.md`, `README.md`, and `TEST_INSTRUCTIONS.md` wherever the change affects documented behavior.
+- Update `README.md` and `TEST_INSTRUCTIONS.md` wherever the change affects documented behavior.
 
 ### Review
 
@@ -127,8 +131,6 @@ A maintainer must sign off before the PR is merged. Plan for a longer review cyc
 <type>(<scope>): <short summary>
 
 <optional body — explain why, not what>
-
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 ```
 
 **Types:** `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
@@ -159,7 +161,7 @@ Every PR should explain **what** changed and **why**. For skill PRs, also includ
 
 ## CI on pull requests
 
-The pipeline is defined in `.github/workflows/ci.yml`. Three jobs run automatically on every pull request to `master`. All three must pass before a PR is eligible for review.
+The pipeline is defined in `.github/workflows/ci.yml`. Three jobs run automatically on every pull request to `master`. All three must pass before a PR is eligible for review. (CI runs on the pull request, not on every push to your branch.)
 
 | Job | Command | Notes |
 |-----|---------|-------|
