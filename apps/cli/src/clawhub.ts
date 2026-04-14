@@ -9,7 +9,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { inflateRawSync } from 'zlib';
+import { inflateRawSync, gunzipSync } from 'zlib';
 
 const DEFAULT_REGISTRY = 'https://clawhub.ai';
 const MAX_RETRIES = 3;
@@ -18,6 +18,34 @@ const AWESOME_README_URL =
   'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/README.md';
 const AWESOME_CATEGORY_BASE =
   'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/categories/';
+
+// Fixed URL for the pre-built daily index published to GitHub Releases.
+export const SKILLS_INDEX_URL =
+  'https://github.com/leiw5173/AgentOctopus/releases/download/skills-index-latest/skills-index.json.gz';
+
+// ── Skills Index types ────────────────────────────────────────────────────────
+
+export interface SkillIndexEntry {
+  slug: string;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  /** Full content of SKILL.md */
+  skillMd: string | null;
+  /** Full content of _meta.json */
+  metaJson: string | null;
+  /** Full content of scripts/invoke.js, or null when absent */
+  invokeScript: string | null;
+}
+
+interface SkillsIndex {
+  version: string;
+  builtAt: string;
+  skills: SkillIndexEntry[];
+}
+
+
 
 // --- Types matching the actual ClaWHub v1 API response ---
 
@@ -394,4 +422,69 @@ export async function fetchAwesomeSlugs(options?: {
   }
 
   return Array.from(slugSet);
+}
+
+/**
+ * Download, decompress, and parse the pre-built skills index from GitHub Releases.
+ *
+ * @param url  Override the default SKILLS_INDEX_URL (useful for testing).
+ * @returns    Array of SkillIndexEntry objects from the index.
+ * @throws     Error on network failure, non-200 response, or malformed JSON.
+ */
+export async function downloadSkillsIndex(url?: string): Promise<SkillIndexEntry[]> {
+  const target = url ?? SKILLS_INDEX_URL;
+  const res = await fetch(target, {
+    headers: { 'Accept-Encoding': 'identity' }, // Fetch the raw gzip; we decode manually
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to download skills index (${res.status}) from ${target}`);
+  }
+
+  const compressed = Buffer.from(await res.arrayBuffer());
+  const json = gunzipSync(compressed).toString('utf8');
+  const index = JSON.parse(json) as SkillsIndex;
+
+  if (!Array.isArray(index.skills)) {
+    throw new Error('Skills index is malformed: "skills" is not an array');
+  }
+
+  return index.skills;
+}
+
+/**
+ * Write a single SkillIndexEntry to disk as a local skill directory.
+ *
+ * Creates:
+ *   <skillsDir>/<slug>/SKILL.md
+ *   <skillsDir>/<slug>/_meta.json
+ *   <skillsDir>/<slug>/scripts/invoke.js  (only when invokeScript is non-null)
+ *
+ * @throws  Error with "already exists" in the message when the dir is present
+ *          and `force` is falsy — same wording as installSkill() so callers
+ *          can detect skips uniformly.
+ */
+export function installFromIndex(
+  entry: SkillIndexEntry,
+  skillsDir: string,
+  force = false,
+): void {
+  const skillDir = path.join(skillsDir, entry.slug);
+
+  if (fs.existsSync(skillDir) && !force) return;
+
+  // Remove stale directory when force is set
+  if (fs.existsSync(skillDir)) {
+    fs.rmSync(skillDir, { recursive: true });
+  }
+
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd ?? '', 'utf8');
+  fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson ?? '', 'utf8');
+
+  if (entry.invokeScript !== null) {
+    const scriptsDir = path.join(skillDir, 'scripts');
+    fs.mkdirSync(scriptsDir, { recursive: true });
+    fs.writeFileSync(path.join(scriptsDir, 'invoke.js'), entry.invokeScript, 'utf8');
+  }
 }
