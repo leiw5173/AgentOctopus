@@ -16,6 +16,18 @@ export class Executor {
   constructor(private registry: SkillRegistry) {}
 
   async execute(skill: LoadedSkill, input: Record<string, unknown>): Promise<ExecutionResult> {
+    // Check required credentials before invoking
+    const missing = (skill.manifest.credentials ?? [])
+      .filter(c => c.required !== false && !process.env[c.key])
+      .map(c => c.key);
+
+    if (missing.length > 0) {
+      const lines = missing.map(k => `  ${k}`).join('\n');
+      throw new Error(
+        `✘ Skill "${skill.manifest.name}" requires environment variables that are not set:\n\n${lines}\n\nRun: octopus config set ${missing[0]} <your-value>`,
+      );
+    }
+
     const adapter = this.pickAdapter(skill);
     const adapterResult = await adapter.invoke(skill, input);
 
@@ -26,6 +38,8 @@ export class Executor {
 
     return { skill, adapterResult, formattedOutput };
   }
+
+
 
   private pickAdapter(skill: LoadedSkill) {
     switch (skill.manifest.adapter) {
