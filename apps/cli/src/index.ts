@@ -10,9 +10,9 @@ import readline from 'readline';
 import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
 import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
-import { installSkill, searchSkills, fetchSkillMeta, fetchAwesomeSlugs } from './clawhub.js';
+import { installSkill, searchSkills, fetchSkillMeta, fetchAwesomeSlugs, downloadSkillsIndex, installFromIndex } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
-import { loadOctopusConfig } from './config.js';
+import { loadOctopusConfig, saveOctopusConfig, defaultConfig, getConfigPath } from './config.js';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { fileURLToPath } from 'url';
@@ -449,13 +449,82 @@ program
 
     const spinner = ora(
       options.category
-        ? `Fetching "${options.category}" skills from awesome-openclaw-skills...`
-        : 'Fetching skill list from awesome-openclaw-skills...',
+        ? `Fetching "${options.category}" skill list...`
+        : 'Downloading skills index...',
     ).start();
 
+    // ── Step 1: resolve slug filter for --category ──
+    let slugFilter: Set<string> | null = null;
+    if (options.category) {
+      try {
+        const categorySlugs = await fetchAwesomeSlugs({ category: options.category });
+        slugFilter = new Set(categorySlugs);
+      } catch (err) {
+        spinner.fail(`Failed to fetch category "${options.category}": ${(err as Error).message}`);
+        return;
+      }
+    }
+
+    // ── Step 2: try index-first path ──
+    let indexEntries: import('./clawhub.js').SkillIndexEntry[] | null = null;
+    try {
+      spinner.text = 'Downloading skills index (one request)...';
+      indexEntries = await downloadSkillsIndex();
+    } catch (err) {
+      spinner.warn(`Skills index unavailable (${(err as Error).message}) — falling back to ClaWHub per-skill fetch.`);
+    }
+
+    if (indexEntries !== null) {
+      // ── Index path ──
+      let entries = indexEntries;
+      if (slugFilter) {
+        entries = entries.filter(e => slugFilter!.has(e.slug));
+      }
+      const total = options.limit && options.limit > 0 ? Math.min(options.limit, entries.length) : entries.length;
+      entries = entries.slice(0, total);
+
+      spinner.succeed(
+        `Found ${entries.length} skill(s)${options.category ? ` in "${options.category}"` : ''} in index.`,
+      );
+
+      if (options.dryRun) {
+        console.log(chalk.bold('\n  Dry run — skills that would be installed:\n'));
+        entries.forEach(e => console.log(`  ${chalk.cyan(e.slug)}`));
+        console.log(chalk.gray(`\n  Total: ${entries.length}`));
+        return;
+      }
+
+      const results = { installed: 0, skipped: 0 };
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i]!;
+        const prefix = chalk.gray(`[${i + 1}/${entries.length}]`);
+        const alreadyExists = fs.existsSync(path.join(skillsDir, entry.slug));
+        if (alreadyExists && !options.force) {
+          console.log(`${prefix} ${chalk.gray('–')} ${entry.slug} ${chalk.gray('(already installed, use --force to overwrite)')}`);
+          results.skipped++;
+        } else {
+          installFromIndex(entry, skillsDir, options.force);
+          console.log(`${prefix} ${chalk.green('✔')} ${chalk.cyan(entry.slug)}`);
+          results.installed++;
+        }
+      }
+
+      console.log(
+        chalk.bold(`\n  Done. Installed: ${results.installed}  Skipped: ${results.skipped}`),
+      );
+      if (results.installed > 0) {
+        console.log(chalk.yellow('\n  Restart the server to pick up new skills.'));
+      }
+      return;
+    }
+
+    // ── Fallback: per-skill ClaWHub fetch (original behaviour) ──
     let slugs: string[];
     try {
-      slugs = await fetchAwesomeSlugs({ category: options.category });
+      spinner.text = options.category
+        ? `Fetching "${options.category}" skills from awesome-openclaw-skills...`
+        : 'Fetching skill list from awesome-openclaw-skills...';
+      slugs = slugFilter ? Array.from(slugFilter) : await fetchAwesomeSlugs();
     } catch (err) {
       spinner.fail(`Failed to fetch skill list: ${(err as Error).message}`);
       return;
@@ -470,7 +539,7 @@ program
 
     if (options.dryRun) {
       console.log(chalk.bold('\n  Dry run — skills that would be installed:\n'));
-      slugs.forEach((s) => console.log(`  ${chalk.cyan(s)}`));
+      slugs.forEach(s => console.log(`  ${chalk.cyan(s)}`));
       console.log(chalk.gray(`\n  Total: ${slugs.length}`));
       return;
     }
@@ -479,7 +548,7 @@ program
     const failedSlugs: string[] = [];
 
     for (let i = 0; i < slugs.length; i++) {
-      const slug = slugs[i];
+      const slug = slugs[i]!;
       const prefix = chalk.gray(`[${i + 1}/${slugs.length}]`);
       try {
         await installSkill(slug, skillsDir, { registryUrl: options.registry, force: options.force });
@@ -593,6 +662,52 @@ program
       console.error(chalk.gray('  Supported targets: openclaw\n'));
       process.exitCode = 1;
     }
+  });
+
+// ── octopus config ────────────────────────────────────────────────────────────
+const configCmd = program
+  .command('config')
+  .description('Manage AgentOctopus credential configuration');
+
+configCmd
+  .command('set <key> <value>')
+  .description('Save a credential or config value (written to ~/.agentoctopus/octopus.json and exported into the current session)')
+  .action((key: string, value: string) => {
+    const existing = loadOctopusConfig();
+    const config = existing ?? defaultConfig();
+    config.credentials = config.credentials ?? {};
+    config.credentials[key] = value;
+    saveOctopusConfig(config);
+    // Export into the current process so follow-up commands in the same session see it
+    process.env[key] = value;
+    console.log(chalk.green(`  ✔ ${key} saved to ${getConfigPath()}`));
+  });
+
+configCmd
+  .command('list')
+  .description('List all stored credentials (values masked)')
+  .action(() => {
+    const config = loadOctopusConfig();
+    const creds = config?.credentials ?? {};
+    const keys = Object.keys(creds);
+
+    console.log(chalk.bold('\n🐙 AgentOctopus — Stored Credentials\n'));
+
+    if (keys.length === 0) {
+      console.log(chalk.gray('  No credentials stored yet.'));
+      console.log(chalk.gray('  Use: octopus config set <KEY> <value>\n'));
+      return;
+    }
+
+    for (const k of keys) {
+      const raw = creds[k] ?? '';
+      const masked =
+        raw.length > 4
+          ? '***' + raw.slice(-4)
+          : '****';
+      console.log(`  ${chalk.cyan(k)} = ${chalk.gray(masked)}`);
+    }
+    console.log();
   });
 
 program.parse();
