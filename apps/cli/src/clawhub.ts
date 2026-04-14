@@ -433,9 +433,7 @@ export async function fetchAwesomeSlugs(options?: {
  */
 export async function downloadSkillsIndex(url?: string): Promise<SkillIndexEntry[]> {
   const target = url ?? SKILLS_INDEX_URL;
-  const res = await fetch(target, {
-    headers: { 'Accept-Encoding': 'identity' }, // Fetch the raw gzip; we decode manually
-  });
+  const res = await fetch(target);
 
   if (!res.ok) {
     throw new Error(`Failed to download skills index (${res.status}) from ${target}`);
@@ -460,9 +458,7 @@ export async function downloadSkillsIndex(url?: string): Promise<SkillIndexEntry
  *   <skillsDir>/<slug>/_meta.json
  *   <skillsDir>/<slug>/scripts/invoke.js  (only when invokeScript is non-null)
  *
- * @throws  Error with "already exists" in the message when the dir is present
- *          and `force` is falsy — same wording as installSkill() so callers
- *          can detect skips uniformly.
+ * Silently skips if the skill directory already exists and `force` is false.
  */
 export function installFromIndex(
   entry: SkillIndexEntry,
@@ -479,7 +475,8 @@ export function installFromIndex(
   }
 
   fs.mkdirSync(skillDir, { recursive: true });
-  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd ?? '', 'utf8');
+  if (!entry.skillMd) throw new Error(`Skill "${entry.slug}" has no SKILL.md content in the index`);
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
   fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson ?? '', 'utf8');
 
   if (entry.invokeScript !== null) {
