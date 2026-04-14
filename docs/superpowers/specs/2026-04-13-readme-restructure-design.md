@@ -73,6 +73,11 @@ Links to docs/
 - Bundled skills home directory → `docs/ARCHITECTURE.md`
 - Duplicate OpenClaw Integration section (lines 212–236) → removed, consolidated into README "Use as a Skill"
 
+## Notes
+
+- The current README has no "Claude Code" or "Hermes" install sections — these will be written fresh in the new README based on general skill/MCP install patterns for each platform.
+- The "OpenClaw Integration" section appears twice in the current README (lines 95–117 and 212–236); the second is more detailed. The new README consolidates both into a single "Use as a Skill → OpenClaw" subsection using the best content from both.
+
 ## Success Criteria
 
 - README ≤ 100 lines

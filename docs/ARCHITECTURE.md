@@ -5,7 +5,7 @@
 ```
 AgentOctopus/
 ├── apps/
-│   ├── cli/           # CLI entry point (`octopus ask/list/add/publish/onboard`)
+│   ├── cli/           # CLI entry point (`octopus ask/list/add/sync-awesome/config/onboard`)
 │   └── web/           # Next.js web UI, REST API, and marketplace
 │       ├── /           # Chat interface with skills sidebar
 │       └── /marketplace  # Skill marketplace browser
@@ -18,6 +18,8 @@ AgentOctopus/
 │       ├── auth-middleware.ts   # API key authentication + tier management
 │       ├── rate-limiter.ts      # Sliding-window rate limiting
 │       └── audit-logger.ts      # Structured request logging (JSONL)
+├── scripts/
+│   └── build-skills-index.js   # Daily index builder (standalone Node ESM, outside pnpm workspace)
 └── registry/
     ├── skills/        # Built-in SKILL.md manifests
     └── marketplace/   # Published skills + index.json
@@ -98,7 +100,68 @@ When you install `@agentoctopus/cli` globally and run `octopus onboard`, the wiz
   octopus.json     ← machine-level config: skills dir path + API key credentials
 ```
 
-To change the skills directory or update credentials, re-run `octopus onboard`.
+To set or update a credential without re-running the full wizard:
+
+```bash
+# Write a key to octopus.json and export it into the current session
+octopus config set COMMONS_API_KEY abc123
+
+# List all stored credentials (values masked)
+octopus config list
+```
+
+To change the skills directory or run full setup again:
+
+```bash
+octopus onboard
+```
+
+## Skills Index Bundle
+
+`octopus sync-awesome` downloads a pre-built, daily-refreshed index instead of
+fetching 5,000+ skills one-by-one from ClaWHub:
+
+```
+GitHub Action (daily, 02:00 UTC)
+  → fetch all slugs from awesome-openclaw-skills
+  → download ZIPs from ClaWHub (server-side, generous delays)
+  → build skills-index.json  (slug, name, SKILL.md, _meta.json, invoke.js)
+  → gzip → upload to GitHub Release tag: skills-index-latest
+
+octopus sync-awesome
+  → GET skills-index.json.gz  (1 request, ~3–5 MB)
+  → gunzip + parse in memory
+  → apply --category / --limit filters locally (no extra network calls)
+  → write SKILL.md + _meta.json + scripts/invoke.js per skill
+  → done in ~10 seconds for 5,000+ skills
+```
+
+If the GitHub Release asset is unavailable, `sync-awesome` prints a warning and
+automatically falls back to the original per-skill ClaWHub fetch path.
+
+## SKILL.md — `metadata.openclaw` field
+
+Skills that require API keys at runtime declare them in SKILL.md frontmatter:
+
+```yaml
+metadata:
+  openclaw:
+    env: ["COMMONS_API_KEY"]        # env var name(s) required at runtime
+    homepage: "https://example.com" # shown in the error hint URL (optional)
+```
+
+Before invoking a skill the `Executor` checks every listed variable. If any are
+missing it aborts with a clear, actionable message:
+
+```
+✘ Skill "agent-commons" requires environment variables that are not set:
+
+  COMMONS_API_KEY  — get yours at https://agentcommons.net
+
+Run: octopus config set COMMONS_API_KEY <your-key>
+```
+
+Skills that need no keys can omit `metadata.openclaw` entirely.
 
 ## Test Coverage
 

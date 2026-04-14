@@ -158,7 +158,7 @@ octopus ask "do X with agent-commons"
 | Action | File |
 |--------|------|
 | Create | `.github/workflows/build-skills-index.yml` |
-| Create | `scripts/build-skills-index.js` (Node script invoked by the Action) |
+| Create | `scripts/build-skills-index.js` (standalone Node ESM script, not part of pnpm workspace — invoked directly by the Action with `node scripts/build-skills-index.js`) |
 | Modify | `apps/cli/src/clawhub.ts` — add `downloadSkillsIndex()`, `installFromIndex()`, `SKILLS_INDEX_URL` |
 | Modify | `apps/cli/src/index.ts` — rewrite sync-awesome action, add `octopus config` command |
 | Modify | `packages/core/src/executor.ts` — add missing env var check before invoke |

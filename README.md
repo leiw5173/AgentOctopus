@@ -97,13 +97,20 @@ Installed automatically when you run `octopus onboard`:
 | `ip-lookup` | IP/domain geolocation via ip-api.com | Nothing |
 | `x-search` | Search X (Twitter) posts via xAI Grok API | `XAI_API_KEY` |
 
+Skills that list a required key show a clear error when the key is missing. Set it with:
+
+```bash
+octopus config set XAI_API_KEY <your-key>
+```
+
 ## Adding More Skills
 
 ```bash
 # Install a single skill from ClaWHub
 octopus add <slug>
 
-# Bulk-install from the awesome-openclaw-skills curated list (5,000+ skills)
+# Bulk-install from the awesome-openclaw-skills curated list (5,000+ skills in ~10 seconds)
+# Downloads a pre-built daily index — no rate-limit exposure, no ClaWHub loop
 octopus sync-awesome
 
 # Filter by category

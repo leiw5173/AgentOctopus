@@ -12,6 +12,7 @@ output_schema:
   report: string
 auth: api_key
 rating: 3.0
+metadata: { "openclaw": { "emoji": "🐦", "env": ["XAI_API_KEY"], "primaryEnv": "XAI_API_KEY", "homepage": "https://console.x.ai" } }
 invocations: 0
 credentials:
   - key: XAI_API_KEY
