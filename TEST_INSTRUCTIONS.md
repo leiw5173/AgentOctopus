@@ -646,3 +646,61 @@ octopus connect openclaw
 | 5.5 | `octopus skill list` shows same output as `octopus list` | ☐ |
 | 5.6 | After `octopus onboard`, `octopus ask "weather in Tokyo"` uses `~/.agentoctopus/skills` | ☐ |
 | 5.7 | `octopus connect openclaw` reads auth profile, prints provider/model/key-prefix, writes 8 keys to `octopus.json` | ☐ |
+
+---
+
+## Skills Index Bundle (Phase: sync-awesome)
+
+### 6.1 `octopus sync-awesome --dry-run --limit 3`
+
+```bash
+node apps/cli/dist/index.js sync-awesome --dry-run --limit 3
+```
+
+**Expected:** Prints "Dry run — skills that would be installed" with up to 3 slugs. No files written.
+
+### 6.2 `octopus config set`
+
+```bash
+node apps/cli/dist/index.js config set MY_KEY abc123
+```
+
+**Expected:** Prints confirmation that `MY_KEY` was saved.
+
+### 6.3 `octopus config list`
+
+```bash
+node apps/cli/dist/index.js config list
+```
+
+**Expected:** Shows `MY_KEY` with masked value.
+
+### 6.4 Config persisted to disk
+
+```bash
+cat ~/.agentoctopus/octopus.json
+```
+
+**Expected:** Contains `"MY_KEY": "abc123"` in the `credentials` field.
+
+### 6.5 Missing env var error
+
+Invoke a skill that has `credentials` set with a key not in `process.env`. Expected error:
+
+```
+✘ Skill "..." requires environment variables that are not set:
+
+  SOME_KEY
+
+Run: octopus config set SOME_KEY <your-value>
+```
+
+## Pass / Fail Checklist (Phase 6 — Skills Index Bundle)
+
+| # | Test | Pass |
+|---|---|---|
+| 6.1 | `sync-awesome --dry-run --limit 3` lists slugs, writes nothing | ☐ |
+| 6.2 | `octopus config set MY_KEY abc123` prints confirmation | ☐ |
+| 6.3 | `octopus config list` shows MY_KEY masked | ☐ |
+| 6.4 | `octopus.json` contains the key after set | ☐ |
+| 6.5 | Missing env var produces descriptive error with `octopus config set` hint | ☐ |
