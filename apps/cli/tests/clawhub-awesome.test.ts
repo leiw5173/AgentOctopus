@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fetchAwesomeSlugs } from '../src/clawhub.js';
+import { fetchAwesomeSlugs, downloadSkillsIndex, installFromIndex } from '../src/clawhub.js';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { gzipSync } from 'zlib';
 
 // Sample markdown that mirrors the real category file format
 const SAMPLE_MARKDOWN = `
@@ -16,6 +20,11 @@ const SAMPLE_README = `
 - [Git & GitHub](categories/git-and-github.md)
 - [Coding Agents](categories/coding-agents-and-ides.md)
 `;
+
+function makeIndexGz(skills: unknown[]): Buffer {
+  const json = JSON.stringify({ version: '1', builtAt: '2026-01-01T00:00:00Z', skills });
+  return gzipSync(Buffer.from(json));
+}
 
 describe('fetchAwesomeSlugs', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -141,3 +150,149 @@ No category links here.
     expect(slugs).toContain('user-direct-skill');
   });
 });
+
+describe('downloadSkillsIndex', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it('downloads, decompresses, and returns the skills array', async () => {
+    const skills = [
+      { slug: 'my-skill', name: 'My Skill', description: 'desc', version: '1.0.0',
+        author: 'bob', skillMd: '---\nname: my-skill\n---', metaJson: '{}', invokeScript: null },
+    ];
+    const gz = makeIndexGz(skills);
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength),
+    } as unknown as Response);
+
+    const result = await downloadSkillsIndex('https://example.com/skills-index.json.gz');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.slug).toBe('my-skill');
+    expect(result[0]!.skillMd).toBe('---\nname: my-skill\n---');
+  });
+
+  it('throws when the download returns a non-ok status', async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: false, status: 404 } as Response);
+    await expect(downloadSkillsIndex('https://example.com/skills-index.json.gz'))
+      .rejects.toThrow('404');
+  });
+
+  it('uses SKILLS_INDEX_URL when no url argument is provided', async () => {
+    const gz = makeIndexGz([]);
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength),
+    } as unknown as Response);
+
+    await downloadSkillsIndex();
+
+    const calledUrl = fetchSpy.mock.calls[0]![0] as string;
+    expect(calledUrl).toContain('github.com');
+    expect(calledUrl).toContain('skills-index.json.gz');
+  });
+});
+
+describe('installFromIndex', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'octopus-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('writes SKILL.md and _meta.json for a skill without invokeScript', () => {
+    const entry = {
+      slug: 'test-skill',
+      name: 'Test Skill',
+      description: 'A test',
+      version: '1.0.0',
+      author: 'alice',
+      skillMd: '---\nname: test-skill\n---\n\n# Test',
+      metaJson: '{"slug":"test-skill","version":"1.0.0"}',
+      invokeScript: null,
+    };
+
+    installFromIndex(entry, tmpDir);
+
+    const skillDir = path.join(tmpDir, 'test-skill');
+    expect(fs.existsSync(path.join(skillDir, 'SKILL.md'))).toBe(true);
+    expect(fs.existsSync(path.join(skillDir, '_meta.json'))).toBe(true);
+    expect(fs.existsSync(path.join(skillDir, 'scripts', 'invoke.js'))).toBe(false);
+    expect(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8')).toBe(entry.skillMd);
+    expect(fs.readFileSync(path.join(skillDir, '_meta.json'), 'utf8')).toBe(entry.metaJson);
+  });
+
+  it('writes scripts/invoke.js when invokeScript is non-null', () => {
+    const entry = {
+      slug: 'scripted-skill',
+      name: 'Scripted',
+      description: '',
+      version: '1.0.0',
+      author: 'bob',
+      skillMd: '---\nname: scripted-skill\n---',
+      metaJson: '{}',
+      invokeScript: 'console.log("hello")',
+    };
+
+    installFromIndex(entry, tmpDir);
+
+    const invokeJsPath = path.join(tmpDir, 'scripted-skill', 'scripts', 'invoke.js');
+    expect(fs.existsSync(invokeJsPath)).toBe(true);
+    expect(fs.readFileSync(invokeJsPath, 'utf8')).toBe('console.log("hello")');
+  });
+
+  it('skips writing if skill already exists and force is false', () => {
+    const entry = {
+      slug: 'exists',
+      name: 'Exists',
+      description: '',
+      version: '1.0.0',
+      author: 'bob',
+      skillMd: 'new content',
+      metaJson: '{}',
+      invokeScript: null,
+    };
+    const skillDir = path.join(tmpDir, 'exists');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'old content');
+
+    installFromIndex(entry, tmpDir, false);
+
+    expect(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8')).toBe('old content');
+  });
+
+  it('overwrites existing skill when force is true', () => {
+    const entry = {
+      slug: 'exists',
+      name: 'Exists',
+      description: '',
+      version: '1.0.0',
+      author: 'bob',
+      skillMd: 'new content',
+      metaJson: '{}',
+      invokeScript: null,
+    };
+    const skillDir = path.join(tmpDir, 'exists');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'old content');
+
+    installFromIndex(entry, tmpDir, true);
+
+    expect(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8')).toBe('new content');
+  });
+});
+

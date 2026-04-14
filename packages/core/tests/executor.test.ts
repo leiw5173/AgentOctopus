@@ -78,13 +78,70 @@ describe('Executor', () => {
     vi.mocked(SubprocessAdapter).mockImplementation(() => ({
       invoke: vi.fn().mockResolvedValue({ success: false, error: 'Command failed' })
     } as any));
-    
+
     const executor = new Executor(mockRegistry);
     const mockSkill = {
       manifest: { name: 'test-fail', adapter: 'subprocess' }
     } as any;
-    
+
     const result = await executor.execute(mockSkill, {});
     expect(result.formattedOutput).toBe('Error: Command failed');
+  });
+
+  it('throws before invoking when a required credential env var is missing', async () => {
+    delete process.env['REQUIRED_KEY'];
+
+    const executor = new Executor(mockRegistry);
+    const mockSkill = {
+      manifest: {
+        name: 'needs-key',
+        adapter: 'http',
+        credentials: [{ key: 'REQUIRED_KEY', label: 'Required Key', required: true }],
+      },
+    } as any;
+
+    await expect(executor.execute(mockSkill, { query: 'test' }))
+      .rejects.toThrow('REQUIRED_KEY');
+  });
+
+  it('does not throw when all required credential env vars are set', async () => {
+    process.env['REQUIRED_KEY'] = 'test-value';
+
+    const executor = new Executor(mockRegistry);
+    const mockSkill = {
+      manifest: {
+        name: 'has-key',
+        adapter: 'http',
+        credentials: [{ key: 'REQUIRED_KEY', label: 'Required Key', required: true }],
+      },
+    } as any;
+
+    await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
+
+    delete process.env['REQUIRED_KEY'];
+  });
+
+  it('does not throw for optional credentials that are missing', async () => {
+    delete process.env['OPTIONAL_KEY'];
+
+    const executor = new Executor(mockRegistry);
+    const mockSkill = {
+      manifest: {
+        name: 'optional-key',
+        adapter: 'http',
+        credentials: [{ key: 'OPTIONAL_KEY', label: 'Optional Key', required: false }],
+      },
+    } as any;
+
+    await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
+  });
+
+  it('does not throw when credentials array is undefined', async () => {
+    const executor = new Executor(mockRegistry);
+    const mockSkill = {
+      manifest: { name: 'no-creds', adapter: 'http', credentials: undefined },
+    } as any;
+
+    await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
   });
 });
