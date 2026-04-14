@@ -27,6 +27,21 @@ export const SkillManifestSchema = z.object({
   // optional LLM-based skill (no endpoint, uses system LLM)
   llm_powered: z.boolean().default(false),
   credentials: z.array(CredentialSchema).optional(),
+  // OpenClaw-specific metadata — used by the executor's env-var guard
+  metadata: z
+    .object({
+      openclaw: z
+        .object({
+          /** Names of environment variables the skill requires at runtime. */
+          env: z.array(z.string()).optional(),
+          /** URL shown in the "get your key at …" hint message. */
+          homepage: z.string().optional(),
+        })
+        .passthrough()  // allow extra fields (emoji, primaryEnv, etc.) without rejection
+        .optional(),
+    })
+    .passthrough()
+    .optional(),
 });
 
 export type SkillManifest = z.infer<typeof SkillManifestSchema>;
