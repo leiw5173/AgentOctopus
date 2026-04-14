@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/adapters",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "AgentOctopus skill execution adapters: HTTP, MCP stdio, subprocess",
   "type": "module",
   "main": "./dist/index.js",
@@ -33,5 +33,12 @@
     "type": "git",
     "url": "https://github.com/leiw5173/AgentOctopus"
   },
-  "keywords": ["ai", "agent", "mcp", "http", "subprocess", "adapter"]
+  "keywords": [
+    "ai",
+    "agent",
+    "mcp",
+    "http",
+    "subprocess",
+    "adapter"
+  ]
 }

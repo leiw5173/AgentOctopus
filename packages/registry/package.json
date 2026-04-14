@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/registry",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "AgentOctopus skill manifest loader and rating store",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,5 +34,12 @@
     "type": "git",
     "url": "https://github.com/leiw5173/AgentOctopus"
   },
-  "keywords": ["ai", "agent", "mcp", "skill", "routing", "llm"]
+  "keywords": [
+    "ai",
+    "agent",
+    "mcp",
+    "skill",
+    "routing",
+    "llm"
+  ]
 }
