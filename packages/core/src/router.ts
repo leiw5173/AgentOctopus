@@ -1,5 +1,9 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { createHash } from 'crypto';
 
 export interface RoutingResult {
   skill: LoadedSkill;
@@ -73,26 +77,100 @@ export class Router {
   private index: VectorEntry[] = [];
   private chatClient: ChatClient;
   private embedClient: EmbedClient | null;
+  private embedModel: string;
 
   constructor(chatConfig: LLMConfig, embedConfig?: LLMConfig) {
     this.chatClient = createChatClient(chatConfig);
     this.embedClient = embedConfig ? createEmbedClient(embedConfig) : null;
+    this.embedModel = embedConfig?.model ?? '';
+  }
+
+  private embedCachePath(): string {
+    return path.join(os.homedir(), '.agentoctopus', 'embed-cache.json');
+  }
+
+  private skillsHash(skills: LoadedSkill[]): string {
+    const content = skills.map(s => `${s.manifest.name}:${skillToText(s)}`).join('|');
+    return createHash('sha1').update(this.embedModel + ':' + content).digest('hex').slice(0, 16);
+  }
+
+  private loadEmbedCache(hash: string): Map<string, number[]> | null {
+    try {
+      const cachePath = this.embedCachePath();
+      if (!fs.existsSync(cachePath)) return null;
+      const raw = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+      if (raw.hash !== hash) return null;
+      return new Map(Object.entries(raw.embeddings as Record<string, number[]>));
+    } catch {
+      return null;
+    }
+  }
+
+  private saveEmbedCache(hash: string, embeddings: Map<string, number[]>): void {
+    try {
+      const cachePath = this.embedCachePath();
+      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+      fs.writeFileSync(cachePath, JSON.stringify({
+        hash,
+        embeddings: Object.fromEntries(embeddings),
+      }));
+    } catch {
+      // cache write failure is non-fatal
+    }
   }
 
   async buildIndex(skills: LoadedSkill[]): Promise<void> {
     this.index = [];
-    for (const skill of skills) {
-      if (!this.embedClient) {
-        this.index.push({ skill, embedding: [] });
-        continue;
+
+    // For large registries, skip embedding entirely — LLM-only routing is
+    // fast and accurate enough when the LLM re-ranker sees keyword-filtered candidates.
+    const LARGE_REGISTRY_THRESHOLD = 500;
+    if (!this.embedClient || skills.length > LARGE_REGISTRY_THRESHOLD) {
+      this.index = skills.map(skill => ({ skill, embedding: [] }));
+      return;
+    }
+
+    const hash = this.skillsHash(skills);
+    const cached = this.loadEmbedCache(hash);
+
+    if (cached) {
+      // All embeddings available from disk cache — no network calls needed
+      this.index = skills.map(skill => ({
+        skill,
+        embedding: cached.get(skill.manifest.name) ?? [],
+      }));
+      return;
+    }
+
+    // No cache or stale — embed all skills in parallel and save
+    const EMBED_CONCURRENCY = 16;
+    const embeddings = new Map<string, number[]>();
+    const entries: VectorEntry[] = new Array(skills.length);
+
+    let nextIdx = 0;
+    let embeddedCount = 0;
+
+    const worker = async () => {
+      while (nextIdx < skills.length) {
+        const idx = nextIdx++;
+        const skill = skills[idx]!;
+        const text = skillToText(skill);
+        try {
+          const embedding = await this.embedClient!.embed(text);
+          entries[idx] = { skill, embedding };
+          embeddings.set(skill.manifest.name, embedding);
+          embeddedCount++;
+        } catch {
+          entries[idx] = { skill, embedding: [] };
+        }
       }
-      const text = skillToText(skill);
-      try {
-        const embedding = await this.embedClient.embed(text);
-        this.index.push({ skill, embedding });
-      } catch (err) {
-        console.warn(`[Router] Failed to embed skill "${skill.manifest.name}": ${(err as Error).message || err}`);
-      }
+    };
+
+    await Promise.all(Array.from({ length: EMBED_CONCURRENCY }, worker));
+    this.index = entries;
+
+    if (embeddedCount > 0) {
+      this.saveEmbedCache(hash, embeddings);
     }
   }
 
@@ -107,8 +185,26 @@ export class Router {
     const isLLMOnly = !this.embedClient || eligible.every(e => e.embedding.length === 0);
 
     if (isLLMOnly) {
-      // No embed client or all embeddings empty — skip cosine scoring, use all eligible skills
-      candidates = eligible.map(({ skill }) => ({ skill, score: 1.0 }));
+      // No embed client or all embeddings empty — pre-filter by keyword relevance
+      // so the LLM re-ranker never receives more than LLM_RERANK_CAP candidates.
+      const LLM_RERANK_CAP = 20;
+      if (eligible.length <= LLM_RERANK_CAP) {
+        candidates = eligible.map(({ skill }) => ({ skill, score: 1.0 }));
+      } else {
+        // Score by how many query words appear in name+description+tags
+        const words = query.toLowerCase().split(/\W+/).filter(w => w.length > 2);
+        const scored = eligible.map(({ skill }) => {
+          const haystack = (
+            skill.manifest.name + ' ' +
+            skill.manifest.description + ' ' +
+            skill.manifest.tags.join(' ')
+          ).toLowerCase();
+          const hits = words.filter(w => haystack.includes(w)).length;
+          return { skill, score: hits };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        candidates = scored.slice(0, LLM_RERANK_CAP);
+      }
     } else {
       let queryEmbedding: number[] = [];
       try {

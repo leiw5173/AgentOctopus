@@ -23,11 +23,44 @@ export class SkillRegistry {
     this.ratingStore = new RatingStore(ratingsPath);
   }
 
+  /**
+   * Load additional skills from a second directory, merging into the existing registry.
+   * Skills from `extraDir` take priority — they overwrite any same-named skill already loaded.
+   */
+  async loadFrom(extraDir: string): Promise<void> {
+    const pattern = extraDir.replace(/\\/g, '/') + '/**/SKILL.md';
+    const files = await glob(pattern);
+
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(file, 'utf-8');
+        const { data, content } = matter(raw);
+        const manifest = SkillManifestSchema.parse(data);
+
+        const persistedEntry = this.ratingStore.getAll()[manifest.name];
+        if (persistedEntry !== undefined) {
+          manifest.rating = persistedEntry.rating;
+          manifest.invocations = persistedEntry.invocations;
+        }
+
+        this.skills.set(manifest.name, {
+          manifest,
+          instructions: content.trim(),
+          dirPath: path.dirname(file),
+          rating: manifest.rating,
+        });
+      } catch {
+        // silently skip incompatible skills from extra dir
+      }
+    }
+  }
+
   async load(): Promise<void> {
     // glob requires forward slashes on all platforms (including Windows)
     const pattern = this.skillsDir.replace(/\\/g, '/') + '/**/SKILL.md';
     const files = await glob(pattern);
 
+    let failCount = 0;
     for (const file of files) {
       try {
         const raw = fs.readFileSync(file, 'utf-8');
@@ -47,9 +80,16 @@ export class SkillRegistry {
           dirPath: path.dirname(file),
           rating: manifest.rating,
         });
-      } catch (err) {
-        console.warn(`[Registry] Failed to load ${file}: ${err}`);
+      } catch {
+        failCount++;
       }
+    }
+
+    if (failCount > 0) {
+      const total = files.length;
+      process.stderr.write(
+        `[Registry] Loaded ${total - failCount}/${total} skills (${failCount} skipped — incompatible format)\n`
+      );
     }
   }
 
