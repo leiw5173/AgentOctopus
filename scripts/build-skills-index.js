@@ -5,6 +5,9 @@
  *
  * Usage: node scripts/build-skills-index.js
  * Output: skills-index.json + skills-index.json.gz (in CWD)
+ *
+ * Performance: processes skills in parallel (CONCURRENCY workers) so the
+ * full 5,000+ skill list completes in ~15 minutes instead of 6+ hours.
  */
 import { inflateRawSync, gzipSync } from 'zlib';
 import fs from 'fs';
@@ -15,7 +18,12 @@ const AWESOME_README_URL =
   'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/README.md';
 const AWESOME_CATEGORY_BASE =
   'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/categories/';
-const DELAY_MS = 500;
+
+/** Number of skills processed in parallel. Keep low enough to avoid 429s. */
+const CONCURRENCY = 8;
+
+/** Delay between requests within a single worker (ms). */
+const INTER_REQUEST_DELAY_MS = 150;
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -29,8 +37,8 @@ async function fetchWithRetry(url, retries = 3) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     const res = await fetch(url, { headers });
     if (res.status === 429 && attempt < retries) {
-      const wait = parseInt(res.headers.get('retry-after') ?? '5', 10) * 1000 + 1000;
-      console.warn(`  Rate limited — waiting ${Math.ceil(wait / 1000)}s...`);
+      const wait = parseInt(res.headers.get('retry-after') ?? '10', 10) * 1000 + 1000;
+      process.stderr.write(`  [429] waiting ${Math.ceil(wait / 1000)}s...\n`);
       await sleep(wait);
       continue;
     }
@@ -42,6 +50,8 @@ async function fetchWithRetry(url, retries = 3) {
   }
   throw new Error('Fetch retry exhausted');
 }
+
+// ── ZIP extractor ──────────────────────────────────────────────────────────
 
 function parseZipEntries(buffer) {
   const entries = [];
@@ -73,15 +83,15 @@ function parseZipEntries(buffer) {
 }
 
 function extractFileFromZip(zipBuffer, targetName) {
-  const entries = parseZipEntries(zipBuffer);
-  for (const entry of entries) {
-    const basename = path.basename(entry.name);
-    if (basename === targetName && !entry.isDirectory) {
+  for (const entry of parseZipEntries(zipBuffer)) {
+    if (path.basename(entry.name) === targetName && !entry.isDirectory) {
       return entry.data.toString('utf8');
     }
   }
   return null;
 }
+
+// ── Slug fetching ──────────────────────────────────────────────────────────
 
 async function fetchAwesomeSlugs() {
   const slugSet = new Set();
@@ -90,9 +100,7 @@ async function fetchAwesomeSlugs() {
   const parseMarkdown = (text) => {
     SKILL_URL_RE.lastIndex = 0;
     let m;
-    while ((m = SKILL_URL_RE.exec(text)) !== null) {
-      slugSet.add(m[1]);
-    }
+    while ((m = SKILL_URL_RE.exec(text)) !== null) slugSet.add(m[1]);
   };
 
   const readmeRes = await fetchWithRetry(AWESOME_README_URL);
@@ -118,7 +126,13 @@ async function fetchAwesomeSlugs() {
   return Array.from(slugSet);
 }
 
-async function resolveSlug(ownerSlug) {
+// ── Per-skill fetch (resolve + meta + zip in one worker pass) ──────────────
+
+/**
+ * Attempt to fetch a skill by progressively stripping the owner prefix.
+ * Returns { slug, meta } for the first successful API hit, or null.
+ */
+async function resolveSlugAndMeta(ownerSlug) {
   const candidates = [ownerSlug];
   let remainder = ownerSlug;
   while (remainder.includes('-')) {
@@ -129,66 +143,84 @@ async function resolveSlug(ownerSlug) {
     const res = await fetchWithRetry(
       `${CLAWHUB_BASE}/api/v1/skills/${encodeURIComponent(candidate)}`
     );
-    if (res.ok) return candidate;
+    if (res.ok) return { slug: candidate, meta: await res.json() };
     if (res.status !== 404) return null;
   }
   return null;
 }
 
+async function processSkill(ownerSlug) {
+  const resolved = await resolveSlugAndMeta(ownerSlug);
+  if (!resolved) return null;
+
+  const { slug, meta } = resolved;
+  const version = meta.latestVersion?.version || meta.skill?.tags?.latest || 'latest';
+  const author = meta.owner?.handle || meta.owner?.displayName || 'unknown';
+  const name = meta.skill?.displayName || slug;
+  const description = meta.skill?.summary || '';
+
+  await sleep(INTER_REQUEST_DELAY_MS);
+
+  const zipUrl = `${CLAWHUB_BASE}/api/v1/download?slug=${encodeURIComponent(slug)}&version=${encodeURIComponent(version)}`;
+  const zipRes = await fetchWithRetry(zipUrl);
+  if (!zipRes.ok) return null;
+
+  const zipBuffer = Buffer.from(await zipRes.arrayBuffer());
+  const skillMd = extractFileFromZip(zipBuffer, 'SKILL.md');
+  if (!skillMd) return null;
+
+  const metaJson = extractFileFromZip(zipBuffer, '_meta.json');
+  const invokeScript = extractFileFromZip(zipBuffer, 'invoke.js');
+
+  return { slug, name, description, version, author, skillMd, metaJson, invokeScript };
+}
+
+// ── Concurrency pool ───────────────────────────────────────────────────────
+
+/**
+ * Run `tasks` with at most `limit` in-flight at once.
+ * Returns results in the same order as tasks (nulls for failures).
+ */
+async function pLimit(tasks, limit) {
+  const results = new Array(tasks.length).fill(null);
+  let nextIdx = 0;
+
+  async function worker() {
+    while (nextIdx < tasks.length) {
+      const idx = nextIdx++;
+      try {
+        results[idx] = await tasks[idx]();
+      } catch {
+        results[idx] = null;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: limit }, worker));
+  return results;
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────
+
 async function main() {
   console.log('Fetching slug list from awesome-openclaw-skills...');
   const ownerSlugs = await fetchAwesomeSlugs();
-  console.log(`Found ${ownerSlugs.length} slugs.`);
+  console.log(`Found ${ownerSlugs.length} slugs. Processing with ${CONCURRENCY} workers...`);
 
-  const skills = [];
-  let idx = 0;
+  let done = 0;
+  const total = ownerSlugs.length;
 
-  for (const ownerSlug of ownerSlugs) {
-    idx++;
-    process.stdout.write(`[${idx}/${ownerSlugs.length}] ${ownerSlug} ... `);
+  const tasks = ownerSlugs.map((ownerSlug) => async () => {
+    const result = await processSkill(ownerSlug);
+    done++;
+    const status = result ? 'OK' : 'SKIP';
+    process.stdout.write(`[${done}/${total}] ${ownerSlug} ... ${status}\n`);
+    await sleep(INTER_REQUEST_DELAY_MS);
+    return result;
+  });
 
-    const slug = await resolveSlug(ownerSlug);
-    if (!slug) {
-      console.log('SKIP (not found)');
-      await sleep(DELAY_MS);
-      continue;
-    }
-
-    const metaRes = await fetchWithRetry(`${CLAWHUB_BASE}/api/v1/skills/${encodeURIComponent(slug)}`);
-    if (!metaRes.ok) {
-      console.log(`SKIP (meta ${metaRes.status})`);
-      await sleep(DELAY_MS);
-      continue;
-    }
-    const meta = await metaRes.json();
-    const version = meta.latestVersion?.version || meta.skill?.tags?.latest || 'latest';
-    const author = meta.owner?.handle || meta.owner?.displayName || 'unknown';
-    const name = meta.skill?.displayName || slug;
-    const description = meta.skill?.summary || '';
-
-    const zipUrl = `${CLAWHUB_BASE}/api/v1/download?slug=${encodeURIComponent(slug)}&version=${encodeURIComponent(version)}`;
-    const zipRes = await fetchWithRetry(zipUrl);
-    if (!zipRes.ok) {
-      console.log(`SKIP (zip ${zipRes.status})`);
-      await sleep(DELAY_MS);
-      continue;
-    }
-    const zipBuffer = Buffer.from(await zipRes.arrayBuffer());
-
-    const skillMd = extractFileFromZip(zipBuffer, 'SKILL.md');
-    const metaJson = extractFileFromZip(zipBuffer, '_meta.json');
-    const invokeScript = extractFileFromZip(zipBuffer, 'invoke.js');
-
-    if (!skillMd) {
-      console.log('SKIP (no SKILL.md in ZIP)');
-      await sleep(DELAY_MS);
-      continue;
-    }
-
-    skills.push({ slug, name, description, version, author, skillMd, metaJson, invokeScript });
-    console.log('OK');
-    await sleep(DELAY_MS);
-  }
+  const results = await pLimit(tasks, CONCURRENCY);
+  const skills = results.filter(Boolean);
 
   console.log(`\nBuilding index with ${skills.length} skills...`);
 
