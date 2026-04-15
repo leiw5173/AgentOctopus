@@ -99,15 +99,24 @@ async function bootstrap() {
     octopusConfig?.ratingsPath ||
     path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'ratings.json');
 
-  // Merge stored credentials into process.env so scripts/invoke.js can read them
+  // Merge stored credentials into process.env so scripts/invoke.js can read them.
+  // octopus.json credentials take priority over any .env file loaded from CWD,
+  // since the .env may belong to a different project (e.g. ~/.openclaw/.env).
   if (octopusConfig?.credentials) {
     for (const [key, value] of Object.entries(octopusConfig.credentials)) {
-      if (!process.env[key]) process.env[key] = value;
+      process.env[key] = value;
     }
   }
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
   await registry.load();
+
+  // If REGISTRY_PATH pointed to a different dir than octopus.json skillsDir,
+  // also load the user's own installed skills so they're always available.
+  const userSkillsDir = octopusConfig?.skillsDir;
+  if (useEnvRegistry && userSkillsDir && userSkillsDir !== skillsDir && fs.existsSync(userSkillsDir)) {
+    await registry.loadFrom(userSkillsDir);
+  }
 
   const provider = (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') || 'openai';
   const chatConfig: LLMConfig = {
