@@ -1,5 +1,9 @@
 import { execSync as nodeExecSync } from 'child_process';
 import chalk from 'chalk';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 
 /** Packages to check for updates (CLI pulls in the rest transitively) */
 const PACKAGES = [
@@ -32,6 +36,21 @@ export function _resetExec(): void {
 }
 
 /**
+ * Injectable version resolver for testing.
+ */
+let _resolveVersion: ((pkg: string) => string | null) | null = null;
+
+/** Set a custom version resolver (for testing). */
+export function _setResolveVersion(fn: (pkg: string) => string | null): void {
+  _resolveVersion = fn;
+}
+
+/** Reset version resolver to default. */
+export function _resetResolveVersion(): void {
+  _resolveVersion = null;
+}
+
+/**
  * Query npm registry for the latest version of a package.
  * Returns null if the package is not found or the registry is unreachable.
  */
@@ -46,14 +65,67 @@ export async function getLatestVersion(pkg: string): Promise<string | null> {
 
 /**
  * Get the currently installed version of a package.
- * Uses `npm list -g` to read the global install.
- * Returns null if the package is not installed globally.
+ * Uses Node's module resolution (works with pnpm symlinks) to find the package.json.
+ * Falls back to npm list -g for global installs outside any workspace.
  */
 export function getInstalledVersion(pkg: string): string | null {
+  // Allow test override
+  if (_resolveVersion) return _resolveVersion(pkg);
+
+  // For the CLI itself, read from its own package.json
+  if (pkg === '@agentoctopus/cli') {
+    try {
+      const __cliDir = path.dirname(fileURLToPath(import.meta.url));
+      const data = JSON.parse(fs.readFileSync(path.join(__cliDir, '..', 'package.json'), 'utf8'));
+      if (data.version) return data.version;
+    } catch {
+      // Fall through
+    }
+  }
+
+  // Use require.resolve to find the package through Node's resolution
+  // This follows pnpm symlinks correctly
+  try {
+    const require = createRequire(import.meta.url);
+    const mainPath = require.resolve(pkg);
+    // Walk up from the resolved file to find package.json
+    let dir = path.dirname(mainPath);
+    for (let i = 0; i < 5; i++) {
+      const pkgJsonPath = path.join(dir, 'package.json');
+      if (fs.existsSync(pkgJsonPath)) {
+        const data = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+        if (data.name === pkg && data.version) return data.version;
+      }
+      dir = path.dirname(dir);
+    }
+  } catch {
+    // Fall through
+  }
+
+  // For packages not directly required by CLI, try resolving through a known dependency
+  // (e.g. @agentoctopus/adapters is a dep of @agentoctopus/core)
+  try {
+    const require = createRequire(import.meta.url);
+    const corePath = require.resolve('@agentoctopus/core');
+    const coreDir = path.dirname(corePath);
+    // Walk up to find core's package root, then look in its node_modules
+    let dir = coreDir;
+    for (let i = 0; i < 5; i++) {
+      const candidate = path.join(dir, 'node_modules', pkg, 'package.json');
+      if (fs.existsSync(candidate)) {
+        const data = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+        if (data.name === pkg && data.version) return data.version;
+      }
+      dir = path.dirname(dir);
+    }
+  } catch {
+    // Fall through to global check
+  }
+
+  // Fallback: check global install via npm list -g
   try {
     const result = _exec(`npm list -g ${pkg} --json`, { encoding: 'utf8', timeout: 10000 }).trim();
     const data = JSON.parse(result);
-    // npm list -g returns { "dependencies": { "@agentoctopus/cli": { "version": "0.4.15" } } }
     const deps = data.dependencies ?? {};
     const entry = deps[pkg];
     if (entry && entry.version) {

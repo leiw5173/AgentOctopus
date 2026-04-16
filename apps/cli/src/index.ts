@@ -53,7 +53,12 @@ program
       const updateable = displayUpdateTable(updates);
 
       if (updateable === 0) {
-        console.log(chalk.green('\n  All packages are up to date.'));
+        const allCurrent = updates.every((u) => u.current !== null && u.current === u.latest);
+        if (allCurrent) {
+          console.log(chalk.green('\n  All packages are up to date.'));
+        } else {
+          console.log(chalk.green('\n  No updates available.'));
+        }
         return;
       }
 

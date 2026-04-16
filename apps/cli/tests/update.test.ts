@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getLatestVersion, getInstalledVersion, checkPackageUpdates, displayUpdateTable, _setExec, _resetExec } from '../src/update.js';
+import {
+  getLatestVersion,
+  getInstalledVersion,
+  checkPackageUpdates,
+  displayUpdateTable,
+  _setExec,
+  _resetExec,
+  _setResolveVersion,
+  _resetResolveVersion,
+} from '../src/update.js';
 import type { PackageVersion } from '../src/update.js';
 
 function mockExec(mockFn: (...args: unknown[]) => string) {
@@ -33,25 +42,19 @@ describe('getLatestVersion', () => {
 describe('getInstalledVersion', () => {
   afterEach(() => {
     _resetExec();
+    _resetResolveVersion();
   });
 
-  it('returns installed version from npm list -g', () => {
-    mockExec(() => JSON.stringify({
-      dependencies: { '@agentoctopus/cli': { version: '0.4.15' } },
-    }));
+  it('returns version from resolveVersion override', () => {
+    _setResolveVersion(() => '0.4.15');
     const result = getInstalledVersion('@agentoctopus/cli');
     expect(result).toBe('0.4.15');
   });
 
-  it('returns null when package is not installed globally', () => {
-    mockExec(() => JSON.stringify({ dependencies: {} }));
-    const result = getInstalledVersion('@agentoctopus/cli');
-    expect(result).toBeNull();
-  });
-
-  it('returns null when npm list fails', () => {
+  it('returns null when resolveVersion returns null and npm list fails', () => {
+    _setResolveVersion(() => null);
     mockExec(() => { throw new Error('not installed'); });
-    const result = getInstalledVersion('@agentoctopus/cli');
+    const result = getInstalledVersion('@agentoctopus/adapters');
     expect(result).toBeNull();
   });
 });
@@ -59,29 +62,34 @@ describe('getInstalledVersion', () => {
 describe('checkPackageUpdates', () => {
   afterEach(() => {
     _resetExec();
+    _resetResolveVersion();
   });
 
   it('returns PackageVersion entries for reachable packages', async () => {
-    // Call order per package: getInstalledVersion (sync) then getLatestVersion (async)
-    const callResults = [
-      // @agentoctopus/cli
-      JSON.stringify({ dependencies: { '@agentoctopus/cli': { version: '0.4.15' } } }),
-      '0.4.18\n',
-      // @agentoctopus/core
-      JSON.stringify({ dependencies: { '@agentoctopus/core': { version: '0.4.5' } } }),
-      '0.4.7\n',
-      // @agentoctopus/registry
-      JSON.stringify({ dependencies: { '@agentoctopus/registry': { version: '0.4.7' } } }),
-      '0.4.8\n',
-      // @agentoctopus/adapters
-      JSON.stringify({ dependencies: { '@agentoctopus/adapters': { version: '0.4.1' } } }),
-      '0.4.2\n',
-      // @agentoctopus/gateway
-      JSON.stringify({ dependencies: { '@agentoctopus/gateway': { version: '0.4.6' } } }),
-      '0.4.7\n',
-    ];
-    let callIdx = 0;
-    mockExec(() => callResults[callIdx++]!);
+    // Use resolveVersion override for installed versions
+    const installedVersions: Record<string, string> = {
+      '@agentoctopus/cli': '0.4.15',
+      '@agentoctopus/core': '0.4.5',
+      '@agentoctopus/registry': '0.4.7',
+      '@agentoctopus/adapters': '0.4.1',
+      '@agentoctopus/gateway': '0.4.6',
+    };
+    _setResolveVersion((pkg: string) => installedVersions[pkg] ?? null);
+
+    // Mock npm view for latest versions
+    const latestVersions: Record<string, string> = {
+      '@agentoctopus/cli': '0.4.18\n',
+      '@agentoctopus/core': '0.4.7\n',
+      '@agentoctopus/registry': '0.4.8\n',
+      '@agentoctopus/adapters': '0.4.2\n',
+      '@agentoctopus/gateway': '0.4.7\n',
+    };
+    mockExec((cmd: string) => {
+      for (const [pkg, ver] of Object.entries(latestVersions)) {
+        if (cmd.includes(pkg)) return ver;
+      }
+      throw new Error('not found');
+    });
 
     const results = await checkPackageUpdates();
     expect(results).toHaveLength(5);
@@ -91,6 +99,7 @@ describe('checkPackageUpdates', () => {
   });
 
   it('skips packages that are unreachable on npm', async () => {
+    _setResolveVersion(() => '0.4.0');
     mockExec(() => { throw new Error('network error'); });
     const results = await checkPackageUpdates();
     expect(results).toHaveLength(0);
