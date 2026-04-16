@@ -32,8 +32,16 @@ export const SkillManifestSchema = z.object({
     .object({
       openclaw: z
         .object({
-          /** Names of environment variables the skill requires at runtime. */
-          env: z.array(z.string()).optional(),
+          /**
+           * Environment variables the skill requires at runtime.
+           * Accepts both array format (our skills: ["XAI_API_KEY"])
+           * and object format (community: { required: [{name:...}], optional: [{name:...}] })
+           */
+          env: z.union([
+            z.array(z.string()),
+            z.object({ required: z.array(z.any()).optional(), optional: z.array(z.any()).optional() })
+              .passthrough(),
+          ]).optional(),
           /** URL shown in the "get your key at …" hint message. */
           homepage: z.string().optional(),
         })
@@ -48,3 +56,38 @@ export type SkillManifest = z.infer<typeof SkillManifestSchema>;
 export type Adapter = z.infer<typeof AdapterSchema>;
 export type Auth = z.infer<typeof AuthSchema>;
 export type SkillCredential = z.infer<typeof CredentialSchema>;
+
+export interface RequiredEnvVar {
+  key: string;
+  label?: string;
+}
+
+/**
+ * Extract required env vars from a skill manifest.
+ * Checks both `credentials` (our format) and `metadata.openclaw.env` (community format).
+ */
+export function getRequiredEnvVars(manifest: SkillManifest): RequiredEnvVar[] {
+  // From credentials array
+  const fromCreds = (manifest.credentials ?? [])
+    .filter(c => c.required !== false)
+    .map(c => ({ key: c.key, label: c.label }));
+
+  // From metadata.openclaw.env — supports array and object formats
+  const envMeta = manifest.metadata?.openclaw?.env;
+  let fromMeta: RequiredEnvVar[] = [];
+  if (Array.isArray(envMeta)) {
+    fromMeta = envMeta.filter((v): v is string => typeof v === 'string').map(key => ({ key }));
+  } else if (envMeta && typeof envMeta === 'object') {
+    const required = (envMeta as { required?: { name?: string; label?: string }[] }).required ?? [];
+    fromMeta = required
+      .filter(e => typeof e.name === 'string')
+      .map(e => ({ key: e.name!, label: e.label }));
+  }
+
+  // Deduplicate by key, preserving label from first occurrence
+  const seen = new Map<string, string | undefined>();
+  for (const v of [...fromCreds, ...fromMeta]) {
+    if (!seen.has(v.key)) seen.set(v.key, v.label);
+  }
+  return [...seen.entries()].map(([key, label]) => ({ key, label }));
+}

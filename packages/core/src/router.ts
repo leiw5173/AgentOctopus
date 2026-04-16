@@ -50,6 +50,11 @@ function isSkillEligible(skill: LoadedSkill, query: string): boolean {
     return TRANSLATION_KEYWORDS.test(normalizedQuery);
   }
 
+  // Skip http-adapter skills with no endpoint — they can't execute
+  if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint) {
+    return false;
+  }
+
   return true;
 }
 
