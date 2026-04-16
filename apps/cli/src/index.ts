@@ -239,8 +239,9 @@ program
         console.error(chalk.red('Error:'), result.adapterResult.error);
       }
     } catch (err) {
-      spinner.fail('Execution crashed');
-      console.error(err);
+      spinner.fail('Execution failed');
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(chalk.red(message));
     }
   });
 

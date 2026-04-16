@@ -32,8 +32,16 @@ export const SkillManifestSchema = z.object({
     .object({
       openclaw: z
         .object({
-          /** Names of environment variables the skill requires at runtime. */
-          env: z.array(z.string()).optional(),
+          /**
+           * Environment variables the skill requires at runtime.
+           * Accepts both array format (our skills: ["XAI_API_KEY"])
+           * and object format (community: { required: [{name:...}], optional: [{name:...}] })
+           */
+          env: z.union([
+            z.array(z.string()),
+            z.object({ required: z.array(z.any()).optional(), optional: z.array(z.any()).optional() })
+              .passthrough(),
+          ]).optional(),
           /** URL shown in the "get your key at …" hint message. */
           homepage: z.string().optional(),
         })
@@ -48,3 +56,26 @@ export type SkillManifest = z.infer<typeof SkillManifestSchema>;
 export type Adapter = z.infer<typeof AdapterSchema>;
 export type Auth = z.infer<typeof AuthSchema>;
 export type SkillCredential = z.infer<typeof CredentialSchema>;
+
+/**
+ * Extract required env var names from a skill manifest.
+ * Checks both `credentials` (our format) and `metadata.openclaw.env` (community format).
+ */
+export function getRequiredEnvVars(manifest: SkillManifest): string[] {
+  // From credentials array
+  const fromCreds = (manifest.credentials ?? [])
+    .filter(c => c.required !== false)
+    .map(c => c.key);
+
+  // From metadata.openclaw.env — supports array and object formats
+  const envMeta = manifest.metadata?.openclaw?.env;
+  let fromMeta: string[] = [];
+  if (Array.isArray(envMeta)) {
+    fromMeta = envMeta.filter((v): v is string => typeof v === 'string');
+  } else if (envMeta && typeof envMeta === 'object') {
+    const required = (envMeta as { required?: { name?: string }[] }).required ?? [];
+    fromMeta = required.map(e => e.name).filter((v): v is string => typeof v === 'string');
+  }
+
+  return [...new Set([...fromCreds, ...fromMeta])];
+}

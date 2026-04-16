@@ -1,4 +1,5 @@
 import type { LoadedSkill, SkillRegistry } from '@agentoctopus/registry';
+import { getRequiredEnvVars } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 
@@ -17,14 +18,15 @@ export class Executor {
 
   async execute(skill: LoadedSkill, input: Record<string, unknown>): Promise<ExecutionResult> {
     // Check required credentials before invoking
-    const missing = (skill.manifest.credentials ?? [])
-      .filter(c => c.required !== false && !process.env[c.key])
-      .map(c => c.key);
+    const required = getRequiredEnvVars(skill.manifest);
+    const missing = required.filter(k => !process.env[k]);
 
     if (missing.length > 0) {
-      const lines = missing.map(k => `  ${k}`).join('\n');
+      const lines = missing.map(k => `  - ${k}`).join('\n');
+      const homepage = skill.manifest.metadata?.openclaw?.homepage;
+      const hint = homepage ? `\n  Get your key at: ${homepage}` : '';
       throw new Error(
-        `✘ Skill "${skill.manifest.name}" requires environment variables that are not set:\n\n${lines}\n\nRun: octopus config set ${missing[0]} <your-value>`,
+        `Skill "${skill.manifest.name}" requires API keys that are not configured:\n\n${lines}${hint}\n\n  To set a key, run:\n    octopus config set ${missing[0]} <your-key>`,
       );
     }
 
