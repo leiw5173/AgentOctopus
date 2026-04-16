@@ -19,14 +19,17 @@ export class Executor {
   async execute(skill: LoadedSkill, input: Record<string, unknown>): Promise<ExecutionResult> {
     // Check required credentials before invoking
     const required = getRequiredEnvVars(skill.manifest);
-    const missing = required.filter(k => !process.env[k]);
+    const missing = required.filter(v => !process.env[v.key]);
 
     if (missing.length > 0) {
-      const lines = missing.map(k => `  - ${k}`).join('\n');
+      const lines = missing.map(v => {
+        if (v.label) return `  - ${v.key} — ${v.label}`;
+        return `  - ${v.key}`;
+      }).join('\n');
       const homepage = skill.manifest.metadata?.openclaw?.homepage;
       const hint = homepage ? `\n  Get your key at: ${homepage}` : '';
       throw new Error(
-        `Skill "${skill.manifest.name}" requires API keys that are not configured:\n\n${lines}${hint}\n\n  To set a key, run:\n    octopus config set ${missing[0]} <your-key>`,
+        `Skill "${skill.manifest.name}" requires API keys that are not configured:\n\n${lines}${hint}\n\n  To set a key, run:\n    octopus config set ${missing[0].key} <your-key>`,
       );
     }
 

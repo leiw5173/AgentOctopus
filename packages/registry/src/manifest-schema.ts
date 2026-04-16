@@ -57,25 +57,37 @@ export type Adapter = z.infer<typeof AdapterSchema>;
 export type Auth = z.infer<typeof AuthSchema>;
 export type SkillCredential = z.infer<typeof CredentialSchema>;
 
+export interface RequiredEnvVar {
+  key: string;
+  label?: string;
+}
+
 /**
- * Extract required env var names from a skill manifest.
+ * Extract required env vars from a skill manifest.
  * Checks both `credentials` (our format) and `metadata.openclaw.env` (community format).
  */
-export function getRequiredEnvVars(manifest: SkillManifest): string[] {
+export function getRequiredEnvVars(manifest: SkillManifest): RequiredEnvVar[] {
   // From credentials array
   const fromCreds = (manifest.credentials ?? [])
     .filter(c => c.required !== false)
-    .map(c => c.key);
+    .map(c => ({ key: c.key, label: c.label }));
 
   // From metadata.openclaw.env — supports array and object formats
   const envMeta = manifest.metadata?.openclaw?.env;
-  let fromMeta: string[] = [];
+  let fromMeta: RequiredEnvVar[] = [];
   if (Array.isArray(envMeta)) {
-    fromMeta = envMeta.filter((v): v is string => typeof v === 'string');
+    fromMeta = envMeta.filter((v): v is string => typeof v === 'string').map(key => ({ key }));
   } else if (envMeta && typeof envMeta === 'object') {
-    const required = (envMeta as { required?: { name?: string }[] }).required ?? [];
-    fromMeta = required.map(e => e.name).filter((v): v is string => typeof v === 'string');
+    const required = (envMeta as { required?: { name?: string; label?: string }[] }).required ?? [];
+    fromMeta = required
+      .filter(e => typeof e.name === 'string')
+      .map(e => ({ key: e.name!, label: e.label }));
   }
 
-  return [...new Set([...fromCreds, ...fromMeta])];
+  // Deduplicate by key, preserving label from first occurrence
+  const seen = new Map<string, string | undefined>();
+  for (const v of [...fromCreds, ...fromMeta]) {
+    if (!seen.has(v.key)) seen.set(v.key, v.label);
+  }
+  return [...seen.entries()].map(([key, label]) => ({ key, label }));
 }
