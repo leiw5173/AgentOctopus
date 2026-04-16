@@ -390,7 +390,10 @@ export async function runSync(options: SyncSkillsOptions): Promise<SyncSkillsRes
   // Summary
   const totalUpdated = result.skillsUpdated.length + result.awesomeInstalled + (result.cloudResult?.added.length ?? 0) + (result.cloudResult?.updated.length ?? 0);
   if (totalUpdated > 0) {
-    console.log(chalk.yellow(`\n  Updated ${totalUpdated} skill(s). Restart the server to pick up changes.`));
+    const msg = options.cloudUrl
+      ? `Updated ${totalUpdated} skill(s). Restart the server to pick up changes.`
+      : `Updated ${totalUpdated} skill(s).`;
+    console.log(chalk.yellow(`\n  ${msg}`));
   }
 
   return result;
