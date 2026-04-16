@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execSync as nodeExecSync } from 'child_process';
 import chalk from 'chalk';
 
 /** Packages to check for updates (CLI pulls in the rest transitively) */
@@ -17,12 +17,27 @@ export interface PackageVersion {
 }
 
 /**
+ * Injectable execSync for testing. Override `_exec` before calling functions.
+ */
+let _exec: typeof nodeExecSync = nodeExecSync;
+
+/** Set the exec implementation (for testing). */
+export function _setExec(fn: typeof nodeExecSync): void {
+  _exec = fn;
+}
+
+/** Reset exec to the real implementation. */
+export function _resetExec(): void {
+  _exec = nodeExecSync;
+}
+
+/**
  * Query npm registry for the latest version of a package.
  * Returns null if the package is not found or the registry is unreachable.
  */
 export async function getLatestVersion(pkg: string): Promise<string | null> {
   try {
-    const result = execSync(`npm view ${pkg} version`, { encoding: 'utf8', timeout: 15000 }).trim();
+    const result = _exec(`npm view ${pkg} version`, { encoding: 'utf8', timeout: 15000 }).trim();
     return result || null;
   } catch {
     return null;
@@ -36,7 +51,7 @@ export async function getLatestVersion(pkg: string): Promise<string | null> {
  */
 export function getInstalledVersion(pkg: string): string | null {
   try {
-    const result = execSync(`npm list -g ${pkg} --json`, { encoding: 'utf8', timeout: 10000 }).trim();
+    const result = _exec(`npm list -g ${pkg} --json`, { encoding: 'utf8', timeout: 10000 }).trim();
     const data = JSON.parse(result);
     // npm list -g returns { "dependencies": { "@agentoctopus/cli": { "version": "0.4.15" } } }
     const deps = data.dependencies ?? {};
@@ -106,7 +121,7 @@ export function displayUpdateTable(updates: PackageVersion[]): number {
  */
 export function runGlobalInstall(): boolean {
   try {
-    execSync('npm install -g @agentoctopus/cli@latest', { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
+    _exec('npm install -g @agentoctopus/cli@latest', { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
     return true;
   } catch {
     return false;
