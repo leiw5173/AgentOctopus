@@ -704,3 +704,47 @@ Run: octopus config set SOME_KEY <your-value>
 | 6.3 | `octopus config list` shows MY_KEY masked | ☐ |
 | 6.4 | `octopus.json` contains the key after set | ☐ |
 | 6.5 | Missing env var produces descriptive error with `octopus config set` hint | ☐ |
+
+---
+
+## Phase 9 — Update & Sync Commands
+
+### 9.1 Check for package updates
+
+```bash
+node apps/cli/dist/index.js update --check
+```
+
+**Expected:** Table showing @agentoctopus packages with current and latest versions. Exit code 0 if up to date, 1 if updates available.
+
+### 9.2 Check for skill updates
+
+```bash
+node apps/cli/dist/index.js sync --check
+```
+
+**Expected:** List of installed skills with available updates, or "All installed skills are up to date."
+
+### 9.3 Sync skills (dry run)
+
+```bash
+node apps/cli/dist/index.js sync --dry-run --limit 5
+```
+
+**Expected:** Preview of up to 5 skills that would be installed, without making changes.
+
+### 9.4 Sync skills with category filter
+
+```bash
+node apps/cli/dist/index.js sync --category git-and-github --dry-run
+```
+
+**Expected:** Preview of git-and-github category skills only.
+
+### 9.5 Sync from cloud instance
+
+```bash
+node apps/cli/dist/index.js sync --cloud-url https://your-cloud-instance.com
+```
+
+**Expected:** Three-phase output: version check → awesome install → cloud sync results.

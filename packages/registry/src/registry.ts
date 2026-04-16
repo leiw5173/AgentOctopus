@@ -5,6 +5,60 @@ import { glob } from 'glob';
 import { SkillManifestSchema, type SkillManifest } from './manifest-schema.js';
 import { RatingStore } from './rating.js';
 
+/**
+ * Normalize frontmatter data from community skills so more of them pass
+ * our Zod schema. Handles the most common incompatibilities:
+ *
+ * 1. Missing `name` → default to directory name
+ * 2. Missing `description` → default to empty string
+ * 3. `name` is a number → coerce to string
+ * 4. `metadata` is a JSON string → parse to object
+ * 5. `metadata.openclaw.env` is an object with {required,optional} arrays
+ *    of {name,label} → convert to our array-of-strings format
+ */
+function normalizeSkillData(data: Record<string, unknown>, dirName: string): Record<string, unknown> {
+  // Default name from directory
+  if (!data.name || data.name == null) {
+    data.name = dirName;
+  }
+  // Coerce numeric name to string
+  if (typeof data.name === 'number') {
+    data.name = String(data.name);
+  }
+  // Default description
+  if (!data.description || data.description == null) {
+    data.description = '';
+  }
+  // Coerce metadata string to object
+  if (typeof data.metadata === 'string') {
+    try {
+      data.metadata = JSON.parse(data.metadata as string);
+    } catch {
+      data.metadata = {};
+    }
+  }
+  // Normalize metadata.openclaw.env from community object format
+  // { required: [{name, label}], optional: [{name, label}] } → ["NAME1", "NAME2"]
+  if (data.metadata && typeof data.metadata === 'object') {
+    const meta = data.metadata as Record<string, unknown>;
+    if (meta.openclaw && typeof meta.openclaw === 'object') {
+      const oc = meta.openclaw as Record<string, unknown>;
+      if (oc.env && typeof oc.env === 'object' && !Array.isArray(oc.env)) {
+        const envObj = oc.env as { required?: { name?: string }[]; optional?: { name?: string }[] };
+        const names: string[] = [];
+        for (const e of envObj.required ?? []) {
+          if (e.name && typeof e.name === 'string') names.push(e.name);
+        }
+        for (const e of envObj.optional ?? []) {
+          if (e.name && typeof e.name === 'string') names.push(e.name);
+        }
+        oc.env = names;
+      }
+    }
+  }
+  return data;
+}
+
 export interface LoadedSkill {
   manifest: SkillManifest;
   instructions: string;
@@ -35,7 +89,8 @@ export class SkillRegistry {
       try {
         const raw = fs.readFileSync(file, 'utf-8');
         const { data, content } = matter(raw);
-        const manifest = SkillManifestSchema.parse(data);
+        const dirName = path.basename(path.dirname(file));
+        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName));
 
         const persistedEntry = this.ratingStore.getAll()[manifest.name];
         if (persistedEntry !== undefined) {
@@ -65,7 +120,8 @@ export class SkillRegistry {
       try {
         const raw = fs.readFileSync(file, 'utf-8');
         const { data, content } = matter(raw);
-        const manifest = SkillManifestSchema.parse(data);
+        const dirName = path.basename(path.dirname(file));
+        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName));
 
         // Merge persisted rating and invocation count over manifest defaults
         const persistedEntry = this.ratingStore.getAll()[manifest.name];

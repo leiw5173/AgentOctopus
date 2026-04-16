@@ -79,13 +79,16 @@ Install individual skills from [ClaWHub](https://clawhub.ai):
 octopus add <slug>
 ```
 
-Or bulk-install the [awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills) curated list (5,000+ skills):
+Or sync from the [awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills) curated list (5,000+ skills):
 
 ```bash
-octopus sync-awesome
+octopus sync
+
+# Check for available updates
+octopus sync --check
 
 # Filter by category
-octopus sync-awesome --category productivity
+octopus sync --category productivity
 ```
 
 ## Updating
@@ -93,7 +96,7 @@ octopus sync-awesome --category productivity
 To update an existing installation:
 
 ```bash
-clawhub update agentoctopus
-npm update -g agentoctopus
+octopus update
+octopus sync
 octopus connect openclaw
 ```

@@ -7,14 +7,16 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import readline from 'readline';
 
-import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
+import { SkillRegistry } from '@agentoctopus/registry';
 import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
-import { installSkill, searchSkills, fetchSkillMeta, fetchAwesomeSlugs, downloadSkillsIndex, installFromIndex } from './clawhub.js';
+import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
 import { loadOctopusConfig, saveOctopusConfig, defaultConfig, getConfigPath } from './config.js';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
+import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
+import { runSync } from './sync-skills.js';
 import { fileURLToPath } from 'url';
 
 // Load env
@@ -31,6 +33,60 @@ program
   .name('octopus')
   .description('AgentOctopus CLI — intelligent routing for skills and MCPs')
   .version(cliPkg.version);
+
+program
+  .command('update')
+  .description('Check and install the latest @agentoctopus npm packages')
+  .option('--check', 'Show available updates without installing')
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .action(async (options: { check?: boolean; yes?: boolean }) => {
+    const spinner = ora('Checking for updates...').start();
+    try {
+      const updates = await checkPackageUpdates();
+      spinner.succeed('Update check complete');
+
+      if (updates.length === 0) {
+        console.log(chalk.yellow('  Cannot reach npm registry. Check your connection.'));
+        return;
+      }
+
+      const updateable = displayUpdateTable(updates);
+
+      if (updateable === 0) {
+        console.log(chalk.green('\n  All packages are up to date.'));
+        return;
+      }
+
+      if (options.check) {
+        console.log(chalk.gray(`\n  Run ${chalk.cyan('octopus update')} to install updates.`));
+        process.exit(1);
+      }
+
+      // Confirmation prompt
+      if (!options.yes) {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(`\n  Update ${updateable} package(s)? [y/N] `, resolve);
+        });
+        rl.close();
+        if (answer.toLowerCase() !== 'y') {
+          console.log(chalk.gray('  Update cancelled.'));
+          return;
+        }
+      }
+
+      const installSpinner = ora('Installing @agentoctopus/cli@latest...').start();
+      const success = runGlobalInstall();
+      if (success) {
+        installSpinner.succeed('Update installed successfully!');
+        console.log(chalk.gray('  Run `octopus --version` to verify the new version.'));
+      } else {
+        installSpinner.fail('Update failed. Try running `npm install -g @agentoctopus/cli@latest` manually.');
+      }
+    } catch (err) {
+      spinner.fail(`Update check failed: ${(err as Error).message}`);
+    }
+  });
 
 program
   .command('onboard')
@@ -405,190 +461,39 @@ program
 
 program
   .command('sync')
-  .description('Sync skills from a cloud AgentOctopus instance')
-  .requiredOption('--cloud-url <url>', 'URL of the cloud AgentOctopus instance')
-  .option('--force', 'Overwrite existing skills even if versions match')
-  .action(async (options: { cloudUrl: string; force?: boolean }) => {
-    const spinner = ora(`Syncing skills from ${options.cloudUrl}...`).start();
-    try {
-      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
-
-      const result = await syncFromCloud(options.cloudUrl, skillsDir, options.force);
-      spinner.succeed('Sync complete');
-
-      if (result.added.length > 0) {
-        console.log(chalk.green(`  Added: ${result.added.join(', ')}`));
-      }
-      if (result.updated.length > 0) {
-        console.log(chalk.cyan(`  Updated: ${result.updated.join(', ')}`));
-      }
-      if (result.skipped.length > 0) {
-        console.log(chalk.gray(`  Skipped: ${result.skipped.join(', ')}`));
-      }
-      if (result.errors.length > 0) {
-        console.log(chalk.red(`  Errors: ${result.errors.join(', ')}`));
-      }
-
-      const total = result.added.length + result.updated.length;
-      if (total > 0) {
-        console.log(chalk.yellow('\n  Restart the server to pick up synced skills.'));
-      }
-    } catch (err) {
-      spinner.fail(`Sync failed: ${(err as Error).message}`);
-    }
-  });
-
-program
-  .command('sync-awesome')
-  .description('Bulk-install skills from the curated awesome-openclaw-skills list (github.com/VoltAgent/awesome-openclaw-skills)')
+  .description('Sync and update skills — check for updates, install from awesome-openclaw-skills, and/or sync from cloud')
+  .option('--cloud-url <url>', 'Cloud AgentOctopus instance URL')
   .option('--category <name>', 'Install only skills from one category (e.g. "git-and-github")')
-  .option('--limit <n>', 'Maximum number of skills to install (useful for testing)', parseInt)
-  .option('--force', 'Overwrite already-installed skills')
-  .option('--dry-run', 'Preview slugs that would be installed without installing anything')
+  .option('--limit <n>', 'Maximum number of skills to install', parseInt)
+  .option('--force', 'Overwrite existing skills even if versions match')
+  .option('--dry-run', 'Preview what would happen without making changes')
+  .option('--check', 'Show available skill updates without installing')
   .option('--registry <url>', 'Custom ClaWHub registry URL')
   .action(async (options: {
+    cloudUrl?: string;
     category?: string;
     limit?: number;
     force?: boolean;
     dryRun?: boolean;
+    check?: boolean;
     registry?: string;
   }) => {
     const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
     const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
 
-    const spinner = ora(
-      options.category
-        ? `Fetching "${options.category}" skill list...`
-        : 'Downloading skills index...',
-    ).start();
-
-    // ── Step 1: resolve slug filter for --category ──
-    let slugFilter: Set<string> | null = null;
-    if (options.category) {
-      try {
-        const categorySlugs = await fetchAwesomeSlugs({ category: options.category });
-        slugFilter = new Set(categorySlugs);
-      } catch (err) {
-        spinner.fail(`Failed to fetch category "${options.category}": ${(err as Error).message}`);
-        return;
-      }
-    }
-
-    // ── Step 2: try index-first path ──
-    let indexEntries: import('./clawhub.js').SkillIndexEntry[] | null = null;
-    try {
-      spinner.text = 'Downloading skills index (one request)...';
-      indexEntries = await downloadSkillsIndex();
-    } catch (err) {
-      spinner.warn(`Skills index unavailable (${(err as Error).message}) — falling back to ClaWHub per-skill fetch.`);
-    }
-
-    if (indexEntries !== null) {
-      // ── Index path ──
-      let entries = indexEntries;
-      if (slugFilter) {
-        entries = entries.filter(e => slugFilter!.has(e.slug));
-      }
-      const total = options.limit && options.limit > 0 ? Math.min(options.limit, entries.length) : entries.length;
-      entries = entries.slice(0, total);
-
-      spinner.succeed(
-        `Found ${entries.length} skill(s)${options.category ? ` in "${options.category}"` : ''} in index.`,
-      );
-
-      if (options.dryRun) {
-        console.log(chalk.bold('\n  Dry run — skills that would be installed:\n'));
-        entries.forEach(e => console.log(`  ${chalk.cyan(e.slug)}`));
-        console.log(chalk.gray(`\n  Total: ${entries.length}`));
-        return;
-      }
-
-      const results = { installed: 0, skipped: 0 };
-      for (let i = 0; i < entries.length; i++) {
-        const entry = entries[i]!;
-        const prefix = chalk.gray(`[${i + 1}/${entries.length}]`);
-        const alreadyExists = fs.existsSync(path.join(skillsDir, entry.slug));
-        if (alreadyExists && !options.force) {
-          console.log(`${prefix} ${chalk.gray('–')} ${entry.slug} ${chalk.gray('(already installed, use --force to overwrite)')}`);
-          results.skipped++;
-        } else {
-          installFromIndex(entry, skillsDir, options.force);
-          console.log(`${prefix} ${chalk.green('✔')} ${chalk.cyan(entry.slug)}`);
-          results.installed++;
-        }
-      }
-
-      console.log(
-        chalk.bold(`\n  Done. Installed: ${results.installed}  Skipped: ${results.skipped}`),
-      );
-      if (results.installed > 0) {
-        console.log(chalk.yellow('\n  Restart the server to pick up new skills.'));
-      }
-      return;
-    }
-
-    // ── Fallback: per-skill ClaWHub fetch (original behaviour) ──
-    let slugs: string[];
-    try {
-      spinner.text = options.category
-        ? `Fetching "${options.category}" skills from awesome-openclaw-skills...`
-        : 'Fetching skill list from awesome-openclaw-skills...';
-      slugs = slugFilter ? Array.from(slugFilter) : await fetchAwesomeSlugs();
-    } catch (err) {
-      spinner.fail(`Failed to fetch skill list: ${(err as Error).message}`);
-      return;
-    }
-
-    const total = options.limit && options.limit > 0 ? Math.min(options.limit, slugs.length) : slugs.length;
-    slugs = slugs.slice(0, total);
-
-    spinner.succeed(
-      `Found ${slugs.length} skill(s)${options.category ? ` in "${options.category}"` : ''}.`,
-    );
-
-    if (options.dryRun) {
-      console.log(chalk.bold('\n  Dry run — skills that would be installed:\n'));
-      slugs.forEach(s => console.log(`  ${chalk.cyan(s)}`));
-      console.log(chalk.gray(`\n  Total: ${slugs.length}`));
-      return;
-    }
-
-    const results = { installed: 0, skipped: 0, failed: 0 };
-    const failedSlugs: string[] = [];
-
-    for (let i = 0; i < slugs.length; i++) {
-      const slug = slugs[i]!;
-      const prefix = chalk.gray(`[${i + 1}/${slugs.length}]`);
-      try {
-        await installSkill(slug, skillsDir, { registryUrl: options.registry, force: options.force });
-        console.log(`${prefix} ${chalk.green('✔')} ${chalk.cyan(slug)}`);
-        results.installed++;
-      } catch (err) {
-        const msg = (err as Error).message ?? '';
-        if (msg.includes('already exists')) {
-          console.log(`${prefix} ${chalk.gray('–')} ${slug} ${chalk.gray('(already installed, use --force to overwrite)')}`);
-          results.skipped++;
-        } else {
-          console.log(`${prefix} ${chalk.red('✘')} ${slug} — ${chalk.red(msg)}`);
-          failedSlugs.push(slug);
-          results.failed++;
-        }
-      }
-    }
-
-    console.log(
-      chalk.bold(
-        `\n  Done. Installed: ${results.installed}  Skipped: ${results.skipped}  Failed: ${results.failed}`,
-      ),
-    );
-    if (failedSlugs.length > 0) {
-      console.log(chalk.red(`  Failed: ${failedSlugs.join(', ')}`));
-    }
-    if (results.installed > 0) {
-      console.log(chalk.yellow('\n  Restart the server to pick up new skills.'));
-    }
+    await runSync({
+      skillsDir,
+      check: options.check,
+      category: options.category,
+      limit: options.limit,
+      cloudUrl: options.cloudUrl,
+      force: options.force,
+      dryRun: options.dryRun,
+      registryUrl: options.registry,
+    });
   });
+
+program
 
 // ── octopus skill <subcommand> ─────────────────────────────────────────────
 const skillCmd = program
