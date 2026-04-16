@@ -109,15 +109,30 @@ octopus config set XAI_API_KEY <your-key>
 # Install a single skill from ClaWHub
 octopus add <slug>
 
-# Bulk-install from the awesome-openclaw-skills curated list (5,000+ skills in ~10 seconds)
-# Downloads a pre-built daily index — no rate-limit exposure, no ClaWHub loop
-octopus sync-awesome
+# Sync skills: check for updates + install from awesome-openclaw-skills (5,000+ skills)
+octopus sync
+
+# Check for available skill updates without installing
+octopus sync --check
 
 # Filter by category
-octopus sync-awesome --category productivity
+octopus sync --category productivity
+
+# Also sync from a cloud AgentOctopus instance
+octopus sync --cloud-url https://your-cloud-instance.com
 ```
 
 Browse the full curated list: [awesome-openclaw-skills](https://github.com/VoltAgent/awesome-openclaw-skills)
+
+## Updating AgentOctopus
+
+```bash
+# Check for package updates
+octopus update --check
+
+# Install latest packages
+octopus update
+```
 
 ## Development
 

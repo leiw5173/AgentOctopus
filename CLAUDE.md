@@ -90,6 +90,13 @@ pnpm --filter @agentoctopus/registry exec vitest run tests/registry.test.ts
 node apps/cli/dist/index.js list
 node apps/cli/dist/index.js ask "What's the weather in Tokyo?"
 
+# CLI update commands (must build first)
+node apps/cli/dist/index.js update          # check and install latest @agentoctopus packages
+node apps/cli/dist/index.js update --check  # check only, don't install
+node apps/cli/dist/index.js sync            # update skills + install from awesome-openclaw-skills
+node apps/cli/dist/index.js sync --check    # check for skill updates only
+node apps/cli/dist/index.js sync --cloud-url <url>  # also sync from cloud instance
+
 # Web dev server
 cd apps/web && pnpm dev   # http://localhost:3000
 ```
@@ -122,7 +129,7 @@ User query
 | `packages/adapters` | `http-adapter.ts`, `mcp-adapter.ts`, `subprocess-adapter.ts` | Three execution strategies — HTTP POST, MCP stdio, Node subprocess |
 | `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API |
 | `apps/web` | `src/app/api/ask/route.ts`, `src/app/page.tsx` | Next.js REST API + chat demo UI |
-| `apps/cli` | `src/index.ts` | Commander CLI (`list`, `ask`) with readline feedback prompt |
+| `apps/cli` | `src/index.ts`, `src/update.ts`, `src/sync-skills.ts` | Commander CLI (`list`, `ask`, `update`, `sync`, `onboard`, `skill`) |
 
 ### Routing logic (critical to understand)
 
