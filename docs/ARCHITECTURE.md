@@ -5,7 +5,7 @@
 ```
 AgentOctopus/
 ├── apps/
-│   ├── cli/           # CLI entry point (`octopus ask/list/add/sync-awesome/config/onboard`)
+│   ├── cli/           # CLI entry point (`octopus ask/list/add/update/sync/config/onboard`)
 │   └── web/           # Next.js web UI, REST API, and marketplace
 │       ├── /           # Chat interface with skills sidebar
 │       └── /marketplace  # Skill marketplace browser
@@ -118,7 +118,7 @@ octopus onboard
 
 ## Skills Index Bundle
 
-`octopus sync-awesome` downloads a pre-built, daily-refreshed index instead of
+`octopus sync` downloads a pre-built, daily-refreshed index instead of
 fetching 5,000+ skills one-by-one from ClaWHub:
 
 ```
@@ -128,15 +128,17 @@ GitHub Action (daily, 02:00 UTC)
   → build skills-index.json  (slug, name, SKILL.md, _meta.json, invoke.js)
   → gzip → upload to GitHub Release tag: skills-index-latest
 
-octopus sync-awesome
-  → GET skills-index.json.gz  (1 request, ~3–5 MB)
+octopus sync
+  → Phase 1: check installed skills for updates from index
+  → Phase 2: GET skills-index.json.gz  (1 request, ~3–5 MB)
   → gunzip + parse in memory
   → apply --category / --limit filters locally (no extra network calls)
   → write SKILL.md + _meta.json + scripts/invoke.js per skill
+  → Phase 3 (optional): sync from cloud instance via --cloud-url
   → done in ~10 seconds for 5,000+ skills
 ```
 
-If the GitHub Release asset is unavailable, `sync-awesome` prints a warning and
+If the GitHub Release asset is unavailable, `sync` prints a warning and
 automatically falls back to the original per-skill ClaWHub fetch path.
 
 ## SKILL.md — `metadata.openclaw` field
