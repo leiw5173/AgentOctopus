@@ -12,7 +12,7 @@ AgentOctopus has no way to update its own npm packages or check for skill update
 Two CLI commands:
 
 1. **`octopus update`** — check and install latest `@agentoctopus/*` npm packages
-2. **`octopus sync`** (replaced) — version-aware skill updates: check marketplace for newer versions of installed skills + cloud sync
+2. **`octopus sync`** (replaced) — version-aware skill updates: check marketplace for newer versions of installed skills + cloud sync + bulk install from awesome-openclaw-skills (absorbs `sync-awesome`)
 
 Both are self-contained in the CLI package (Approach A). No core package changes needed.
 
@@ -75,7 +75,7 @@ The `update` command in `index.ts` calls these functions.
 ### Command
 
 ```
-octopus sync [--cloud-url <url>] [--force] [--dry-run] [--check]
+octopus sync [--cloud-url <url>] [--category <name>] [--limit <n>] [--force] [--dry-run] [--check] [--registry <url>]
 ```
 
 ### Flags
@@ -83,13 +83,16 @@ octopus sync [--cloud-url <url>] [--force] [--dry-run] [--check]
 | Flag | Description |
 |---|---|
 | `--cloud-url <url>` | Cloud AgentOctopus instance URL (same as current) |
+| `--category <name>` | Install only skills from one category (from `sync-awesome`) |
+| `--limit <n>` | Maximum number of skills to install (from `sync-awesome`) |
 | `--force` | Overwrite existing skills even if versions match |
 | `--dry-run` | Preview what would happen without making changes |
 | `--check` | Show available skill updates without installing |
+| `--registry <url>` | Custom ClaWHub registry URL (from `sync-awesome`) |
 
-### Behavior (Two-Phase)
+### Behavior (Three-Phase)
 
-**Phase 1 — Marketplace version check:**
+**Phase 1 — Marketplace version check (update installed skills):**
 
 1. Scan `~/.agentoctopus/skills/` (or `REGISTRY_PATH`) for installed skills
 2. For each skill with a `version` field in its SKILL.md frontmatter, check the ClaWHub skills index (same source as `sync-awesome`) for a newer version
@@ -97,10 +100,17 @@ octopus sync [--cloud-url <url>] [--force] [--dry-run] [--check]
 4. If `--check`: display updates available and stop
 5. For each updatable skill, download and replace SKILL.md + scripts from marketplace
 
-**Phase 2 — Cloud sync (existing `syncFromCloud` logic):**
+**Phase 2 — Awesome skills bulk install (absorbs `sync-awesome`):**
 
-6. If `--cloud-url` is provided, run existing `syncFromCloud()` to pull skills from cloud
-7. This handles unversioned skills and cloud-only skills that aren't in the marketplace
+6. Download the skills index from ClaWHub
+7. Apply `--category` and `--limit` filters (same logic as current `sync-awesome`)
+8. For each skill not already installed (or `--force`), install from index
+9. This replaces the standalone `sync-awesome` command entirely
+
+**Phase 3 — Cloud sync (existing `syncFromCloud` logic):**
+
+10. If `--cloud-url` is provided, run existing `syncFromCloud()` to pull skills from cloud
+11. This handles unversioned skills and cloud-only skills that aren't in the marketplace
 
 ### Output
 
@@ -109,28 +119,35 @@ Skill updates available:
   x-search  1.0.0 → 1.2.0
   weather   2.0.0 → 2.1.0
 
+Awesome skills installed:
+  [1/42] ✔ new-skill
+  [2/42] – existing-skill (already installed, use --force to overwrite)
+
 Cloud sync (from https://cloud.example.com):
-  Added: new-skill
+  Added: cloud-skill
   Updated: x-search
   Skipped: translation (up to date)
 
-Updated 3 skill(s). Restart the server to pick up changes.
+Updated 4 skill(s). Restart the server to pick up changes.
 ```
 
 ### Backward Compatibility
 
 - `--cloud-url` keeps the existing cloud-sync behavior working
-- Without `--cloud-url`, only marketplace version checking runs (Phase 1 only)
-- `--force` still works as before for cloud sync
+- `--category`, `--limit`, `--registry` provide the `sync-awesome` behavior without a separate command
+- Without any flags, Phase 1 (version check) and Phase 2 (awesome bulk install) both run
+- `--force` works across all phases
+- `sync-awesome` command is removed — users migrate to `octopus sync`
 
 ### Implementation
 
 New file `apps/cli/src/sync-skills.ts` with:
 - `checkSkillUpdates(skillsDir)` — scans installed skills, queries ClaWHub skills index for newer versions
 - `updateSkills(updates, skillsDir)` — downloads and replaces updated skills
+- `installAwesomeSkills(options)` — bulk install from awesome-openclaw-skills (extracted from current `sync-awesome` handler)
 - Reuses existing `syncFromCloud()` from `@agentoctopus/registry`
 
-The `sync` command in `index.ts` is replaced to call these functions.
+The `sync` command in `index.ts` is replaced to call these functions. The `sync-awesome` command is removed.
 
 ---
 
@@ -138,9 +155,9 @@ The `sync` command in `index.ts` is replaced to call these functions.
 
 | File | Change |
 |---|---|
-| `apps/cli/src/index.ts` | Add `update` command, replace `sync` command handler |
+| `apps/cli/src/index.ts` | Add `update` command, replace `sync` command handler, remove `sync-awesome` command |
 | `apps/cli/src/update.ts` | **New** — npm registry check + install logic |
-| `apps/cli/src/sync-skills.ts` | **New** — marketplace version check + cloud sync orchestration |
+| `apps/cli/src/sync-skills.ts` | **New** — marketplace version check + awesome bulk install + cloud sync orchestration |
 | `CLAUDE.md` | Add `update` command to Commands section, update Architecture table |
 | `README.md` | Document `octopus update` and revised `octopus sync` |
 | `TEST_INSTRUCTIONS.md` | Add test rows for both commands |
