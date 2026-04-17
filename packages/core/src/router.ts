@@ -221,7 +221,9 @@ export class Router {
       if (queryEmbedding.length > 0) {
         const scored = eligible.map(({ skill, embedding }) => {
           const cosine = cosineSimilarity(queryEmbedding, embedding);
-          const ratingBoost = (skill.rating / 5) * RATING_WEIGHT;
+          // Use composite routing score if available, otherwise fall back to flat rating
+          const routingScore = skill.routingScore ?? (skill.rating / 5);
+          const ratingBoost = routingScore * RATING_WEIGHT;
           return { skill, score: cosine + ratingBoost };
         });
         scored.sort((a, b) => b.score - a.score);
