@@ -34,10 +34,28 @@ export class Executor {
     }
 
     const adapter = this.pickAdapter(skill);
-    const adapterResult = await adapter.invoke(skill, input);
+    const startTime = Date.now();
+    let adapterResult: AdapterResult;
+    try {
+      adapterResult = await adapter.invoke(skill, input);
+    } catch (err) {
+      const latencyMs = Date.now() - startTime;
+      this.registry.recordInvocationMetrics(skill.manifest.name, {
+        success: false,
+        latencyMs,
+        tokenUsage: 0,
+      });
+      throw err;
+    }
+    const latencyMs = Date.now() - startTime;
 
-    // Record invocation in registry
-    this.registry.recordInvocation(skill.manifest.name);
+    // Record invocation metrics in registry
+    const tokenUsage = typeof (adapterResult as any).tokenUsage === 'number' ? (adapterResult as any).tokenUsage : 0;
+    this.registry.recordInvocationMetrics(skill.manifest.name, {
+      success: adapterResult.success,
+      latencyMs,
+      tokenUsage,
+    });
 
     const formattedOutput = this.format(adapterResult);
 

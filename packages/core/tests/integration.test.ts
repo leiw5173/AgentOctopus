@@ -47,6 +47,7 @@ describe('Integration: Registry -> Router -> Executor', () => {
     vi.spyOn(registry, 'getAll').mockReturnValue([mockSkill as any]);
     vi.spyOn(registry, 'getByName').mockReturnValue(mockSkill as any);
     vi.spyOn(registry, 'recordInvocation').mockImplementation(() => {});
+    vi.spyOn(registry, 'recordInvocationMetrics').mockImplementation(() => {});
 
     // Initialize Router
     const router = new Router({ provider: 'openai', model: 'gpt-4o' }, { provider: 'openai', model: 'text-embedding-3-small' });
@@ -63,6 +64,6 @@ describe('Integration: Registry -> Router -> Executor', () => {
     
     expect(execution.formattedOutput).toBe('translated string');
     expect(execution.skill.manifest.adapter).toBe('subprocess');
-    expect(registry.recordInvocation).toHaveBeenCalledWith('test-skill');
+    expect(registry.recordInvocationMetrics).toHaveBeenCalledWith('test-skill', expect.objectContaining({ success: true }));
   });
 });
