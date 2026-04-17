@@ -134,6 +134,24 @@ octopus update --check
 octopus update
 ```
 
+## Rating Sync
+
+Share skill ratings across instances using GitHub Gist:
+
+```bash
+# Set up GitHub Gist for rating sync (first time)
+octopus sync --setup-gist
+
+# Pull ratings from cloud
+octopus sync --ratings --pull
+
+# Push local ratings to cloud
+octopus sync --ratings --push
+
+# Bidirectional sync (pull then push)
+octopus sync --ratings
+```
+
 ## Development
 
 ```bash
