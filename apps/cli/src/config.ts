@@ -6,6 +6,8 @@ export interface OctopusConfig {
   skillsDir: string;
   ratingsPath: string;
   credentials: Record<string, string>;
+  gistId?: string;
+  feedbackSharing?: boolean;
 }
 
 const DEFAULT_HOME = path.join(os.homedir(), '.agentoctopus');

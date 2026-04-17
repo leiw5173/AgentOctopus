@@ -17,6 +17,7 @@ import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
 import { runSync } from './sync-skills.js';
+import { runRatingSync } from './rating-sync.js';
 import { fileURLToPath } from 'url';
 
 // Load env
@@ -474,6 +475,11 @@ program
   .option('--dry-run', 'Preview what would happen without making changes')
   .option('--check', 'Show available skill updates without installing')
   .option('--registry <url>', 'Custom ClaWHub registry URL')
+  .option('--ratings', 'Sync ratings with GitHub Gist')
+  .option('--setup-gist', 'Create or find GitHub Gist for rating sync')
+  .option('--pull', 'Pull ratings from cloud to local')
+  .option('--push', 'Push local ratings to cloud')
+  .option('--no-feedback-sharing', 'Don\'t share feedback comments in sync')
   .action(async (options: {
     cloudUrl?: string;
     category?: string;
@@ -482,7 +488,23 @@ program
     dryRun?: boolean;
     check?: boolean;
     registry?: string;
+    ratings?: boolean;
+    setupGist?: boolean;
+    pull?: boolean;
+    push?: boolean;
+    noFeedbackSharing?: boolean;
   }) => {
+    if (options.ratings || options.setupGist) {
+      await runRatingSync({
+        pull: options.pull,
+        push: options.push,
+        force: options.force,
+        dryRun: options.dryRun,
+        setupGist: options.setupGist,
+        noFeedbackSharing: options.noFeedbackSharing,
+      });
+      return;
+    }
     const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
     const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
 
