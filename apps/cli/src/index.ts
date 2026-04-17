@@ -290,7 +290,7 @@ program
 
           rl.question(chalk.yellow('Was this helpful? (y/n): '), (answer) => {
             const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
-            engine.registry.recordFeedback(skill.manifest.name, isPositive);
+            engine.registry.recordFeedback(skill.manifest.name, isPositive, undefined, 'cli');
             console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
             rl.close();
           });
