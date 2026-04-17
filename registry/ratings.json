@@ -1,0 +1,103 @@
+{
+  "translation": {
+    "skillName": "translation",
+    "dimensions": {
+      "completion": 1.0,
+      "quality": 3.1,
+      "reliability": 1.0,
+      "latency": 0.5,
+      "tokenCost": 0.5
+    },
+    "invocations": 6,
+    "lastInvoked": "2026-03-24T08:35:54.944Z",
+    "recentFeedback": [
+      {
+        "id": "migrated-1",
+        "timestamp": "2026-03-24T08:35:54.944Z",
+        "positive": true,
+        "source": "other"
+      }
+    ],
+    "metrics": {
+      "totalSuccess": 6,
+      "totalErrors": 0,
+      "avgLatencyMs": 0,
+      "p95LatencyMs": 0,
+      "avgTokenCost": 0
+    }
+  },
+  "web-search": {
+    "skillName": "web-search",
+    "dimensions": {
+      "completion": 1.0,
+      "quality": 3.0,
+      "reliability": 1.0,
+      "latency": 0.5,
+      "tokenCost": 0.5
+    },
+    "invocations": 2,
+    "lastInvoked": "2026-03-24T00:00:00.000Z",
+    "recentFeedback": [],
+    "metrics": {
+      "totalSuccess": 2,
+      "totalErrors": 0,
+      "avgLatencyMs": 0,
+      "p95LatencyMs": 0,
+      "avgTokenCost": 0
+    }
+  },
+  "weather": {
+    "skillName": "weather",
+    "dimensions": {
+      "completion": 1.0,
+      "quality": 3.1,
+      "reliability": 1.0,
+      "latency": 0.5,
+      "tokenCost": 0.5
+    },
+    "invocations": 8,
+    "lastInvoked": "2026-03-25T05:55:15.829Z",
+    "recentFeedback": [
+      {
+        "id": "migrated-2",
+        "timestamp": "2026-03-25T05:55:15.829Z",
+        "positive": true,
+        "source": "other"
+      }
+    ],
+    "metrics": {
+      "totalSuccess": 8,
+      "totalErrors": 0,
+      "avgLatencyMs": 0,
+      "p95LatencyMs": 0,
+      "avgTokenCost": 0
+    }
+  },
+  "ip-lookup": {
+    "skillName": "ip-lookup",
+    "dimensions": {
+      "completion": 1.0,
+      "quality": 3.1,
+      "reliability": 1.0,
+      "latency": 0.5,
+      "tokenCost": 0.5
+    },
+    "invocations": 15,
+    "lastInvoked": "2026-03-25T05:54:07.372Z",
+    "recentFeedback": [
+      {
+        "id": "migrated-3",
+        "timestamp": "2026-03-25T05:54:07.372Z",
+        "positive": true,
+        "source": "other"
+      }
+    ],
+    "metrics": {
+      "totalSuccess": 15,
+      "totalErrors": 0,
+      "avgLatencyMs": 0,
+      "p95LatencyMs": 0,
+      "avgTokenCost": 0
+    }
+  }
+}
