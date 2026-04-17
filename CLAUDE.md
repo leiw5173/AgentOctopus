@@ -96,7 +96,7 @@ node apps/cli/dist/index.js ask "What's the weather in Tokyo?"
 # CLI update commands (must build first)
 node apps/cli/dist/index.js update          # check and install latest @agentoctopus packages
 node apps/cli/dist/index.js update --check  # check only, don't install
-node apps/cli/dist/index.js sync            # update skills + install from awesome-openclaw-skills
+node apps/cli/dist/index.js sync            # interactive: prompts to sync skills, ratings, or both
 node apps/cli/dist/index.js sync --check    # check for skill updates only
 node apps/cli/dist/index.js sync --cloud-url <url>  # also sync from cloud instance
 
@@ -104,7 +104,9 @@ node apps/cli/dist/index.js sync --cloud-url <url>  # also sync from cloud insta
 node apps/cli/dist/index.js sync --setup-gist     # set up GitHub Gist for rating sync
 node apps/cli/dist/index.js sync --ratings --pull  # pull ratings from cloud
 node apps/cli/dist/index.js sync --ratings --push  # push ratings to cloud
-node apps/cli/dist/index.js sync --ratings         # bidirectional sync
+node apps/cli/dist/index.js sync --ratings         # bidirectional rating sync
+node apps/cli/dist/index.js sync --pull            # shorthand: pull ratings
+node apps/cli/dist/index.js sync --push            # shorthand: push ratings
 
 # Web dev server
 cd apps/web && pnpm dev   # http://localhost:3000

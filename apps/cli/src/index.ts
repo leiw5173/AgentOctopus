@@ -137,6 +137,27 @@ program
 /**
  * Helper to bootstrap the core Octopus engine
  */
+async function promptSelect(question: string, choices: { label: string; value: string }[]): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  console.log(chalk.bold(`\n${question}`));
+  choices.forEach((c, i) => console.log(`  ${chalk.cyan(`${i + 1}.`)} ${c.label}`));
+
+  return new Promise((resolve) => {
+    rl.question(chalk.gray('> '), (answer) => {
+      rl.close();
+      const idx = parseInt(answer.trim(), 10) - 1;
+      if (idx >= 0 && idx < choices.length) {
+        resolve(choices[idx].value);
+      } else {
+        // Default to first choice on invalid input
+        console.log(chalk.yellow(`Invalid choice, defaulting to: ${choices[0].label}`));
+        resolve(choices[0].value);
+      }
+    });
+  });
+}
+
 async function bootstrap() {
   const octopusConfig = loadOctopusConfig();
 
@@ -467,7 +488,7 @@ program
 
 program
   .command('sync')
-  .description('Sync and update skills — check for updates, install from awesome-openclaw-skills, and/or sync from cloud')
+  .description('Sync skills and/or ratings — prompts for choice when run without flags')
   .option('--cloud-url <url>', 'Cloud AgentOctopus instance URL')
   .option('--category <name>', 'Install only skills from one category (e.g. "git-and-github")')
   .option('--limit <n>', 'Maximum number of skills to install', parseInt)
@@ -494,6 +515,7 @@ program
     push?: boolean;
     noFeedbackSharing?: boolean;
   }) => {
+    // If --ratings or --setup-gist explicitly passed, run rating sync directly
     if (options.ratings || options.setupGist) {
       await runRatingSync({
         pull: options.pull,
@@ -505,19 +527,74 @@ program
       });
       return;
     }
-    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-    const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
 
-    await runSync({
-      skillsDir,
-      check: options.check,
-      category: options.category,
-      limit: options.limit,
-      cloudUrl: options.cloudUrl,
-      force: options.force,
-      dryRun: options.dryRun,
-      registryUrl: options.registry,
-    });
+    // If --pull or --push passed without --ratings, treat as --ratings shorthand
+    if (options.pull || options.push) {
+      await runRatingSync({
+        pull: options.pull,
+        push: options.push,
+        force: options.force,
+        dryRun: options.dryRun,
+        noFeedbackSharing: options.noFeedbackSharing,
+      });
+      return;
+    }
+
+    // If --check or other skill-specific flags passed, run skills sync directly
+    const hasSkillFlags = options.check || options.cloudUrl || options.category || options.limit || options.registry;
+    if (hasSkillFlags) {
+      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+      await runSync({
+        skillsDir,
+        check: options.check,
+        category: options.category,
+        limit: options.limit,
+        cloudUrl: options.cloudUrl,
+        force: options.force,
+        dryRun: options.dryRun,
+        registryUrl: options.registry,
+      });
+      return;
+    }
+
+    // No specific flags — interactive mode: ask what to sync
+    const syncChoice = await promptSelect(
+      'What would you like to sync?',
+      [
+        { label: 'Skills', value: 'skills' },
+        { label: 'Ratings', value: 'ratings' },
+        { label: 'Both (skills + ratings)', value: 'both' },
+      ],
+    );
+
+    if (syncChoice === 'skills' || syncChoice === 'both') {
+      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+      await runSync({
+        skillsDir,
+        force: options.force,
+        dryRun: options.dryRun,
+      });
+    }
+
+    if (syncChoice === 'ratings' || syncChoice === 'both') {
+      const ratingDirection = await promptSelect(
+        'Rating sync direction?',
+        [
+          { label: 'Pull (cloud → local)', value: 'pull' },
+          { label: 'Push (local → cloud)', value: 'push' },
+          { label: 'Both (pull + push)', value: 'both' },
+        ],
+      );
+      await runRatingSync({
+        pull: ratingDirection === 'pull' || ratingDirection === 'both',
+        push: ratingDirection === 'push' || ratingDirection === 'both',
+        force: options.force,
+        dryRun: options.dryRun,
+        noFeedbackSharing: options.noFeedbackSharing,
+      });
+    }
   });
 
 program
