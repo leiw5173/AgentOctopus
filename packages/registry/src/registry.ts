@@ -4,6 +4,7 @@ import matter from 'gray-matter';
 import { glob } from 'glob';
 import { SkillManifestSchema, type SkillManifest } from './manifest-schema.js';
 import { RatingStore } from './rating.js';
+import type { TaskType } from './rating-dimensions.js';
 
 /**
  * Normalize frontmatter data from community skills so more of them pass
@@ -64,6 +65,7 @@ export interface LoadedSkill {
   instructions: string;
   dirPath: string;
   rating: number;
+  routingScore?: number;
 }
 
 export class SkillRegistry {
@@ -94,7 +96,7 @@ export class SkillRegistry {
 
         const persistedEntry = this.ratingStore.getAll()[manifest.name];
         if (persistedEntry !== undefined) {
-          manifest.rating = persistedEntry.rating;
+          manifest.rating = persistedEntry.dimensions.quality;
           manifest.invocations = persistedEntry.invocations;
         }
 
@@ -103,6 +105,7 @@ export class SkillRegistry {
           instructions: content.trim(),
           dirPath: path.dirname(file),
           rating: manifest.rating,
+          routingScore: this.ratingStore.getRoutingScore(manifest.name),
         });
       } catch {
         // silently skip incompatible skills from extra dir
@@ -126,7 +129,7 @@ export class SkillRegistry {
         // Merge persisted rating and invocation count over manifest defaults
         const persistedEntry = this.ratingStore.getAll()[manifest.name];
         if (persistedEntry !== undefined) {
-          manifest.rating = persistedEntry.rating;
+          manifest.rating = persistedEntry.dimensions.quality;
           manifest.invocations = persistedEntry.invocations;
         }
 
@@ -135,6 +138,7 @@ export class SkillRegistry {
           instructions: content.trim(),
           dirPath: path.dirname(file),
           rating: manifest.rating,
+          routingScore: this.ratingStore.getRoutingScore(manifest.name),
         });
       } catch {
         failCount++;
@@ -175,8 +179,14 @@ export class SkillRegistry {
     }
   }
 
-  recordFeedback(skillName: string, positive: boolean, comment?: string): void {
-    this.ratingStore.recordFeedback(skillName, positive, comment);
+  recordFeedback(
+    skillName: string,
+    positive: boolean,
+    comment?: string,
+    source: 'cli' | 'web' | 'openclaw' | 'hermes' | 'other' = 'other',
+    taskType?: TaskType,
+  ): void {
+    this.ratingStore.recordFeedback(skillName, positive, comment, source, taskType);
     const skill = this.skills.get(skillName);
     if (skill) {
       const updatedRating = this.ratingStore.getRating(skillName);
@@ -184,7 +194,24 @@ export class SkillRegistry {
         skill.rating = updatedRating;
         skill.manifest.rating = skill.rating;
       }
+      skill.routingScore = this.ratingStore.getRoutingScore(skillName);
     }
+  }
+
+  recordInvocationMetrics(
+    skillName: string,
+    opts: { success: boolean; latencyMs: number; tokenUsage: number },
+  ): void {
+    this.ratingStore.recordInvocationMetrics(skillName, opts);
+    const skill = this.skills.get(skillName);
+    if (skill) {
+      skill.manifest.invocations = this.ratingStore.getOrCreate(skillName).invocations;
+      skill.routingScore = this.ratingStore.getRoutingScore(skillName);
+    }
+  }
+
+  getRoutingScore(skillName: string, taskType: TaskType = 'one-shot'): number {
+    return this.ratingStore.getRoutingScore(skillName, taskType);
   }
 
   /**
