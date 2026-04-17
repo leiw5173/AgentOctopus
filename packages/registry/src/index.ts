@@ -12,7 +12,7 @@ export {
 } from './rating-dimensions.js';
 export { fetchRemoteCatalog, type CatalogEntry, type LoadedCatalogSkill } from './catalog.js';
 export { syncFromCloud, type SyncResult, type SkillExportEntry, type SkillExportResponse } from './sync.js';
-export { detectSentiment, type Sentiment, type SentimentResult } from './sentiment.js';
+export { detectSentiment, isLikelyFeedback, type Sentiment, type SentimentResult } from './sentiment.js';
 export {
   mergeRatings,
   mergeFeedback,

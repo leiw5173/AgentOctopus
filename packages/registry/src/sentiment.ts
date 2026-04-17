@@ -23,3 +23,25 @@ export function detectSentiment(text: string): SentimentResult {
 
   return { sentiment: 'neutral' };
 }
+
+/**
+ * Determine whether a message is likely feedback about a previous response
+ * rather than a new query. Uses two-signal check:
+ * 1. Contains sentiment keywords (positive or negative)
+ * 2. Does NOT look like a new query (no question marks, no command verbs)
+ */
+export function isLikelyFeedback(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+
+  // Must contain sentiment keywords
+  const sentiment = detectSentiment(trimmed);
+  if (sentiment.sentiment === 'neutral') return false;
+
+  // Must NOT look like a new query
+  const querySignals = /\?|^(what|who|where|when|how|why|which|can|could|would|should|is|are|do|does|did|find|look|search|get|show|tell|list|check|compare|translate|convert|calculate)\b/i;
+  if (querySignals.test(trimmed)) return false;
+
+  // Sentiment keywords present + no query signals = likely feedback
+  return true;
+}

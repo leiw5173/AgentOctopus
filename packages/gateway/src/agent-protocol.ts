@@ -4,7 +4,7 @@ import { sessionManager } from './session.js';
 import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, validateApiKey } from './auth-middleware.js';
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
-import { syncFromCloud } from '@agentoctopus/registry';
+import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
 
 /**
  * OpenClaw-compatible agent-to-agent protocol with security middleware.
@@ -122,6 +122,38 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
 
     session.metadata = { ...session.metadata, ...metadata };
     sessionManager.addMessage(session, { role: 'user', content: query, timestamp: Date.now() });
+
+    // Auto-detect feedback: if session has a previous assistant message with a skillUsed,
+    // and the current message looks like feedback (not a new query), record it automatically.
+    const prevMessages = session.messages;
+    const lastAssistant = [...prevMessages].reverse().find(m => m.role === 'assistant' && m.skillUsed);
+    if (lastAssistant && isLikelyFeedback(query)) {
+      const sentiment = detectSentiment(query);
+      const positive = sentiment.sentiment === 'positive';
+      const skillName = (lastAssistant as any).skillUsed as string;
+
+      engine.registry.recordFeedback(skillName, positive, query, 'openclaw');
+
+      sessionManager.addMessage(session, {
+        role: 'assistant',
+        content: positive
+          ? `Thanks for the positive feedback on ${skillName}!`
+          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
+        timestamp: Date.now(),
+      });
+
+      res.json({
+        success: true,
+        response: positive
+          ? `Thanks for the positive feedback on ${skillName}!`
+          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
+        skill: skillName,
+        sessionId: session.id,
+        feedbackRecorded: true,
+        sentiment: sentiment.sentiment,
+      });
+      return;
+    }
 
     try {
       const [routing] = await engine.router.route(query);
