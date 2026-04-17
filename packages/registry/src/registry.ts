@@ -105,7 +105,7 @@ export class SkillRegistry {
           instructions: content.trim(),
           dirPath: path.dirname(file),
           rating: manifest.rating,
-          routingScore: this.ratingStore.getRoutingScore(manifest.name),
+          routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
         });
       } catch {
         // silently skip incompatible skills from extra dir
@@ -138,7 +138,7 @@ export class SkillRegistry {
           instructions: content.trim(),
           dirPath: path.dirname(file),
           rating: manifest.rating,
-          routingScore: this.ratingStore.getRoutingScore(manifest.name),
+          routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
         });
       } catch {
         failCount++;
@@ -194,7 +194,7 @@ export class SkillRegistry {
         skill.rating = updatedRating;
         skill.manifest.rating = skill.rating;
       }
-      skill.routingScore = this.ratingStore.getRoutingScore(skillName);
+      skill.routingScore = this.ratingStore.getRoutingScore(skillName, skill.manifest.taskType);
     }
   }
 
@@ -206,7 +206,7 @@ export class SkillRegistry {
     const skill = this.skills.get(skillName);
     if (skill) {
       skill.manifest.invocations = this.ratingStore.getOrCreate(skillName).invocations;
-      skill.routingScore = this.ratingStore.getRoutingScore(skillName);
+      skill.routingScore = this.ratingStore.getRoutingScore(skillName, skill.manifest.taskType);
     }
   }
 

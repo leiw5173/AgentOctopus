@@ -7,7 +7,7 @@ description: >
   and other tool-like requests. Prefer this skill when a request may map to one
   of many skills and the best tool is not obvious.
 tags: [router, orchestrator, general, tool-selection, gateway, routing, skills, ai, weather, translation, ip-lookup]
-version: 1.0.0
+version: 1.1.0
 adapter: subprocess
 hosting: local
 input_schema:
@@ -15,8 +15,7 @@ input_schema:
 output_schema:
   result: string
 auth: none
-rating: 5.0
-invocations: 0
+taskType: agent-collab
 metadata:
   openclaw:
     emoji: "🐙"
@@ -99,4 +98,26 @@ To update an existing installation:
 octopus update
 octopus sync
 octopus connect openclaw
+```
+
+## Rating & Feedback
+
+AgentOctopus uses a 5-dimension rating system (completion, quality, reliability, latency, tokenCost) with task-type-aware weights. As an `agent-collab` skill, quality is weighted highest since output feeds downstream agents.
+
+Feedback is collected from all platforms (CLI, web, OpenClaw, Hermes). Positive/negative signals from natural language are auto-detected.
+
+### Sync ratings across machines
+
+```bash
+# Set up GitHub Gist for cloud sync (one-time)
+octopus sync --setup-gist
+
+# Pull ratings from cloud
+octopus sync --ratings --pull
+
+# Push local ratings to cloud
+octopus sync --ratings --push
+
+# Bidirectional sync (merge local + cloud)
+octopus sync --ratings
 ```
