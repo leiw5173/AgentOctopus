@@ -184,7 +184,7 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       skillName,
       positive,
       comment,
-      (source as any) ?? 'other',
+      (source as 'cli' | 'web' | 'openclaw' | 'hermes' | 'other') ?? 'other',
     );
     res.json({ success: true });
   });

@@ -38,7 +38,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Skill "${skillName}" not found` }, { status: 404 });
     }
 
-    registry.recordFeedback(skillName, positive, comment, (source as any) ?? 'web');
+    registry.recordFeedback(skillName, positive, comment, (source as 'cli' | 'web' | 'openclaw' | 'hermes' | 'other') ?? 'web');
 
     const updatedSkill = registry.getByName(skillName);
     return NextResponse.json({
