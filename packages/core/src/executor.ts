@@ -10,7 +10,9 @@ Rules:
 - Read the skill instructions carefully to understand available commands and their arguments
 - Pick the command that best matches the user's intent
 - Output ONLY the command to run, nothing else — no explanation, no markdown
-- If the skill has scripts/, use the script path from the instructions
+- ALWAYS use relative paths (e.g. "python3 scripts/baseball.py games", NOT absolute paths)
+- If the instructions show absolute paths, convert them to relative paths from the skill directory
+- If the skill has scripts/, use the script path relative to the skill directory
 - If the instructions say to use python3, node, or bash, include that in the command
 - The command will be executed from the skill's directory`;
 
@@ -106,11 +108,21 @@ export class Executor {
     const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${skill.instructions}\n\nUser query: "${query}"\n\nWhat command should I run?`;
 
     const command = await this.chatClient.chat(SKILL_EXECUTION_SYSTEM_PROMPT, userMessage);
-    const trimmedCommand = command.trim();
+    let trimmedCommand = command.trim();
 
     if (!trimmedCommand) {
       // Fallback to standard subprocess execution
       return adapter.invoke(skill, input);
+    }
+
+    // Safety net: rewrite any absolute path to the skill's scripts/ directory.
+    // Community skills often have absolute paths from the author's machine in SKILL.md.
+    // Match patterns like /any/path/to/skill-name/scripts/foo.ext
+    const absoluteScriptMatch = trimmedCommand.match(/^(.*?)(\/[^\s]*\/scripts\/[\w.-]+\.(?:py|js|sh))(.*)$/);
+    if (absoluteScriptMatch) {
+      const [, prefix, , suffix] = absoluteScriptMatch;
+      const scriptName = absoluteScriptMatch[2].split('/scripts/')[1];
+      trimmedCommand = `${prefix}scripts/${scriptName}${suffix}`;
     }
 
     // Execute the LLM-determined command from the skill's directory
