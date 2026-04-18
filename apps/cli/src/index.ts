@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
@@ -220,7 +220,8 @@ async function bootstrap() {
       : undefined;
 
   const router = new Router(chatConfig, embedConfig);
-  const executor = new Executor(registry);
+  const chatClient = createChatClient(chatConfig);
+  const executor = new Executor(registry, chatClient);
 
   return { registry, router, executor };
 }
