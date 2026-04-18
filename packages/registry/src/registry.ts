@@ -61,6 +61,25 @@ function normalizeSkillData(data: Record<string, unknown>, dirName: string, skil
   // a scripts/ directory with .js or .py files, it's actually a subprocess skill.
   // Most community skills from ClaWHub don't set adapter in their frontmatter.
   if (skillDir && (!data.adapter || data.adapter === 'http') && !data.endpoint) {
+    // Check for MCP metadata first (higher priority)
+    if (data.metadata && typeof data.metadata === 'object') {
+      const meta = data.metadata as Record<string, unknown>;
+      if (meta.mcp_url || meta.mcp_command || meta.mcpServer) {
+        data.adapter = 'mcp';
+        data.hosting = data.hosting ?? 'local';
+        return data;
+      }
+    }
+
+    // Check for MCP references in instructions
+    const instructions = typeof data.instructions === 'string' ? data.instructions : '';
+    if (instructions.includes('mcp-remote') || instructions.includes('MCP_SERVER') || instructions.includes('mcp_server')) {
+      data.adapter = 'mcp';
+      data.hosting = data.hosting ?? 'local';
+      return data;
+    }
+
+    // Check for scripts/ directory (subprocess)
     const scriptsDir = path.join(skillDir, 'scripts');
     if (fs.existsSync(scriptsDir)) {
       try {
