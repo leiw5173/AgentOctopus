@@ -17,7 +17,7 @@ import type { TaskType } from './rating-dimensions.js';
  * 5. `metadata.openclaw.env` is an object with {required,optional} arrays
  *    of {name,label} → convert to our array-of-strings format
  */
-function normalizeSkillData(data: Record<string, unknown>, dirName: string): Record<string, unknown> {
+function normalizeSkillData(data: Record<string, unknown>, dirName: string, skillDir?: string): Record<string, unknown> {
   // Default name from directory
   if (!data.name || data.name == null) {
     data.name = dirName;
@@ -57,6 +57,25 @@ function normalizeSkillData(data: Record<string, unknown>, dirName: string): Rec
       }
     }
   }
+  // Auto-detect adapter: if adapter is 'http' (the default) but the skill has
+  // a scripts/ directory with .js or .py files, it's actually a subprocess skill.
+  // Most community skills from ClaWHub don't set adapter in their frontmatter.
+  if (skillDir && (!data.adapter || data.adapter === 'http') && !data.endpoint) {
+    const scriptsDir = path.join(skillDir, 'scripts');
+    if (fs.existsSync(scriptsDir)) {
+      try {
+        const scriptFiles = fs.readdirSync(scriptsDir);
+        const hasScript = scriptFiles.some(f => f.endsWith('.js') || f.endsWith('.py'));
+        if (hasScript) {
+          data.adapter = 'subprocess';
+          data.hosting = data.hosting ?? 'local';
+        }
+      } catch {
+        // scripts dir not readable, skip
+      }
+    }
+  }
+
   return data;
 }
 
@@ -92,7 +111,8 @@ export class SkillRegistry {
         const raw = fs.readFileSync(file, 'utf-8');
         const { data, content } = matter(raw);
         const dirName = path.basename(path.dirname(file));
-        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName));
+        const skillDir = path.dirname(file);
+        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName, skillDir));
 
         const persistedEntry = this.ratingStore.getAll()[manifest.name];
         if (persistedEntry !== undefined) {
@@ -124,7 +144,8 @@ export class SkillRegistry {
         const raw = fs.readFileSync(file, 'utf-8');
         const { data, content } = matter(raw);
         const dirName = path.basename(path.dirname(file));
-        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName));
+        const skillDir = path.dirname(file);
+        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName, skillDir));
 
         // Merge persisted rating and invocation count over manifest defaults
         const persistedEntry = this.ratingStore.getAll()[manifest.name];
