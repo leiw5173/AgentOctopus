@@ -313,9 +313,13 @@ program
 
           rl.question(chalk.yellow('Was this helpful? (y/n): '), (answer) => {
             const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
-            engine.registry.recordFeedback(skill.manifest.name, isPositive, undefined, 'cli');
-            console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
-            rl.close();
+
+            rl.question(chalk.yellow('Any comments? (press Enter to skip): '), (comment) => {
+              const trimmed = comment.trim() || undefined;
+              engine.registry.recordFeedback(skill.manifest.name, isPositive, trimmed, 'cli');
+              console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
+              rl.close();
+            });
           });
         }
       } else {
