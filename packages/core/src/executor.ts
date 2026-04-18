@@ -28,6 +28,16 @@ Rules:
 - Put the JSON body in -d '{...}' if needed
 - The command will be executed via bash`;
 
+const AUTH_DIAGNOSIS_PROMPT = `You are a helpful assistant diagnosing an API authentication error. Given a skill's instructions and the error, provide a concise setup guide.
+
+Rules:
+- Read the skill instructions to find how to get an API key or access token
+- Include the signup/registration URL if mentioned
+- Include the exact steps to configure the key
+- If the skill uses MCP, mention the MCP setup command
+- Keep it under 5 lines
+- Format as plain text, no markdown`;
+
 export interface ExecutionResult {
   skill: LoadedSkill;
   adapterResult: AdapterResult;
@@ -90,7 +100,7 @@ export class Executor {
       tokenUsage,
     });
 
-    const formattedOutput = this.format(adapterResult);
+    const formattedOutput = this.format(adapterResult, skill);
 
     return { skill, adapterResult, formattedOutput };
   }
@@ -236,7 +246,7 @@ export class Executor {
     }
   }
 
-  private format(result: AdapterResult): string {
+  private format(result: AdapterResult, skill?: LoadedSkill): string {
     if (!result.success) {
       return `Error: ${result.error}`;
     }
@@ -244,6 +254,15 @@ export class Executor {
       const text = result.rawText.trim();
       try {
         const parsed = JSON.parse(text);
+
+        // Check if the result is an auth error — if so, diagnose and append guidance
+        if (this.isAuthError(parsed) && skill && this.chatClient) {
+          const guidance = this.getAuthGuidanceSync(skill, parsed);
+          if (guidance) {
+            return `Error: ${JSON.stringify(parsed, null, 2)}\n\n${guidance}`;
+          }
+        }
+
         // Try common response shapes
         if (typeof parsed === 'string') return parsed;
         if (parsed.result) return String(parsed.result);
@@ -256,5 +275,69 @@ export class Executor {
       }
     }
     return String(result.data ?? '(no output)');
+  }
+
+  /**
+   * Detect common auth error patterns in API responses.
+   */
+  private isAuthError(parsed: Record<string, unknown>): boolean {
+    // Check error field
+    const error = String(parsed.error ?? '').toLowerCase();
+    if (error.includes('invalid_token') || error.includes('unauthorized') ||
+        error.includes('auth') || error.includes('forbidden') ||
+        error.includes('access_denied') || error.includes('missing') && error.includes('token') ||
+        error.includes('missing') && error.includes('key') ||
+        error.includes('missing') && error.includes('api_key')) {
+      return true;
+    }
+    // Check error_description
+    const desc = String(parsed.error_description ?? parsed.message ?? '').toLowerCase();
+    if (desc.includes('invalid access token') || desc.includes('missing') && desc.includes('token') ||
+        desc.includes('unauthorized') || desc.includes('api key')) {
+      return true;
+    }
+    // Check HTTP status embedded in response
+    if (parsed.status === 401 || parsed.status === 403) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Synchronous auth guidance extraction from SKILL.md.
+   * Returns setup instructions without calling the LLM for speed.
+   */
+  private getAuthGuidanceSync(skill: LoadedSkill, _parsed: Record<string, unknown>): string {
+    const lines: string[] = [];
+    lines.push(`⚠ Skill "${skill.manifest.name}" requires authentication.`);
+
+    // Check manifest for credential info
+    const required = getRequiredEnvVars(skill.manifest);
+    if (required.length > 0) {
+      for (const v of required) {
+        const label = v.label ? ` (${v.label})` : '';
+        lines.push(`  Set ${v.key}${label}: octopus config set ${v.key} <your-key>`);
+      }
+    }
+
+    // Check openclaw homepage for key acquisition
+    const homepage = skill.manifest.metadata?.openclaw?.homepage;
+    if (homepage) {
+      lines.push(`  Get your key at: ${homepage}`);
+    }
+
+    // Check for MCP URL in metadata
+    const mcpUrl = (skill.manifest.metadata as Record<string, unknown>)?.mcp_url as string | undefined;
+    if (mcpUrl) {
+      lines.push(`  MCP endpoint: ${mcpUrl}`);
+    }
+
+    // Check instructions for registration/signup URLs
+    const urlMatch = skill.instructions.match(/https?:\/\/[^\s)]+(?:register|signup|sign-up|get-started|api-keys?|dashboard)/i);
+    if (urlMatch) {
+      lines.push(`  Sign up at: ${urlMatch[0]}`);
+    }
+
+    return lines.join('\n');
   }
 }
