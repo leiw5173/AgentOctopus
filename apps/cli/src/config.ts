@@ -17,6 +17,14 @@ export function getDefaultHome(): string {
   return DEFAULT_HOME;
 }
 
+export function getDefaultSkillsDir(): string {
+  return path.join(DEFAULT_HOME, 'skills');
+}
+
+export function getDefaultRatingsPath(): string {
+  return path.join(DEFAULT_HOME, 'ratings.json');
+}
+
 export function getConfigPath(): string {
   return DEFAULT_CONFIG_PATH;
 }

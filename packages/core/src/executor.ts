@@ -16,6 +16,18 @@ Rules:
 - If the instructions say to use python3, node, or bash, include that in the command
 - The command will be executed from the skill's directory`;
 
+const HTTP_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent for HTTP API skills. Given a skill's API instructions and a user query, determine the exact curl command to run.
+
+Rules:
+- Read the skill instructions carefully to understand the API endpoints, methods, and parameters
+- Pick the endpoint and method that best matches the user's intent
+- Output ONLY the curl command to run, nothing else — no explanation, no markdown
+- Include the correct HTTP method (-X POST, -X DELETE, etc.)
+- Include -H "Content-Type: application/json" for JSON bodies
+- Include -H "Authorization: Bearer $API_KEY" if the API requires auth (use env var syntax)
+- Put the JSON body in -d '{...}' if needed
+- The command will be executed via bash`;
+
 export interface ExecutionResult {
   skill: LoadedSkill;
   adapterResult: AdapterResult;
@@ -53,6 +65,9 @@ export class Executor {
       // For subprocess skills, check if we should use LLM-guided execution
       if (skill.manifest.adapter === 'subprocess' && this.chatClient) {
         adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter);
+      } else if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && this.chatClient) {
+        // HTTP skill with no endpoint — use LLM-guided curl execution
+        adapterResult = await this.executeHttpWithLLM(skill, input);
       } else {
         adapterResult = await adapter.invoke(skill, input);
       }
@@ -130,6 +145,59 @@ export class Executor {
     return new Promise((resolve) => {
       const child = cp.spawn('bash', ['-c', trimmedCommand], {
         cwd: skill.dirPath,
+        env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+      child.on('close', (code: number) => {
+        if (code !== 0) {
+          resolve({ success: false, error: stderr || `Command exited with code ${code}: ${trimmedCommand}` });
+        } else {
+          resolve({ success: true, rawText: stdout });
+        }
+      });
+
+      child.on('error', (err: Error) => {
+        resolve({ success: false, error: err.message });
+      });
+
+      child.stdin.end();
+    });
+  }
+
+  /**
+   * LLM-guided HTTP execution:
+   * Ask the LLM to read the SKILL.md API instructions and determine
+   * the right curl command to run, then execute it.
+   */
+  private async executeHttpWithLLM(
+    skill: LoadedSkill,
+    input: Record<string, unknown>,
+  ): Promise<AdapterResult> {
+    if (!this.chatClient) {
+      return { success: false, error: `Skill "${skill.manifest.name}" has no endpoint and no LLM available for guided execution` };
+    }
+
+    const query = (input.query ?? input.text ?? '') as string;
+    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nAPI Instructions:\n${skill.instructions}\n\nUser query: "${query}"\n\nWhat curl command should I run?`;
+
+    const command = await this.chatClient.chat(HTTP_EXECUTION_SYSTEM_PROMPT, userMessage);
+    const trimmedCommand = command.trim();
+
+    if (!trimmedCommand) {
+      return { success: false, error: `LLM could not determine the API call for skill "${skill.manifest.name}"` };
+    }
+
+    // Execute the LLM-determined curl command
+    const cp = await import('node:child_process');
+    return new Promise((resolve) => {
+      const child = cp.spawn('bash', ['-c', trimmedCommand], {
         env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
         stdio: ['pipe', 'pipe', 'pipe'],
       });

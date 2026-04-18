@@ -50,10 +50,9 @@ function isSkillEligible(skill: LoadedSkill, query: string): boolean {
     return TRANSLATION_KEYWORDS.test(normalizedQuery);
   }
 
-  // Skip http-adapter skills with no endpoint — they can't execute
-  if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint) {
-    return false;
-  }
+  // HTTP-adapter skills with no endpoint can still be executed via
+  // LLM-guided execution (the LLM reads SKILL.md to determine the API call).
+  // Don't hard-filter them out — the LLM re-rank will handle relevance.
 
   return true;
 }

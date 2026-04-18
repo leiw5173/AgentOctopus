@@ -12,7 +12,7 @@ import { Router, Executor, createChatClient, type LLMConfig } from '@agentoctopu
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
-import { loadOctopusConfig, saveOctopusConfig, defaultConfig, getConfigPath } from './config.js';
+import { loadOctopusConfig, saveOctopusConfig, defaultConfig, getConfigPath, getDefaultSkillsDir, getDefaultRatingsPath } from './config.js';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
@@ -161,26 +161,10 @@ async function promptSelect(question: string, choices: { label: string; value: s
 async function bootstrap() {
   const octopusConfig = loadOctopusConfig();
 
-  // Only honour REGISTRY_PATH / RATINGS_PATH when they are absolute paths or
-  // actually exist on disk — relative paths from a stale .env (e.g. the
-  // ./registry/skills default written by older CLI versions) would otherwise
-  // shadow the user-configured octopus.json skillsDir.
-  const rawRegistryPath = process.env.REGISTRY_PATH;
-  const resolvedRegistryPath = rawRegistryPath ? path.resolve(rawRegistryPath) : undefined;
-  const useEnvRegistry = resolvedRegistryPath && fs.existsSync(resolvedRegistryPath);
-
-  const rawRatingsPath = process.env.RATINGS_PATH;
-  const resolvedRatingsPath = rawRatingsPath ? path.resolve(rawRatingsPath) : undefined;
-  const useEnvRatings = resolvedRatingsPath && fs.existsSync(resolvedRatingsPath);
-
-  const skillsDir =
-    (useEnvRegistry ? resolvedRegistryPath : undefined) ||
-    octopusConfig?.skillsDir ||
-    path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'skills');
-  const ratingsPath =
-    (useEnvRatings ? resolvedRatingsPath : undefined) ||
-    octopusConfig?.ratingsPath ||
-    path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'ratings.json');
+  // Canonical skill/rating paths: ~/.agentoctopus/skills and ~/.agentoctopus/ratings.json
+  // These are always used unless octopus.json explicitly overrides them.
+  const skillsDir = octopusConfig?.skillsDir || getDefaultSkillsDir();
+  const ratingsPath = octopusConfig?.ratingsPath || getDefaultRatingsPath();
 
   // Merge stored credentials into process.env so scripts/invoke.js can read them.
   // octopus.json credentials take priority over any .env file loaded from CWD,
@@ -193,13 +177,6 @@ async function bootstrap() {
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
   await registry.load();
-
-  // If REGISTRY_PATH pointed to a different dir than octopus.json skillsDir,
-  // also load the user's own installed skills so they're always available.
-  const userSkillsDir = octopusConfig?.skillsDir;
-  if (useEnvRegistry && userSkillsDir && userSkillsDir !== skillsDir && fs.existsSync(userSkillsDir)) {
-    await registry.loadFrom(userSkillsDir);
-  }
 
   const provider = (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') || 'openai';
   const chatConfig: LLMConfig = {
@@ -342,8 +319,7 @@ program
   .action(async (slug: string, options: { version?: string; force?: boolean; registry?: string }) => {
     const spinner = ora(`Fetching skill "${slug}" from ClaWHub...`).start();
     try {
-      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+      const skillsDir = getDefaultSkillsDir();
 
       const meta = await fetchSkillMeta(slug, options.registry);
       spinner.text = `Downloading ${chalk.cyan(meta.name || slug)} v${options.version || meta.version}...`;
@@ -394,8 +370,7 @@ program
   .command('remove <name>')
   .description('Remove an installed skill from the local registry')
   .action(async (name: string) => {
-    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-    const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+    const skillsDir = getDefaultSkillsDir();
     const skillDir = path.join(skillsDir, name);
 
     if (!fs.existsSync(skillDir)) {
@@ -548,8 +523,7 @@ program
     // If --check or other skill-specific flags passed, run skills sync directly
     const hasSkillFlags = options.check || options.cloudUrl || options.category || options.limit || options.registry;
     if (hasSkillFlags) {
-      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+      const skillsDir = getDefaultSkillsDir();
       await runSync({
         skillsDir,
         check: options.check,
@@ -574,8 +548,7 @@ program
     );
 
     if (syncChoice === 'skills' || syncChoice === 'both') {
-      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+      const skillsDir = getDefaultSkillsDir();
       await runSync({
         skillsDir,
         force: options.force,
