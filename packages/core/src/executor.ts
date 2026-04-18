@@ -100,9 +100,12 @@ export class Executor {
       tokenUsage,
     });
 
-    const formattedOutput = this.format(adapterResult, skill);
+    const formattedOutput = this.format(adapterResult);
 
-    return { skill, adapterResult, formattedOutput };
+    // Post-execution: detect auth errors and append setup guidance
+    const authGuidance = await this.diagnoseAuthError(adapterResult, skill);
+
+    return { skill, adapterResult, formattedOutput: authGuidance ? `${formattedOutput}\n\n${authGuidance}` : formattedOutput };
   }
 
   /**
@@ -246,7 +249,7 @@ export class Executor {
     }
   }
 
-  private format(result: AdapterResult, skill?: LoadedSkill): string {
+  private format(result: AdapterResult): string {
     if (!result.success) {
       return `Error: ${result.error}`;
     }
@@ -254,15 +257,6 @@ export class Executor {
       const text = result.rawText.trim();
       try {
         const parsed = JSON.parse(text);
-
-        // Check if the result is an auth error — if so, diagnose and append guidance
-        if (this.isAuthError(parsed) && skill && this.chatClient) {
-          const guidance = this.getAuthGuidanceSync(skill, parsed);
-          if (guidance) {
-            return `Error: ${JSON.stringify(parsed, null, 2)}\n\n${guidance}`;
-          }
-        }
-
         // Try common response shapes
         if (typeof parsed === 'string') return parsed;
         if (parsed.result) return String(parsed.result);
@@ -278,66 +272,88 @@ export class Executor {
   }
 
   /**
-   * Detect common auth error patterns in API responses.
+   * Detect auth errors in successful responses and provide setup guidance.
+   * Uses the LLM to extract setup instructions from SKILL.md when available.
    */
-  private isAuthError(parsed: Record<string, unknown>): boolean {
-    // Check error field
-    const error = String(parsed.error ?? '').toLowerCase();
-    if (error.includes('invalid_token') || error.includes('unauthorized') ||
-        error.includes('auth') || error.includes('forbidden') ||
-        error.includes('access_denied') || error.includes('missing') && error.includes('token') ||
-        error.includes('missing') && error.includes('key') ||
-        error.includes('missing') && error.includes('api_key')) {
-      return true;
-    }
-    // Check error_description
-    const desc = String(parsed.error_description ?? parsed.message ?? '').toLowerCase();
-    if (desc.includes('invalid access token') || desc.includes('missing') && desc.includes('token') ||
-        desc.includes('unauthorized') || desc.includes('api key')) {
-      return true;
-    }
-    // Check HTTP status embedded in response
-    if (parsed.status === 401 || parsed.status === 403) {
-      return true;
-    }
-    return false;
-  }
+  private async diagnoseAuthError(result: AdapterResult, skill: LoadedSkill): Promise<string | null> {
+    // Only check successful results with rawText (JSON API responses)
+    if (!result.success || !result.rawText) return null;
 
-  /**
-   * Synchronous auth guidance extraction from SKILL.md.
-   * Returns setup instructions without calling the LLM for speed.
-   */
-  private getAuthGuidanceSync(skill: LoadedSkill, _parsed: Record<string, unknown>): string {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(result.rawText.trim());
+    } catch {
+      return null;
+    }
+
+    if (!this.isAuthError(parsed)) return null;
+
     const lines: string[] = [];
     lines.push(`⚠ Skill "${skill.manifest.name}" requires authentication.`);
 
-    // Check manifest for credential info
+    // 1. Check manifest credentials (env vars)
     const required = getRequiredEnvVars(skill.manifest);
     if (required.length > 0) {
       for (const v of required) {
-        const label = v.label ? ` (${v.label})` : '';
-        lines.push(`  Set ${v.key}${label}: octopus config set ${v.key} <your-key>`);
+        const label = v.label ? ` — ${v.label}` : '';
+        lines.push(`  Set ${v.key}${label}:`);
+        lines.push(`    octopus config set ${v.key} <your-key>`);
       }
     }
 
-    // Check openclaw homepage for key acquisition
+    // 2. Check openclaw homepage
     const homepage = skill.manifest.metadata?.openclaw?.homepage;
     if (homepage) {
       lines.push(`  Get your key at: ${homepage}`);
     }
 
-    // Check for MCP URL in metadata
+    // 3. Check MCP URL in metadata
     const mcpUrl = (skill.manifest.metadata as Record<string, unknown>)?.mcp_url as string | undefined;
     if (mcpUrl) {
       lines.push(`  MCP endpoint: ${mcpUrl}`);
+      lines.push(`    npx mcp-remote ${mcpUrl}`);
     }
 
-    // Check instructions for registration/signup URLs
-    const urlMatch = skill.instructions.match(/https?:\/\/[^\s)]+(?:register|signup|sign-up|get-started|api-keys?|dashboard)/i);
-    if (urlMatch) {
-      lines.push(`  Sign up at: ${urlMatch[0]}`);
+    // 4. Use LLM to extract setup guidance from SKILL.md instructions
+    if (this.chatClient) {
+      try {
+        const llmGuidance = await this.chatClient.chat(
+          AUTH_DIAGNOSIS_PROMPT,
+          `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${skill.instructions}\n\nError: ${JSON.stringify(parsed)}\n\nHow should the user set up authentication for this skill?`,
+        );
+        if (llmGuidance?.trim()) {
+          lines.push('');
+          lines.push(llmGuidance.trim());
+        }
+      } catch {
+        // LLM diagnosis failed — the static guidance above is still shown
+      }
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * Detect common auth error patterns in API responses.
+   */
+  private isAuthError(parsed: Record<string, unknown>): boolean {
+    const error = String(parsed.error ?? '').toLowerCase();
+    const desc = String(parsed.error_description ?? parsed.message ?? '').toLowerCase();
+    const status = parsed.status ?? parsed.statusCode;
+
+    // Common auth error strings
+    const authKeywords = ['invalid_token', 'unauthorized', 'access_denied', 'forbidden', 'auth'];
+    if (authKeywords.some(k => error.includes(k) || desc.includes(k))) return true;
+
+    // Missing token/key patterns
+    if ((error.includes('missing') || desc.includes('missing')) &&
+        (error.includes('token') || desc.includes('token') || error.includes('key') || desc.includes('key') || error.includes('api_key') || desc.includes('api_key'))) {
+      return true;
+    }
+
+    // HTTP status codes
+    if (status === 401 || status === 403) return true;
+
+    return false;
   }
 }
