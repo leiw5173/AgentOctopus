@@ -12,7 +12,8 @@ export interface RoutingResult {
   reason: string;
 }
 
-const RATING_WEIGHT = 0.15;
+const RATING_WEIGHT = 0.35;
+const FAILURE_PENALTY = 0.05; // per negative feedback
 const IP_ADDRESS_PATTERN = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/;
 const DOMAIN_PATTERN = /\b(?=.{1,253}\b)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/i;
 const WEATHER_KEYWORDS = /\b(weather|temperature|forecast|rain|snow|wind|humidity|sunny|cloudy|storm|climate)\b/i;
@@ -223,7 +224,15 @@ export class Router {
           // Use composite routing score if available, otherwise fall back to flat rating
           const routingScore = skill.routingScore ?? (skill.rating / 5);
           const ratingBoost = routingScore * RATING_WEIGHT;
-          return { skill, score: cosine + ratingBoost };
+
+          // Failure penalty: each negative feedback reduces the score
+          // This ensures skills with repeated bad outcomes get deprioritized
+          const negativeFeedbackCount = skill.manifest.invocations > 0
+            ? Math.round(skill.manifest.invocations * (1 - (skill.routingScore ?? 0.6)))
+            : 0;
+          const penalty = negativeFeedbackCount * FAILURE_PENALTY;
+
+          return { skill, score: cosine + ratingBoost - penalty };
         });
         scored.sort((a, b) => b.score - a.score);
         candidates = scored.slice(0, topK);
