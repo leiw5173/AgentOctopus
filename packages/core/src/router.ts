@@ -13,7 +13,7 @@ export interface RoutingResult {
 }
 
 const RATING_WEIGHT = 0.35;
-const FAILURE_PENALTY = 0.05; // per negative feedback
+const FAILURE_PENALTY = 0.50; // per negative feedback — must overcome keyword score advantages
 const IP_ADDRESS_PATTERN = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/;
 const DOMAIN_PATTERN = /\b(?=.{1,253}\b)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/i;
 const WEATHER_KEYWORDS = /\b(weather|temperature|forecast|rain|snow|wind|humidity|sunny|cloudy|storm|climate)\b/i;
@@ -193,23 +193,26 @@ export class Router {
       // No embed client or all embeddings empty — pre-filter by keyword relevance
       // so the LLM re-ranker never receives more than LLM_RERANK_CAP candidates.
       const LLM_RERANK_CAP = 20;
-      if (eligible.length <= LLM_RERANK_CAP) {
-        candidates = eligible.map(({ skill }) => ({ skill, score: 1.0 }));
-      } else {
-        // Score by how many query words appear in name+description+tags
-        const words = query.toLowerCase().split(/\W+/).filter(w => w.length > 2);
-        const scored = eligible.map(({ skill }) => {
-          const haystack = (
-            skill.manifest.name + ' ' +
-            skill.manifest.description + ' ' +
-            skill.manifest.tags.join(' ')
-          ).toLowerCase();
-          const hits = words.filter(w => haystack.includes(w)).length;
-          return { skill, score: hits };
-        });
-        scored.sort((a, b) => b.score - a.score);
-        candidates = scored.slice(0, LLM_RERANK_CAP);
-      }
+      // Score by how many query words appear in name+description+tags
+      const words = query.toLowerCase().split(/\W+/).filter(w => w.length > 2);
+      const scored = eligible.map(({ skill }) => {
+        const haystack = (
+          skill.manifest.name + ' ' +
+          skill.manifest.description + ' ' +
+          skill.manifest.tags.join(' ')
+        ).toLowerCase();
+        const keywordHits = words.filter(w => haystack.includes(w)).length;
+
+        // Apply rating boost and failure penalty even in LLM-only mode
+        const routingScore = skill.routingScore ?? (skill.rating / 5);
+        const ratingBoost = routingScore * RATING_WEIGHT;
+        const negCount = skill.negativeFeedbackCount ?? 0;
+        const penalty = negCount * FAILURE_PENALTY;
+
+        return { skill, score: keywordHits + ratingBoost - penalty };
+      });
+      scored.sort((a, b) => b.score - a.score);
+      candidates = scored.slice(0, LLM_RERANK_CAP);
     } else {
       let queryEmbedding: number[] = [];
       try {
@@ -226,11 +229,9 @@ export class Router {
           const ratingBoost = routingScore * RATING_WEIGHT;
 
           // Failure penalty: each negative feedback reduces the score
-          // This ensures skills with repeated bad outcomes get deprioritized
-          const negativeFeedbackCount = skill.manifest.invocations > 0
-            ? Math.round(skill.manifest.invocations * (1 - (skill.routingScore ?? 0.6)))
-            : 0;
-          const penalty = negativeFeedbackCount * FAILURE_PENALTY;
+          // Uses actual feedback count from rating store for accuracy
+          const negCount = skill.negativeFeedbackCount ?? 0;
+          const penalty = negCount * FAILURE_PENALTY;
 
           return { skill, score: cosine + ratingBoost - penalty };
         });
@@ -244,10 +245,14 @@ export class Router {
     if (candidates.length === 0) return [];
 
     const candidateList = candidates
-      .map((c, i) => `${i + 1}. ${c.skill.manifest.name}: ${c.skill.manifest.description}`)
+      .map((c, i) => {
+        const neg = c.skill.negativeFeedbackCount ?? 0;
+        const ratingNote = neg > 0 ? ` [⚠ ${neg} negative feedback${neg > 1 ? 's' : ''}]` : '';
+        return `${i + 1}. ${c.skill.manifest.name}: ${c.skill.manifest.description}${ratingNote}`;
+      })
       .join('\n');
 
-    const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill to handle it. Prefer picking a skill over "none" — even if the match is approximate, a skill that could partially help is better than no skill. Only respond "none" if the request is clearly a general knowledge question with no possible skill match. Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
+    const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill to handle it. Prefer picking a skill over "none" — even if the match is approximate, a skill that could partially help is better than no skill. Only respond "none" if the request is clearly a general knowledge question with no possible skill match. Skills marked with ⚠ have received negative user feedback — prefer alternatives with similar functionality when available. Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
     const userMessage = `User request: "${query}"\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
 
     let bestSkillName: string;
