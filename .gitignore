@@ -61,3 +61,4 @@ bin/
 # Generated index files (produced by scripts/build-skills-index.js)
 skills-index.json
 skills-index.json.gz
+.superpowers/

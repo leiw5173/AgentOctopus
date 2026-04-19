@@ -1,8 +1,11 @@
 import path from 'path';
+import os from 'os';
 import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
 import { Router, Executor, createChatClient, type ChatClient, type LLMConfig } from '@agentoctopus/core';
 
 export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
+
+const DEFAULT_HOME = path.join(os.homedir(), '.agentoctopus');
 
 export interface OctopusEngine {
   registry: SkillRegistry;
@@ -20,9 +23,9 @@ let _engine: OctopusEngine | null = null;
 export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> {
   if (_engine) return _engine;
 
-  const root = rootDir ?? process.env.OCTOPUS_ROOT ?? process.cwd();
-  const skillsDir = process.env.REGISTRY_PATH ?? path.join(root, 'registry', 'skills');
-  const ratingsPath = process.env.RATINGS_PATH ?? path.join(root, 'registry', 'ratings.json');
+  // Canonical paths: ~/.agentoctopus/skills and ~/.agentoctopus/ratings.json
+  const skillsDir = path.join(DEFAULT_HOME, 'skills');
+  const ratingsPath = path.join(DEFAULT_HOME, 'ratings.json');
 
   // Sync skills from cloud before loading registry (local mode)
   const cloudUrl = process.env.CLOUD_URL;
@@ -67,8 +70,8 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   const router = new Router(rerankConfig, embedConfig);
   await router.buildIndex(registry.getAll());
 
-  const executor = new Executor(registry);
   const chatClient = createChatClient(rerankConfig);
+  const executor = new Executor(registry, chatClient);
 
   _engine = { registry, router, executor, chatClient };
   return _engine;

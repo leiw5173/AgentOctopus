@@ -8,14 +8,24 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 export class McpAdapter implements Adapter {
   async invoke(skill: LoadedSkill, input: Record<string, unknown>): Promise<AdapterResult> {
     try {
-      const commandLine = skill.manifest.endpoint || skill.instructions;
-      if (!commandLine) {
+      // Determine the MCP command to run:
+      // 1. manifest.endpoint (explicit)
+      // 2. metadata.mcp_command (e.g. "npx mcp-remote https://mcp.zu.lk/mcp")
+      // 3. metadata.mcp_url → "npx mcp-remote <url>"
+      // 4. skill.instructions (fallback, treated as command)
+      const meta = skill.manifest.metadata as Record<string, unknown> | undefined;
+      const mcpCommand = skill.manifest.endpoint
+        || (meta?.mcp_command as string)
+        || (meta?.mcp_url ? `npx mcp-remote ${meta.mcp_url}` : undefined)
+        || skill.instructions;
+
+      if (!mcpCommand) {
         return { success: false, error: 'No command or endpoint specified for MCP skill' };
       }
 
       // Phase 2 MVP: Stdio transport
       // Parse command line (very naive split for MVP)
-      const parts = commandLine.trim().split(/\s+/);
+      const parts = mcpCommand.trim().split(/\s+/);
       const command = parts[0];
       const args = parts.slice(1);
 

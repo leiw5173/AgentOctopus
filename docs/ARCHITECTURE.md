@@ -165,6 +165,30 @@ Run: octopus config set COMMONS_API_KEY <your-key>
 
 Skills that need no keys can omit `metadata.openclaw` entirely.
 
+## Rating System
+
+Each skill is evaluated on 5 dimensions, stored in `registry/ratings.json`:
+
+| Dimension | Range | Type | Source |
+|---|---|---|---|
+| `completion` | 0-1 | Objective | Auto-collected success/failure count |
+| `quality` | 0-5 | Subjective | EMA of user thumbs-up/down feedback |
+| `reliability` | 0-1 | Objective | 1 - (error rate from auto-collected metrics) |
+| `latency` | 0-1 | Objective | Normalized response speed |
+| `tokenCost` | 0-1 | Objective | Cost efficiency from token usage |
+
+The router computes a composite `routingScore` (0-1) as a weighted average, with weights that adapt by task type:
+
+| Task type | completion | quality | reliability | latency | tokenCost |
+|---|---|---|---|---|---|
+| one-shot | 0.30 | 0.25 | 0.20 | 0.15 | 0.10 |
+| long-running | 0.20 | 0.20 | 0.30 | 0.20 | 0.10 |
+| agent-collab | 0.20 | 0.30 | 0.20 | 0.15 | 0.15 |
+
+Feedback sources: CLI thumbs up/down, web thumbs up/down, agent platforms (NLP keyword sentiment detection).
+
+Ratings can be synced across instances via GitHub Gist (`sync --ratings`, `--setup-gist`, `--pull`, `--push`).
+
 ## Test Coverage
 
 | Package | Tests |

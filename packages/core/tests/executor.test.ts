@@ -18,6 +18,7 @@ describe('Executor', () => {
     vi.resetAllMocks();
     mockRegistry = {
       recordInvocation: vi.fn(),
+      recordInvocationMetrics: vi.fn(),
     } as any;
     
     // Setup instances returned by constructor mocks
@@ -42,8 +43,8 @@ describe('Executor', () => {
     } as any;
     
     const result = await executor.execute(mockSkill, { query: 'test' });
-    
-    expect(mockRegistry.recordInvocation).toHaveBeenCalledWith('test-subprocess');
+
+    expect(mockRegistry.recordInvocationMetrics).toHaveBeenCalledWith('test-subprocess', expect.objectContaining({ success: true }));
     expect(result.formattedOutput).toBe('subprocess output');
   });
 
@@ -55,8 +56,8 @@ describe('Executor', () => {
     } as any;
     
     const result = await executor.execute(mockSkill, { query: 'test' });
-    
-    expect(mockRegistry.recordInvocation).toHaveBeenCalledWith('test-http');
+
+    expect(mockRegistry.recordInvocationMetrics).toHaveBeenCalledWith('test-http', expect.objectContaining({ success: true }));
     // tests the JSON parsing format fallback
     expect(result.formattedOutput).toBe('http output');
   });
@@ -69,8 +70,8 @@ describe('Executor', () => {
     } as any;
     
     const result = await executor.execute(mockSkill, {});
-    
-    expect(mockRegistry.recordInvocation).toHaveBeenCalledWith('test-mcp');
+
+    expect(mockRegistry.recordInvocationMetrics).toHaveBeenCalledWith('test-mcp', expect.objectContaining({ success: true }));
     expect(result.formattedOutput).toBe('mcp output'); // parsed from {"output":"..."}
   });
 
@@ -134,6 +135,50 @@ describe('Executor', () => {
     } as any;
 
     await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
+  });
+
+  it('records invocation metrics with latency and success on execution', async () => {
+    const mockRecordMetrics = vi.fn();
+    mockRegistry.recordInvocationMetrics = mockRecordMetrics;
+    mockRegistry.recordInvocation = vi.fn();
+
+    const executor = new Executor(mockRegistry);
+    const mockSkill = {
+      manifest: { name: 'test-metrics', adapter: 'subprocess' }
+    } as any;
+
+    await executor.execute(mockSkill, { query: 'test' });
+
+    expect(mockRecordMetrics).toHaveBeenCalled();
+    const call = mockRecordMetrics.mock.calls[0];
+    expect(call[0]).toBe('test-metrics');
+    expect(call[1]).toHaveProperty('success');
+    expect(call[1]).toHaveProperty('latencyMs');
+    expect(call[1]).toHaveProperty('tokenUsage');
+  });
+
+  it('records failed invocation metrics when adapter throws', async () => {
+    const mockRecordMetrics = vi.fn();
+    mockRegistry.recordInvocationMetrics = mockRecordMetrics;
+    mockRegistry.recordInvocation = vi.fn();
+
+    vi.mocked(SubprocessAdapter).mockImplementation(() => ({
+      invoke: vi.fn().mockRejectedValue(new Error('adapter crash'))
+    } as any));
+
+    const executor = new Executor(mockRegistry);
+    const mockSkill = {
+      manifest: { name: 'test-crash', adapter: 'subprocess' }
+    } as any;
+
+    await expect(executor.execute(mockSkill, { query: 'test' })).rejects.toThrow('adapter crash');
+
+    expect(mockRecordMetrics).toHaveBeenCalled();
+    const call = mockRecordMetrics.mock.calls[0];
+    expect(call[0]).toBe('test-crash');
+    expect(call[1].success).toBe(false);
+    expect(call[1]).toHaveProperty('latencyMs');
+    expect(call[1].tokenUsage).toBe(0);
   });
 
   it('does not throw when credentials array is undefined', async () => {

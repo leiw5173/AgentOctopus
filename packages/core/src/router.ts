@@ -50,10 +50,9 @@ function isSkillEligible(skill: LoadedSkill, query: string): boolean {
     return TRANSLATION_KEYWORDS.test(normalizedQuery);
   }
 
-  // Skip http-adapter skills with no endpoint — they can't execute
-  if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint) {
-    return false;
-  }
+  // HTTP-adapter skills with no endpoint can still be executed via
+  // LLM-guided execution (the LLM reads SKILL.md to determine the API call).
+  // Don't hard-filter them out — the LLM re-rank will handle relevance.
 
   return true;
 }
@@ -221,7 +220,9 @@ export class Router {
       if (queryEmbedding.length > 0) {
         const scored = eligible.map(({ skill, embedding }) => {
           const cosine = cosineSimilarity(queryEmbedding, embedding);
-          const ratingBoost = (skill.rating / 5) * RATING_WEIGHT;
+          // Use composite routing score if available, otherwise fall back to flat rating
+          const routingScore = skill.routingScore ?? (skill.rating / 5);
+          const ratingBoost = routingScore * RATING_WEIGHT;
           return { skill, score: cosine + ratingBoost };
         });
         scored.sort((a, b) => b.score - a.score);

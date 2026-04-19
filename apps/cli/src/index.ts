@@ -8,15 +8,16 @@ import dotenv from 'dotenv';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, type LLMConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, type LLMConfig } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
-import { loadOctopusConfig, saveOctopusConfig, defaultConfig, getConfigPath } from './config.js';
+import { loadOctopusConfig, saveOctopusConfig, defaultConfig, getConfigPath, getDefaultSkillsDir, getDefaultRatingsPath } from './config.js';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
 import { runSync } from './sync-skills.js';
+import { runRatingSync } from './rating-sync.js';
 import { fileURLToPath } from 'url';
 
 // Load env
@@ -136,29 +137,34 @@ program
 /**
  * Helper to bootstrap the core Octopus engine
  */
+async function promptSelect(question: string, choices: { label: string; value: string }[]): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  console.log(chalk.bold(`\n${question}`));
+  choices.forEach((c, i) => console.log(`  ${chalk.cyan(`${i + 1}.`)} ${c.label}`));
+
+  return new Promise((resolve) => {
+    rl.question(chalk.gray('> '), (answer) => {
+      rl.close();
+      const idx = parseInt(answer.trim(), 10) - 1;
+      if (idx >= 0 && idx < choices.length) {
+        resolve(choices[idx].value);
+      } else {
+        // Default to first choice on invalid input
+        console.log(chalk.yellow(`Invalid choice, defaulting to: ${choices[0].label}`));
+        resolve(choices[0].value);
+      }
+    });
+  });
+}
+
 async function bootstrap() {
   const octopusConfig = loadOctopusConfig();
 
-  // Only honour REGISTRY_PATH / RATINGS_PATH when they are absolute paths or
-  // actually exist on disk — relative paths from a stale .env (e.g. the
-  // ./registry/skills default written by older CLI versions) would otherwise
-  // shadow the user-configured octopus.json skillsDir.
-  const rawRegistryPath = process.env.REGISTRY_PATH;
-  const resolvedRegistryPath = rawRegistryPath ? path.resolve(rawRegistryPath) : undefined;
-  const useEnvRegistry = resolvedRegistryPath && fs.existsSync(resolvedRegistryPath);
-
-  const rawRatingsPath = process.env.RATINGS_PATH;
-  const resolvedRatingsPath = rawRatingsPath ? path.resolve(rawRatingsPath) : undefined;
-  const useEnvRatings = resolvedRatingsPath && fs.existsSync(resolvedRatingsPath);
-
-  const skillsDir =
-    (useEnvRegistry ? resolvedRegistryPath : undefined) ||
-    octopusConfig?.skillsDir ||
-    path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'skills');
-  const ratingsPath =
-    (useEnvRatings ? resolvedRatingsPath : undefined) ||
-    octopusConfig?.ratingsPath ||
-    path.join(process.env.OCTOPUS_ROOT || process.cwd(), 'registry', 'ratings.json');
+  // Canonical skill/rating paths: ~/.agentoctopus/skills and ~/.agentoctopus/ratings.json
+  // These are always used unless octopus.json explicitly overrides them.
+  const skillsDir = octopusConfig?.skillsDir || getDefaultSkillsDir();
+  const ratingsPath = octopusConfig?.ratingsPath || getDefaultRatingsPath();
 
   // Merge stored credentials into process.env so scripts/invoke.js can read them.
   // octopus.json credentials take priority over any .env file loaded from CWD,
@@ -171,13 +177,6 @@ async function bootstrap() {
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
   await registry.load();
-
-  // If REGISTRY_PATH pointed to a different dir than octopus.json skillsDir,
-  // also load the user's own installed skills so they're always available.
-  const userSkillsDir = octopusConfig?.skillsDir;
-  if (useEnvRegistry && userSkillsDir && userSkillsDir !== skillsDir && fs.existsSync(userSkillsDir)) {
-    await registry.loadFrom(userSkillsDir);
-  }
 
   const provider = (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') || 'openai';
   const chatConfig: LLMConfig = {
@@ -198,7 +197,8 @@ async function bootstrap() {
       : undefined;
 
   const router = new Router(chatConfig, embedConfig);
-  const executor = new Executor(registry);
+  const chatClient = createChatClient(chatConfig);
+  const executor = new Executor(registry, chatClient);
 
   return { registry, router, executor };
 }
@@ -290,9 +290,13 @@ program
 
           rl.question(chalk.yellow('Was this helpful? (y/n): '), (answer) => {
             const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
-            engine.registry.recordFeedback(skill.manifest.name, isPositive);
-            console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
-            rl.close();
+
+            rl.question(chalk.yellow('Any comments? (press Enter to skip): '), (comment) => {
+              const trimmed = comment.trim() || undefined;
+              engine.registry.recordFeedback(skill.manifest.name, isPositive, trimmed, 'cli');
+              console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
+              rl.close();
+            });
           });
         }
       } else {
@@ -315,8 +319,7 @@ program
   .action(async (slug: string, options: { version?: string; force?: boolean; registry?: string }) => {
     const spinner = ora(`Fetching skill "${slug}" from ClaWHub...`).start();
     try {
-      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-      const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+      const skillsDir = getDefaultSkillsDir();
 
       const meta = await fetchSkillMeta(slug, options.registry);
       spinner.text = `Downloading ${chalk.cyan(meta.name || slug)} v${options.version || meta.version}...`;
@@ -367,8 +370,7 @@ program
   .command('remove <name>')
   .description('Remove an installed skill from the local registry')
   .action(async (name: string) => {
-    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-    const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+    const skillsDir = getDefaultSkillsDir();
     const skillDir = path.join(skillsDir, name);
 
     if (!fs.existsSync(skillDir)) {
@@ -466,7 +468,7 @@ program
 
 program
   .command('sync')
-  .description('Sync and update skills — check for updates, install from awesome-openclaw-skills, and/or sync from cloud')
+  .description('Sync skills and/or ratings — prompts for choice when run without flags')
   .option('--cloud-url <url>', 'Cloud AgentOctopus instance URL')
   .option('--category <name>', 'Install only skills from one category (e.g. "git-and-github")')
   .option('--limit <n>', 'Maximum number of skills to install', parseInt)
@@ -474,6 +476,11 @@ program
   .option('--dry-run', 'Preview what would happen without making changes')
   .option('--check', 'Show available skill updates without installing')
   .option('--registry <url>', 'Custom ClaWHub registry URL')
+  .option('--ratings', 'Sync ratings with GitHub Gist')
+  .option('--setup-gist', 'Create or find GitHub Gist for rating sync')
+  .option('--pull', 'Pull ratings from cloud to local')
+  .option('--push', 'Push local ratings to cloud')
+  .option('--no-feedback-sharing', 'Don\'t share feedback comments in sync')
   .action(async (options: {
     cloudUrl?: string;
     category?: string;
@@ -482,20 +489,90 @@ program
     dryRun?: boolean;
     check?: boolean;
     registry?: string;
+    ratings?: boolean;
+    setupGist?: boolean;
+    pull?: boolean;
+    push?: boolean;
+    noFeedbackSharing?: boolean;
   }) => {
-    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-    const skillsDir = process.env.REGISTRY_PATH || path.join(rootDir, 'registry', 'skills');
+    // If --ratings or --setup-gist explicitly passed, run rating sync directly
+    if (options.ratings || options.setupGist) {
+      await runRatingSync({
+        pull: options.pull,
+        push: options.push,
+        force: options.force,
+        dryRun: options.dryRun,
+        setupGist: options.setupGist,
+        noFeedbackSharing: options.noFeedbackSharing,
+      });
+      return;
+    }
 
-    await runSync({
-      skillsDir,
-      check: options.check,
-      category: options.category,
-      limit: options.limit,
-      cloudUrl: options.cloudUrl,
-      force: options.force,
-      dryRun: options.dryRun,
-      registryUrl: options.registry,
-    });
+    // If --pull or --push passed without --ratings, treat as --ratings shorthand
+    if (options.pull || options.push) {
+      await runRatingSync({
+        pull: options.pull,
+        push: options.push,
+        force: options.force,
+        dryRun: options.dryRun,
+        noFeedbackSharing: options.noFeedbackSharing,
+      });
+      return;
+    }
+
+    // If --check or other skill-specific flags passed, run skills sync directly
+    const hasSkillFlags = options.check || options.cloudUrl || options.category || options.limit || options.registry;
+    if (hasSkillFlags) {
+      const skillsDir = getDefaultSkillsDir();
+      await runSync({
+        skillsDir,
+        check: options.check,
+        category: options.category,
+        limit: options.limit,
+        cloudUrl: options.cloudUrl,
+        force: options.force,
+        dryRun: options.dryRun,
+        registryUrl: options.registry,
+      });
+      return;
+    }
+
+    // No specific flags — interactive mode: ask what to sync
+    const syncChoice = await promptSelect(
+      'What would you like to sync?',
+      [
+        { label: 'Skills', value: 'skills' },
+        { label: 'Ratings', value: 'ratings' },
+        { label: 'Both (skills + ratings)', value: 'both' },
+      ],
+    );
+
+    if (syncChoice === 'skills' || syncChoice === 'both') {
+      const skillsDir = getDefaultSkillsDir();
+      await runSync({
+        skillsDir,
+        force: options.force,
+        dryRun: options.dryRun,
+      });
+    }
+
+    if (syncChoice === 'ratings' || syncChoice === 'both') {
+      const ratingDirection = await promptSelect(
+        'Rating sync direction?',
+        [
+          { label: 'Pull (cloud → local)', value: 'pull' },
+          { label: 'Push (local → cloud)', value: 'push' },
+          { label: 'Both (pull + push)', value: 'both' },
+        ],
+      );
+      await runRatingSync({
+        pull: ratingDirection === 'pull' || ratingDirection === 'both',
+        push: ratingDirection === 'push' || ratingDirection === 'both',
+        force: options.force,
+        dryRun: options.dryRun,
+        noFeedbackSharing: options.noFeedbackSharing,
+      });
+    }
   });
 
 program

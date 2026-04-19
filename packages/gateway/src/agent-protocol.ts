@@ -4,7 +4,7 @@ import { sessionManager } from './session.js';
 import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, validateApiKey } from './auth-middleware.js';
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
-import { syncFromCloud } from '@agentoctopus/registry';
+import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
 
 /**
  * OpenClaw-compatible agent-to-agent protocol with security middleware.
@@ -15,7 +15,8 @@ import { syncFromCloud } from '@agentoctopus/registry';
  *
  * Authenticated endpoints:
  *   POST /agent/ask          — route query to best skill
- *   POST /agent/feedback     — record thumbs up/down
+ *   POST /agent/feedback     — record thumbs up/down (with source)
+ *   GET  /agent/skills/:name/feedback — author feedback summary
  *
  * Admin endpoints (admin API key required):
  *   POST /agent/keys/create  — create a new API key
@@ -122,6 +123,38 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     session.metadata = { ...session.metadata, ...metadata };
     sessionManager.addMessage(session, { role: 'user', content: query, timestamp: Date.now() });
 
+    // Auto-detect feedback: if session has a previous assistant message with a skillUsed,
+    // and the current message looks like feedback (not a new query), record it automatically.
+    const prevMessages = session.messages;
+    const lastAssistant = [...prevMessages].reverse().find(m => m.role === 'assistant' && m.skillUsed);
+    if (lastAssistant && isLikelyFeedback(query)) {
+      const sentiment = detectSentiment(query);
+      const positive = sentiment.sentiment === 'positive';
+      const skillName = (lastAssistant as any).skillUsed as string;
+
+      engine.registry.recordFeedback(skillName, positive, query, 'openclaw');
+
+      sessionManager.addMessage(session, {
+        role: 'assistant',
+        content: positive
+          ? `Thanks for the positive feedback on ${skillName}!`
+          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
+        timestamp: Date.now(),
+      });
+
+      res.json({
+        success: true,
+        response: positive
+          ? `Thanks for the positive feedback on ${skillName}!`
+          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
+        skill: skillName,
+        sessionId: session.id,
+        feedbackRecorded: true,
+        sentiment: sentiment.sentiment,
+      });
+      return;
+    }
+
     try {
       const [routing] = await engine.router.route(query);
       if (!routing) {
@@ -167,10 +200,11 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
   // ── Authenticated: Feedback ────────────────────────────────────────────
 
   router.post('/feedback', async (req: Request, res: Response) => {
-    const { skillName, positive, comment } = req.body as {
+    const { skillName, positive, comment, source } = req.body as {
       skillName?: string;
       positive?: boolean;
       comment?: string;
+      source?: string;
     };
 
     if (!skillName || typeof positive !== 'boolean') {
@@ -178,8 +212,64 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       return;
     }
 
-    engine.registry.recordFeedback(skillName, positive, comment);
+    engine.registry.recordFeedback(
+      skillName,
+      positive,
+      comment,
+      (source as 'cli' | 'web' | 'openclaw' | 'hermes' | 'other') ?? 'other',
+    );
     res.json({ success: true });
+  });
+
+  // ── Author: Skill Feedback ────────────────────────────────────────────
+
+  router.get('/skills/:name/feedback', (req: Request, res: Response) => {
+    const { name } = req.params;
+    const skill = engine.registry.getByName(name);
+    if (!skill) {
+      res.status(404).json({ error: `Skill "${name}" not found` });
+      return;
+    }
+
+    const ratingEntry = engine.registry.getRatingStore().getOrCreate(name);
+    const feedback = ratingEntry.recentFeedback;
+
+    const positiveCount = feedback.filter(f => f.positive).length;
+    const totalFeedback = feedback.length;
+    const positiveRate = totalFeedback > 0 ? positiveCount / totalFeedback : 0;
+
+    const bySource: Record<string, { count: number; positiveRate: number }> = {};
+    for (const f of feedback) {
+      if (!bySource[f.source]) bySource[f.source] = { count: 0, positiveRate: 0 };
+      bySource[f.source].count++;
+    }
+    for (const src of Object.keys(bySource)) {
+      const srcFeedback = feedback.filter(f => f.source === src);
+      const srcPositive = srcFeedback.filter(f => f.positive).length;
+      bySource[src].positiveRate = srcFeedback.length > 0 ? srcPositive / srcFeedback.length : 0;
+    }
+
+    const negativeComments = feedback
+      .filter(f => !f.positive && f.comment)
+      .map(f => f.comment!);
+
+    res.json({
+      skillName: name,
+      dimensions: ratingEntry.dimensions,
+      metrics: ratingEntry.metrics,
+      feedbackSummary: {
+        totalFeedback,
+        positiveRate,
+        bySource,
+        topComplaints: negativeComments.slice(0, 5),
+        recentComments: feedback.slice(0, 10).map(f => ({
+          comment: f.comment,
+          sentiment: f.positive ? 'positive' : 'negative',
+          source: f.source,
+          timestamp: f.timestamp,
+        })),
+      },
+    });
   });
 
   // ── Admin: Key Management ──────────────────────────────────────────────

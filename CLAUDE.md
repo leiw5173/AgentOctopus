@@ -96,9 +96,17 @@ node apps/cli/dist/index.js ask "What's the weather in Tokyo?"
 # CLI update commands (must build first)
 node apps/cli/dist/index.js update          # check and install latest @agentoctopus packages
 node apps/cli/dist/index.js update --check  # check only, don't install
-node apps/cli/dist/index.js sync            # update skills + install from awesome-openclaw-skills
+node apps/cli/dist/index.js sync            # interactive: prompts to sync skills, ratings, or both
 node apps/cli/dist/index.js sync --check    # check for skill updates only
 node apps/cli/dist/index.js sync --cloud-url <url>  # also sync from cloud instance
+
+# Rating sync commands
+node apps/cli/dist/index.js sync --setup-gist     # set up GitHub Gist for rating sync
+node apps/cli/dist/index.js sync --ratings --pull  # pull ratings from cloud
+node apps/cli/dist/index.js sync --ratings --push  # push ratings to cloud
+node apps/cli/dist/index.js sync --ratings         # bidirectional rating sync
+node apps/cli/dist/index.js sync --pull            # shorthand: pull ratings
+node apps/cli/dist/index.js sync --push            # shorthand: push ratings
 
 # Web dev server
 cd apps/web && pnpm dev   # http://localhost:3000
@@ -143,6 +151,22 @@ User query
 2. **LLM re-rank** — sends top-K candidates to the chat LLM with a prompt that includes `"none"` as a valid answer. `parseRerankDecision()` handles fuzzy LLM output. If `"none"` is returned or the re-rank fails, `route()` returns `[]`.
 
 When `route()` returns `[]`, callers (web API, agent-protocol, IM bots) fall back to answering directly with the chat LLM.
+
+### Rating dimensions
+
+Each skill is rated on 5 dimensions:
+- **completion** (0-1, objective) — success rate from auto-collected metrics
+- **quality** (0-5, subjective) — EMA of user feedback (thumbs up/down)
+- **reliability** (0-1, objective) — 1 - error rate from auto-collected metrics
+- **latency** (0-1, objective) — normalized speed from auto-collected metrics
+- **tokenCost** (0-1, objective) — cost efficiency from auto-collected metrics
+
+The router computes a composite `routingScore` (0-1) using task-type-aware weights:
+- one-shot: completion=0.30, quality=0.25, reliability=0.20, latency=0.15, tokenCost=0.10
+- long-running: reliability=0.30 (crashes are costly)
+- agent-collab: quality=0.30 (output feeds other agents)
+
+Feedback is collected from CLI (thumbs up/down), web (thumbs up/down), and agent platforms (NLP keyword sentiment detection).
 
 ### Skills
 

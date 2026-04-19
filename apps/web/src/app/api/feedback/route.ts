@@ -18,11 +18,11 @@ async function ensureLoaded() {
 
 /**
  * POST /api/feedback
- * Body: { skillName: string; positive: boolean; comment?: string }
+ * Body: { skillName: string; positive: boolean; comment?: string; source?: string }
  */
 export async function POST(req: Request) {
   try {
-    const { skillName, positive, comment } = await req.json();
+    const { skillName, positive, comment, source } = await req.json();
 
     if (!skillName || typeof positive !== 'boolean') {
       return NextResponse.json(
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Skill "${skillName}" not found` }, { status: 404 });
     }
 
-    registry.recordFeedback(skillName, positive, comment);
+    registry.recordFeedback(skillName, positive, comment, (source as 'cli' | 'web' | 'openclaw' | 'hermes' | 'other') ?? 'web');
 
     const updatedSkill = registry.getByName(skillName);
     return NextResponse.json({

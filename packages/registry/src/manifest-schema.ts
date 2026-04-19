@@ -24,6 +24,11 @@ export const SkillManifestSchema = z.object({
   rating: z.number().min(0).max(5).default(3.0),
   invocations: z.number().int().min(0).default(0),
   enabled: z.boolean().default(true),
+  // Rating system: task type determines dimension weights for routing score
+  taskType: z.enum(['one-shot', 'long-running', 'agent-collab']).default('one-shot'),
+  // Optional overrides for latency/tokenCost normalization targets
+  latencyTarget: z.number().positive().optional(),
+  tokenCostTarget: z.number().positive().optional(),
   // optional LLM-based skill (no endpoint, uses system LLM)
   llm_powered: z.boolean().default(false),
   credentials: z.array(CredentialSchema).optional(),
