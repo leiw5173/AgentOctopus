@@ -153,6 +153,18 @@ export class Executor {
       trimmedCommand = `${prefix}scripts/${scriptName}${suffix}`;
     }
 
+    // Rewrite OpenClaw workspace paths to the actual skill directory.
+    // Skills installed from ClaWHub reference ~/.openclaw/workspace/skills/<name>/
+    // but may be installed at a different location (e.g. ~/.agentoctopus/skills/<name>/).
+    const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    trimmedCommand = trimmedCommand.replace(openclawPathPattern, (match) => {
+      // Only rewrite if the referenced path doesn't actually exist
+      const expanded = match.replace(/^~/, homeDir);
+      if (fs.existsSync(expanded)) return match; // path exists, leave it
+      return skill.dirPath; // redirect to actual install location
+    });
+
     // Execute the LLM-determined command from the skill's directory
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
