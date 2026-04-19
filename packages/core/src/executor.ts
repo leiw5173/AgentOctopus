@@ -311,15 +311,32 @@ export class Executor {
    * Uses the LLM to extract setup instructions from SKILL.md when available.
    */
   private async diagnoseAuthError(result: AdapterResult, skill: LoadedSkill): Promise<string | null> {
-    // Only check successful results with rawText (JSON API responses)
-    if (!result.success || !result.rawText) return null;
+    // Check results with rawText for auth error patterns.
+    // Some skills return HTTP 200 with an error body like {"error": "Missing API key"}
+    // so we check both success and failure results.
+    if (!result.rawText && !result.error) return null;
 
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(result.rawText.trim());
-    } catch {
-      return null;
+    // Try parsing as JSON; fall back to checking the error string
+    let parsed: Record<string, unknown> | null = null;
+    if (result.rawText) {
+      try {
+        parsed = JSON.parse(result.rawText.trim());
+      } catch {
+        // Not JSON — check error string instead
+      }
     }
+
+    // Check the error string from failed results
+    if (!parsed && result.error) {
+      const errLower = result.error.toLowerCase();
+      if (errLower.includes('api key') || errLower.includes('apikey') ||
+          errLower.includes('unauthorized') || errLower.includes('auth') ||
+          errLower.includes('forbidden') || errLower.includes('missing key')) {
+        parsed = { error: result.error };
+      }
+    }
+
+    if (!parsed) return null;
 
     if (!this.isAuthError(parsed)) return null;
 
@@ -331,8 +348,33 @@ export class Executor {
     if (required.length > 0) {
       for (const v of required) {
         const label = v.label ? ` — ${v.label}` : '';
-        lines.push(`  Set ${v.key}${label}:`);
-        lines.push(`    octopus config set ${v.key} <your-key>`);
+        const isSet = !!process.env[v.key];
+        if (isSet) {
+          lines.push(`  ✓ ${v.key} is set${label}`);
+        } else {
+          lines.push(`  Set ${v.key}${label}:`);
+          lines.push(`    octopus config set ${v.key} <your-key>`);
+        }
+      }
+    } else {
+      // No declared credentials — scan instructions for likely env var names
+      const envVarPattern = /\b([A-Z][A-Z0-9_]{2,}(?:_API_KEY|_KEY|_TOKEN|_SECRET|_APIKEY))\b/g;
+      const instructions = skill.instructions;
+      const foundVars = new Set<string>();
+      let m: RegExpExecArray | null;
+      while ((m = envVarPattern.exec(instructions)) !== null) {
+        foundVars.add(m[1]!);
+      }
+      if (foundVars.size > 0) {
+        for (const v of foundVars) {
+          const isSet = !!process.env[v];
+          if (isSet) {
+            lines.push(`  ✓ ${v} is set`);
+          } else {
+            lines.push(`  Set ${v}:`);
+            lines.push(`    octopus config set ${v} <your-key>`);
+          }
+        }
       }
     }
 
