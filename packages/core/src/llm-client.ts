@@ -1,4 +1,4 @@
-import type { LoadedSkill } from '@agentoctopus/registry';
+import { type LoadedSkill, getRequiredEnvVars } from '@agentoctopus/registry';
 
 export interface LLMConfig {
   provider: 'openai' | 'gemini' | 'ollama';
@@ -105,10 +105,24 @@ class OllamaEmbedClient implements EmbedClient {
 }
 
 export function skillToText(skill: LoadedSkill): string {
-  return [
+  const parts = [
     `Name: ${skill.manifest.name}`,
     `Description: ${skill.manifest.description}`,
     `Tags: ${skill.manifest.tags.join(', ')}`,
-    `Instructions: ${skill.instructions.slice(0, 300)}`,
-  ].join('\n');
+    `Adapter: ${skill.manifest.adapter}`,
+  ];
+  if (skill.manifest.endpoint) {
+    parts.push(`Endpoint: ${skill.manifest.endpoint}`);
+  }
+  if (skill.manifest.auth && skill.manifest.auth !== 'none') {
+    parts.push(`Auth: ${skill.manifest.auth}`);
+  }
+  // Include credential labels — they describe what the skill connects to
+  const envVars = getRequiredEnvVars(skill.manifest);
+  if (envVars.length > 0) {
+    parts.push(`Credentials: ${envVars.map(e => e.label || e.key).join(', ')}`);
+  }
+  // Include instructions (truncated) — this has the "when to use" and API details
+  parts.push(`Instructions: ${skill.instructions.slice(0, 500)}`);
+  return parts.join('\n');
 }
