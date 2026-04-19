@@ -179,7 +179,7 @@ export class Router {
     }
   }
 
-  async route(query: string, topK = 3): Promise<RoutingResult[]> {
+  async route(query: string, topK = 10): Promise<RoutingResult[]> {
     if (this.index.length === 0) return [];
 
     const eligible = this.index.filter(({ skill }) => isSkillEligible(skill, query));
@@ -247,7 +247,7 @@ export class Router {
       .map((c, i) => `${i + 1}. ${c.skill.manifest.name}: ${c.skill.manifest.description}`)
       .join('\n');
 
-    const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill to handle it — but ONLY if the skill is clearly relevant to the request. If the request is a general knowledge question, a definition, a "what does X mean" question, or simply not something any of the listed skills can handle, respond with exactly the word "none". Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
+    const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill to handle it. Prefer picking a skill over "none" — even if the match is approximate, a skill that could partially help is better than no skill. Only respond "none" if the request is clearly a general knowledge question with no possible skill match. Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
     const userMessage = `User request: "${query}"\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
 
     let bestSkillName: string;
