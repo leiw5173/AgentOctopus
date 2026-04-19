@@ -133,7 +133,19 @@ export class Executor {
     }
 
     const query = (input.query ?? input.text ?? '') as string;
-    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${skill.instructions}\n\nUser query: "${query}"\n\nWhat command should I run?`;
+
+    // Rewrite OpenClaw workspace paths in instructions to the actual skill directory.
+    // Community skills reference ~/.openclaw/workspace/skills/<name>/ but may be
+    // installed elsewhere (e.g. ~/.agentoctopus/skills/<name>/).
+    const instrHomeDir = process.env.HOME || process.env.USERPROFILE || '';
+    const instrPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
+    const rewrittenInstructions = skill.instructions.replace(instrPathPattern, (match) => {
+      const expanded = match.replace(/^~/, instrHomeDir);
+      if (fs.existsSync(expanded)) return match; // path exists, leave it
+      return skill.dirPath; // redirect to actual install location
+    });
+
+    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${rewrittenInstructions}\n\nUser query: "${query}"\n\nWhat command should I run?`;
 
     const command = await this.chatClient.chat(SKILL_EXECUTION_SYSTEM_PROMPT, userMessage);
     let trimmedCommand = command.trim();
@@ -210,7 +222,18 @@ export class Executor {
     }
 
     const query = (input.query ?? input.text ?? '') as string;
-    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nAPI Instructions:\n${skill.instructions}\n\nUser query: "${query}"\n\nWhat curl command should I run?`;
+
+    // Rewrite OpenClaw workspace paths in instructions (same as subprocess path)
+    const fs = await import('fs');
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
+    const rewrittenInstructions = skill.instructions.replace(openclawPathPattern, (match) => {
+      const expanded = match.replace(/^~/, homeDir);
+      if (fs.existsSync(expanded)) return match;
+      return skill.dirPath;
+    });
+
+    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nAPI Instructions:\n${rewrittenInstructions}\n\nUser query: "${query}"\n\nWhat curl command should I run?`;
 
     const command = await this.chatClient.chat(HTTP_EXECUTION_SYSTEM_PROMPT, userMessage);
     const trimmedCommand = command.trim();
