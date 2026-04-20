@@ -15,6 +15,7 @@ octopus onboard
 ```
 
 The interactive wizard will:
+
 - Ask for your LLM provider and API key
 - Set up embedding for skill routing
 - Copy built-in skills to `~/.agentoctopus/skills/`

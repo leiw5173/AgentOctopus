@@ -36,6 +36,7 @@ score = cosine_similarity(query_embedding, skill_embedding) × routingScore - pe
 ```
 
 Penalties:
+
 - **Negative feedback penalty** — skills with recent thumbs-down get demoted
 - **Catch-all penalty** — skills with overly broad descriptions (e.g., "use for any request") get heavily penalized
 

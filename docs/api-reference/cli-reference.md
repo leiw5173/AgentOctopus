@@ -88,6 +88,7 @@ Publish a skill (same as `octopus publish`).
 Check for skill updates and install from the community catalog (5,000+ skills).
 
 **Options:**
+
 - `--check` — check for updates without installing
 - `--category <cat>` — filter by category
 - `--cloud-url <url>` — also sync from a cloud AgentOctopus instance
@@ -104,6 +105,7 @@ Check for skill updates and install from the community catalog (5,000+ skills).
 Check for and install package updates.
 
 **Options:**
+
 - `--check` — check only, don't install
 
 ## Server

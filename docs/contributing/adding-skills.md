@@ -32,6 +32,7 @@ tags:
 1. **Fork** the repository on GitHub.
 
 2. Create a branch from `master`:
+
    ```bash
    git checkout master && git pull
    git checkout -b skill/<name>
@@ -40,9 +41,11 @@ tags:
 3. Create `registry/skills/<name>/SKILL.md` with valid frontmatter (all four required fields: `name`, `description`, `adapter`, `tags`).
 
 4. If using the subprocess adapter, add `scripts/invoke.js` and smoke-test it:
+
    ```bash
    OCTOPUS_INPUT='{"query":"<example query>"}' node registry/skills/<name>/scripts/invoke.js
    ```
+
    Confirm the output is correct and that the script exits non-zero with a clear message when a required API key is missing.
 
 5. If the skill needs keyword pre-filtering, update `isSkillEligible()` in `packages/core/src/router.ts`.
@@ -50,6 +53,7 @@ tags:
 6. Add a row to `TEST_INSTRUCTIONS.md` describing at least one manual test case.
 
 7. Run the full build and test suite:
+
    ```bash
    pnpm build && pnpm test
    ```

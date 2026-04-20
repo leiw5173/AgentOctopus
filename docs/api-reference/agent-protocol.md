@@ -31,6 +31,7 @@ Route a query to AgentOctopus.
 ```
 
 **Parameters:**
+
 - `query` (required) — the user's question or request
 - `agentId` (optional) — identifier for the calling agent (default: "external-agent")
 - `sessionId` (optional) — continue an existing session
