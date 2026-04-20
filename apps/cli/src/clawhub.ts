@@ -39,6 +39,8 @@ export interface SkillIndexEntry {
   invokeScript: string | null;
   /** All scripts as filename → content map, or null when absent (new format) */
   scripts: Record<string, string> | null;
+  /** All other files (reference docs, data, configs) as relative path → content, or null */
+  files: Record<string, string> | null;
 }
 
 interface SkillsIndex {
@@ -459,10 +461,11 @@ export async function downloadSkillsIndex(url?: string): Promise<SkillIndexEntry
  *   <skillsDir>/<slug>/SKILL.md
  *   <skillsDir>/<slug>/_meta.json
  *   <skillsDir>/<slug>/scripts/*  (all scripts from index)
+ *   <skillsDir>/<slug>/**        (all other files: reference docs, data, configs)
  *
  * Silently skips if the skill directory already exists and `force` is false,
- * UNLESS the installed skill is missing scripts that the index has — in that
- * case the missing scripts are written without requiring --force.
+ * UNLESS the installed skill is missing files that the index has — in that
+ * case the missing files are written without requiring --force.
  */
 export function installFromIndex(
   entry: SkillIndexEntry,
@@ -480,12 +483,15 @@ export function installFromIndex(
     scriptsMap['invoke.js'] = entry.invokeScript;
   }
 
-  // If skill already exists and not forcing, check for missing scripts
+  // If skill already exists and not forcing, patch missing files
   if (fs.existsSync(skillDir) && !force) {
-    if (Object.keys(scriptsMap).length === 0) return; // no scripts to install
+    const hasScripts = Object.keys(scriptsMap).length > 0;
+    const hasFiles = entry.files && Object.keys(entry.files).length > 0;
+    if (!hasScripts && !hasFiles) return;
 
-    // Write only the scripts that are missing on disk
     let wroteAny = false;
+
+    // Write missing scripts
     for (const [filename, content] of Object.entries(scriptsMap)) {
       const scriptPath = path.join(scriptsDir, filename);
       if (!fs.existsSync(scriptPath)) {
@@ -494,14 +500,28 @@ export function installFromIndex(
         wroteAny = true;
       }
     }
-    // Also update SKILL.md and _meta.json if forcing or if they don't exist
+
+    // Write missing extra files (reference docs, data, configs)
+    if (entry.files) {
+      for (const [relPath, content] of Object.entries(entry.files)) {
+        const filePath = path.join(skillDir, relPath);
+        if (!fs.existsSync(filePath)) {
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(filePath, content, 'utf8');
+          wroteAny = true;
+        }
+      }
+    }
+
+    // Also write SKILL.md and _meta.json if they don't exist
     if (!fs.existsSync(path.join(skillDir, 'SKILL.md')) && entry.skillMd) {
       fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
     }
     if (!fs.existsSync(path.join(skillDir, '_meta.json')) && entry.metaJson) {
       fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson, 'utf8');
     }
-    if (wroteAny) return; // patched missing scripts, done
+
+    if (wroteAny) return; // patched missing files, done
     return; // nothing to update
   }
 
@@ -520,6 +540,15 @@ export function installFromIndex(
     fs.mkdirSync(scriptsDir, { recursive: true });
     for (const [filename, content] of Object.entries(scriptsMap)) {
       fs.writeFileSync(path.join(scriptsDir, filename), content, 'utf8');
+    }
+  }
+
+  // Write all extra files (reference docs, data, configs)
+  if (entry.files) {
+    for (const [relPath, content] of Object.entries(entry.files)) {
+      const filePath = path.join(skillDir, relPath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, content, 'utf8');
     }
   }
 }
