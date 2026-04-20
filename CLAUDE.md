@@ -29,7 +29,7 @@ Apply these documentation updates alongside every code change — not after the 
 | Phase milestone reached or task completed | `implementation_plan.md` — mark checkbox, update phase status |
 | New testable behavior, new endpoint, changed CLI usage | `TEST_INSTRUCTIONS.md` — add or update the relevant test case and checklist row |
 | Routing logic, env vars, package roles, Next.js constraints | `CLAUDE.md` — update the affected section |
-| Any user-visible change | `docs/` directory — check `ARCHITECTURE.md`, `INTEGRATIONS.md`, `DEPLOYMENT.md`, `API.md` and update any affected sections |
+| Any user-visible change | `docs/` directory — check relevant section under `docs/{introduction,getting-started,core-concepts,integrations,api-reference,deployment,contributing}/` and update any affected pages |
 
 Before every commit, review the `docs/` directory and related markdown files to check whether the change affects any documented behavior, CLI commands, architecture, or integrations. If it does, update the relevant docs file(s) in the same commit.
 

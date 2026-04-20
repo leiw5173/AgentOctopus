@@ -39,7 +39,7 @@ curl http://localhost:3000/api/marketplace?q=weather
 # → { "skills": [...], "total": 1 }
 ```
 
-### Publish a skill to the marketplace
+### Publish a skill
 
 ```bash
 curl -X POST http://localhost:3000/api/marketplace \
@@ -55,28 +55,4 @@ curl -X POST http://localhost:3000/api/marketplace/install \
   -d '{"slug": "my-skill"}'
 ```
 
-## Agent Protocol (OpenClaw-compatible)
-
-AgentOctopus provides an OpenClaw-compatible HTTP API for agent-to-agent communication. External agents can route queries to specialized skills, maintain sessions, and receive direct LLM answers when no skill matches.
-
-### Quick Start
-
-```bash
-# Install and run
-npx @agentoctopus/gateway
-
-# Or install globally
-npm install -g @agentoctopus/gateway
-agentoctopus-gateway
-```
-
-### Basic Usage
-
-```bash
-# Route a query with agent identity
-curl -X POST http://localhost:3002/agent/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "translate hello to French", "agentId": "openclaw"}'
-```
-
-For complete integration guide including deployment options, examples, and troubleshooting, see [DEPLOYMENT.md](./DEPLOYMENT.md).
+See also: [Agent Protocol](agent-protocol.md) | [CLI Reference](cli-reference.md) | [Security](../deployment/security.md)
