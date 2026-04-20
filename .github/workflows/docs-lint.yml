@@ -20,7 +20,7 @@ jobs:
         run: npm install -g markdownlint-cli markdown-link-check
 
       - name: Lint markdown
-        run: markdownlint docs/ --ignore docs/superpowers/
+        run: markdownlint docs/ --ignore docs/superpowers/ --config docs/.markdownlint.json
 
       - name: Check links
         run: |
