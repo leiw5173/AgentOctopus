@@ -245,6 +245,7 @@ program
 
     console.log(chalk.bold(`\n🐙 Request: "${query}"\n`));
 
+    const t0 = Date.now();
     const spinner = ora('Loading registry and embedding skills...').start();
     let engine;
     try {
@@ -254,12 +255,17 @@ program
       spinner.fail(`Initialization failed: ${err}`);
       return;
     }
+    const t1 = Date.now();
 
     spinner.text = 'Finding the best skill...';
     const routes = await engine.router.route(query);
+    const t2 = Date.now();
 
     if (routes.length === 0) {
       spinner.fail('No matching skill found for your request.');
+      if (process.env.OCTOPUS_TIMING) {
+        console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`));
+      }
       return;
     }
 
@@ -270,12 +276,15 @@ program
 
     spinner.start(`Executing ${skill.manifest.name}...`);
     try {
-      // In a real implementation, we'd use an LLM to extract JSON params from the `query`
-      // based on the skill's `input_schema`. For MVP, we pass the raw query as the main param.
       const input = { query, text: query };
-      
+
       const result = await engine.executor.execute(skill, input);
-      
+      const t3 = Date.now();
+
+      if (process.env.OCTOPUS_TIMING) {
+        console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`));
+      }
+
       if (result.adapterResult.success) {
         spinner.succeed('Execution successful\n');
         console.log(chalk.green('Result:'));

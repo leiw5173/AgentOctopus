@@ -35,8 +35,10 @@ export interface SkillIndexEntry {
   skillMd: string | null;
   /** Full content of _meta.json */
   metaJson: string | null;
-  /** Full content of scripts/invoke.js, or null when absent */
+  /** Full content of scripts/invoke.js, or null when absent (legacy field) */
   invokeScript: string | null;
+  /** All script files: filename → content (new field, replaces invokeScript) */
+  scripts?: Record<string, string> | null;
 }
 
 interface SkillsIndex {
@@ -456,7 +458,7 @@ export async function downloadSkillsIndex(url?: string): Promise<SkillIndexEntry
  * Creates:
  *   <skillsDir>/<slug>/SKILL.md
  *   <skillsDir>/<slug>/_meta.json
- *   <skillsDir>/<slug>/scripts/invoke.js  (only when invokeScript is non-null)
+ *   <skillsDir>/<slug>/scripts/*  (all bundled scripts)
  *
  * Silently skips if the skill directory already exists and `force` is false.
  */
@@ -479,7 +481,15 @@ export function installFromIndex(
   fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
   fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson ?? '', 'utf8');
 
-  if (entry.invokeScript !== null) {
+  // Write all bundled scripts (new format: scripts map)
+  if (entry.scripts) {
+    for (const [filename, content] of Object.entries(entry.scripts)) {
+      const scriptPath = path.join(skillDir, 'scripts', filename);
+      fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+      fs.writeFileSync(scriptPath, content, 'utf8');
+    }
+  } else if (entry.invokeScript !== null) {
+    // Legacy format: only invoke.js
     const scriptsDir = path.join(skillDir, 'scripts');
     fs.mkdirSync(scriptsDir, { recursive: true });
     fs.writeFileSync(path.join(scriptsDir, 'invoke.js'), entry.invokeScript, 'utf8');

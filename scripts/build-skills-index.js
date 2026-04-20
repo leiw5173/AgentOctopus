@@ -91,6 +91,25 @@ function extractFileFromZip(zipBuffer, targetName) {
   return null;
 }
 
+/**
+ * Extract all files from the scripts/ directory in a ZIP.
+ * Returns a map of filename → content, or null if no scripts found.
+ */
+function extractScriptsFromZip(zipBuffer) {
+  const scripts = {};
+  for (const entry of parseZipEntries(zipBuffer)) {
+    if (entry.isDirectory) continue;
+    // Match files inside a scripts/ directory (e.g. "skill-name/scripts/invoke.js")
+    const parts = entry.name.split('/');
+    const scriptsIdx = parts.indexOf('scripts');
+    if (scriptsIdx >= 0 && scriptsIdx < parts.length - 1) {
+      const filename = parts.slice(scriptsIdx + 1).join('/');
+      scripts[filename] = entry.data.toString('utf8');
+    }
+  }
+  return Object.keys(scripts).length > 0 ? scripts : null;
+}
+
 // ── Slug fetching ──────────────────────────────────────────────────────────
 
 async function fetchAwesomeSlugs() {
@@ -170,9 +189,11 @@ async function processSkill(ownerSlug) {
   if (!skillMd) return null;
 
   const metaJson = extractFileFromZip(zipBuffer, '_meta.json');
-  const invokeScript = extractFileFromZip(zipBuffer, 'invoke.js');
 
-  return { slug, name, description, version, author, skillMd, metaJson, invokeScript };
+  // Extract ALL script files from the scripts/ directory (not just invoke.js)
+  const scripts = extractScriptsFromZip(zipBuffer);
+
+  return { slug, name, description, version, author, skillMd, metaJson, scripts };
 }
 
 // ── Concurrency pool ───────────────────────────────────────────────────────

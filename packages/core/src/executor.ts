@@ -3,6 +3,8 @@ import { getRequiredEnvVars } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 import type { ChatClient } from './llm-client.js';
+import fs from 'fs';
+import path from 'path';
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
 
@@ -22,10 +24,13 @@ Rules:
 - Read the skill instructions carefully to understand the API endpoints, methods, and parameters
 - Pick the endpoint and method that best matches the user's intent
 - Output ONLY the curl command to run, nothing else — no explanation, no markdown
+- ONLY produce curl commands — NEVER produce python3, node, bash, or any local script commands
+- If the instructions reference local scripts (e.g. python3 scripts/foo.py), ignore those — find the underlying HTTP API endpoint instead
 - Include the correct HTTP method (-X POST, -X DELETE, etc.)
 - Include -H "Content-Type: application/json" for JSON bodies
 - Include -H "Authorization: Bearer $API_KEY" if the API requires auth (use env var syntax)
 - Put the JSON body in -d '{...}' if needed
+- If you cannot determine a valid curl command from the instructions, output exactly "NONE"
 - The command will be executed via bash`;
 
 const AUTH_DIAGNOSIS_PROMPT = `You are a helpful assistant diagnosing an API authentication error. Given a skill's instructions and the error, provide a concise setup guide.
@@ -153,6 +158,12 @@ export class Executor {
       trimmedCommand = `${prefix}scripts/${scriptName}${suffix}`;
     }
 
+    // Validate that any referenced scripts exist on disk
+    const scriptError = this.validateCommandScripts(trimmedCommand, skill.dirPath);
+    if (scriptError) {
+      return { success: false, error: scriptError };
+    }
+
     // Execute the LLM-determined command from the skill's directory
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
@@ -207,6 +218,17 @@ export class Executor {
       return { success: false, error: `LLM could not determine the API call for skill "${skill.manifest.name}"` };
     }
 
+    // If the LLM returned "NONE", it couldn't find a valid curl command
+    if (trimmedCommand.toUpperCase() === 'NONE') {
+      return { success: false, error: `Skill "${skill.manifest.name}" does not expose an HTTP API that can be called directly. Its instructions describe local scripts that are not installed.` };
+    }
+
+    // Validate that any referenced scripts exist on disk
+    const scriptError = this.validateCommandScripts(trimmedCommand, skill.dirPath);
+    if (scriptError) {
+      return { success: false, error: scriptError };
+    }
+
     // Execute the LLM-determined curl command
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
@@ -235,6 +257,34 @@ export class Executor {
 
       child.stdin.end();
     });
+  }
+
+  /**
+   * Validate that script paths referenced in a command exist on disk.
+   * Returns an error message if scripts are missing, null if all OK.
+   */
+  private validateCommandScripts(command: string, skillDir: string): string | null {
+    const scriptPattern = /scripts\/([\w.-]+\.(?:py|js|sh))/g;
+    const missing: string[] = [];
+    let match: RegExpExecArray | null;
+
+    while ((match = scriptPattern.exec(command)) !== null) {
+      const relPath = match[0]; // e.g. "scripts/init_collection_run.py"
+      const absPath = path.join(skillDir, relPath);
+      if (!fs.existsSync(absPath)) {
+        missing.push(relPath);
+      }
+    }
+
+    if (missing.length === 0) return null;
+
+    const skillName = path.basename(skillDir);
+    return (
+      `Skill "${skillName}" references scripts that are not installed locally:\n` +
+      missing.map(s => `  - ${s}`).join('\n') + '\n\n' +
+      `This skill was synced without its scripts. To install them, run:\n` +
+      `  octopus add ${skillName} --force`
+    );
   }
 
   private pickAdapter(skill: LoadedSkill) {

@@ -34,7 +34,7 @@ interface VectorEntry {
   embedding: number[];
 }
 
-function isSkillEligible(skill: LoadedSkill, query: string): boolean {
+export function isSkillEligible(skill: LoadedSkill, query: string): boolean {
   const normalizedQuery = query.trim();
   const skillName = skill.manifest.name.toLowerCase();
 
@@ -50,9 +50,23 @@ function isSkillEligible(skill: LoadedSkill, query: string): boolean {
     return TRANSLATION_KEYWORDS.test(normalizedQuery);
   }
 
-  // HTTP-adapter skills with no endpoint can still be executed via
-  // LLM-guided execution (the LLM reads SKILL.md to determine the API call).
-  // Don't hard-filter them out — the LLM re-rank will handle relevance.
+  // Filter out http/no-endpoint skills that have zero keyword relevance to the query.
+  // These skills can only be executed via LLM-guided curl, and if they have no keyword
+  // overlap with the query they are almost certainly irrelevant noise.
+  if (
+    skill.manifest.adapter === 'http' &&
+    !skill.manifest.endpoint &&
+    !skill.manifest.llm_powered
+  ) {
+    const words = normalizedQuery.toLowerCase().split(/\W+/).filter(w => w.length > 2);
+    const haystack = (
+      skill.manifest.name + ' ' +
+      skill.manifest.description + ' ' +
+      skill.manifest.tags.join(' ')
+    ).toLowerCase();
+    const hasAnyMatch = words.some(w => haystack.includes(w));
+    if (!hasAnyMatch) return false;
+  }
 
   return true;
 }
@@ -191,7 +205,7 @@ export class Router {
     if (isLLMOnly) {
       // No embed client or all embeddings empty — pre-filter by keyword relevance
       // so the LLM re-ranker never receives more than LLM_RERANK_CAP candidates.
-      const LLM_RERANK_CAP = 20;
+      const LLM_RERANK_CAP = 10;
       if (eligible.length <= LLM_RERANK_CAP) {
         candidates = eligible.map(({ skill }) => ({ skill, score: 1.0 }));
       } else {

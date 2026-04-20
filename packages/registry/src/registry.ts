@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import matter from 'gray-matter';
 import { glob } from 'glob';
 import { SkillManifestSchema, type SkillManifest } from './manifest-schema.js';
@@ -152,10 +153,54 @@ export class SkillRegistry {
     }
   }
 
+  private cachePath(): string {
+    return path.join(this.skillsDir, '.registry-cache.json');
+  }
+
+  private computeFilesHash(files: string[]): string {
+    const sorted = [...files].sort();
+    const mtimes = sorted.map(f => {
+      try { return `${f}:${fs.statSync(f).mtimeMs}`; }
+      catch { return `${f}:0`; }
+    }).join('|');
+    return createHash('sha1').update(mtimes).digest('hex').slice(0, 16);
+  }
+
   async load(): Promise<void> {
     // glob requires forward slashes on all platforms (including Windows)
     const pattern = this.skillsDir.replace(/\\/g, '/') + '/**/SKILL.md';
     const files = await glob(pattern);
+
+    // Check file-based cache
+    if (!process.env.OCTOPUS_NO_CACHE) {
+      const hash = this.computeFilesHash(files);
+      try {
+        const cacheRaw = fs.readFileSync(this.cachePath(), 'utf-8');
+        const cache = JSON.parse(cacheRaw);
+        if (cache.hash === hash && Array.isArray(cache.skills)) {
+          let restored = 0;
+          for (const s of cache.skills) {
+            try {
+              const manifest = SkillManifestSchema.parse(s.manifest);
+              const persistedEntry = this.ratingStore.getAll()[manifest.name];
+              if (persistedEntry !== undefined) {
+                manifest.rating = persistedEntry.dimensions.quality;
+                manifest.invocations = persistedEntry.invocations;
+              }
+              this.skills.set(manifest.name, {
+                manifest,
+                instructions: s.instructions,
+                dirPath: s.dirPath,
+                rating: manifest.rating,
+                routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
+              });
+              restored++;
+            } catch { /* skip corrupt entries */ }
+          }
+          if (restored > 0) return; // Cache hit
+        }
+      } catch { /* cache miss or corrupt — proceed with full load */ }
+    }
 
     let failCount = 0;
     for (const file of files) {
@@ -191,6 +236,17 @@ export class SkillRegistry {
         `[Registry] Loaded ${total - failCount}/${total} skills (${failCount} skipped — incompatible format)\n`
       );
     }
+
+    // Write cache
+    try {
+      const hash = this.computeFilesHash(files);
+      const serialized = Array.from(this.skills.values()).map(s => ({
+        manifest: s.manifest,
+        instructions: s.instructions,
+        dirPath: s.dirPath,
+      }));
+      fs.writeFileSync(this.cachePath(), JSON.stringify({ hash, skills: serialized }));
+    } catch { /* cache write failure is non-fatal */ }
   }
 
   getAll(): LoadedSkill[] {
