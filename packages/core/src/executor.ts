@@ -133,7 +133,36 @@ export class Executor {
     }
 
     const query = (input.query ?? input.text ?? '') as string;
-    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${skill.instructions}\n\nUser query: "${query}"\n\nWhat command should I run?`;
+
+    // Rewrite OpenClaw workspace paths in instructions to the actual skill directory.
+    // Community skills reference ~/.openclaw/workspace/skills/<name>/ but may be
+    // installed elsewhere (e.g. ~/.agentoctopus/skills/<name>/).
+    const instrHomeDir = process.env.HOME || process.env.USERPROFILE || '';
+    const instrPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
+    const rewrittenInstructions = skill.instructions.replace(instrPathPattern, (match) => {
+      const expanded = match.replace(/^~/, instrHomeDir);
+      if (fs.existsSync(expanded)) return match; // path exists, leave it
+      return skill.dirPath; // redirect to actual install location
+    });
+
+    // Build credential context for the LLM so it can include auth in commands
+    const subRequiredEnvVars = getRequiredEnvVars(skill.manifest);
+    const subCredLines: string[] = [];
+    if (subRequiredEnvVars.length > 0) {
+      for (const v of subRequiredEnvVars) {
+        const val = process.env[v.key];
+        if (val) {
+          subCredLines.push(`  ${v.key} = ${val} (already set)`);
+        } else {
+          subCredLines.push(`  ${v.key} = NOT SET${v.label ? ` (${v.label})` : ''}`);
+        }
+      }
+    }
+    const subCredContext = subCredLines.length > 0
+      ? `\n\nAvailable credentials:\n${subCredLines.join('\n')}`
+      : '';
+
+    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${rewrittenInstructions}\n\nUser query: "${query}"${subCredContext}\n\nWhat command should I run?`;
 
     const command = await this.chatClient.chat(SKILL_EXECUTION_SYSTEM_PROMPT, userMessage);
     let trimmedCommand = command.trim();
@@ -152,6 +181,18 @@ export class Executor {
       const scriptName = absoluteScriptMatch[2].split('/scripts/')[1];
       trimmedCommand = `${prefix}scripts/${scriptName}${suffix}`;
     }
+
+    // Rewrite OpenClaw workspace paths to the actual skill directory.
+    // Skills installed from ClaWHub reference ~/.openclaw/workspace/skills/<name>/
+    // but may be installed at a different location (e.g. ~/.agentoctopus/skills/<name>/).
+    const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    trimmedCommand = trimmedCommand.replace(openclawPathPattern, (match) => {
+      // Only rewrite if the referenced path doesn't actually exist
+      const expanded = match.replace(/^~/, homeDir);
+      if (fs.existsSync(expanded)) return match; // path exists, leave it
+      return skill.dirPath; // redirect to actual install location
+    });
 
     // Execute the LLM-determined command from the skill's directory
     const cp = await import('node:child_process');
@@ -198,7 +239,42 @@ export class Executor {
     }
 
     const query = (input.query ?? input.text ?? '') as string;
-    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nAPI Instructions:\n${skill.instructions}\n\nUser query: "${query}"\n\nWhat curl command should I run?`;
+
+    // Rewrite OpenClaw workspace paths in instructions (same as subprocess path)
+    const fs = await import('fs');
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
+    const rewrittenInstructions = skill.instructions.replace(openclawPathPattern, (match) => {
+      const expanded = match.replace(/^~/, homeDir);
+      if (fs.existsSync(expanded)) return match;
+      return skill.dirPath;
+    });
+
+    // Build credential context for the LLM so it can include auth headers/tokens
+    const requiredEnvVars = getRequiredEnvVars(skill.manifest);
+    const credLines: string[] = [];
+    if (requiredEnvVars.length > 0) {
+      for (const v of requiredEnvVars) {
+        const val = process.env[v.key];
+        if (val) {
+          credLines.push(`  ${v.key} = ${val} (already set)`);
+        } else {
+          credLines.push(`  ${v.key} = NOT SET${v.label ? ` (${v.label})` : ''}`);
+        }
+      }
+    }
+    // Also scan for common API key env vars that are set in the environment
+    const commonKeyPattern = /^[A-Z][A-Z0-9_]*_(API_KEY|KEY|TOKEN|SECRET|APIKEY)$/;
+    for (const [key, val] of Object.entries(process.env)) {
+      if (val && commonKeyPattern.test(key) && !requiredEnvVars.some(v => v.key === key)) {
+        credLines.push(`  ${key} = ${val} (available in env)`);
+      }
+    }
+    const credContext = credLines.length > 0
+      ? `\n\nAvailable credentials:\n${credLines.join('\n')}\nUse these credentials in the API call (e.g. as Authorization: Bearer <token> header, or as query parameter).`
+      : '';
+
+    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nAPI Instructions:\n${rewrittenInstructions}\n\nUser query: "${query}"${credContext}\n\nWhat curl command should I run?`;
 
     const command = await this.chatClient.chat(HTTP_EXECUTION_SYSTEM_PROMPT, userMessage);
     const trimmedCommand = command.trim();
@@ -276,15 +352,32 @@ export class Executor {
    * Uses the LLM to extract setup instructions from SKILL.md when available.
    */
   private async diagnoseAuthError(result: AdapterResult, skill: LoadedSkill): Promise<string | null> {
-    // Only check successful results with rawText (JSON API responses)
-    if (!result.success || !result.rawText) return null;
+    // Check results with rawText for auth error patterns.
+    // Some skills return HTTP 200 with an error body like {"error": "Missing API key"}
+    // so we check both success and failure results.
+    if (!result.rawText && !result.error) return null;
 
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(result.rawText.trim());
-    } catch {
-      return null;
+    // Try parsing as JSON; fall back to checking the error string
+    let parsed: Record<string, unknown> | null = null;
+    if (result.rawText) {
+      try {
+        parsed = JSON.parse(result.rawText.trim());
+      } catch {
+        // Not JSON — check error string instead
+      }
     }
+
+    // Check the error string from failed results
+    if (!parsed && result.error) {
+      const errLower = result.error.toLowerCase();
+      if (errLower.includes('api key') || errLower.includes('apikey') ||
+          errLower.includes('unauthorized') || errLower.includes('auth') ||
+          errLower.includes('forbidden') || errLower.includes('missing key')) {
+        parsed = { error: result.error };
+      }
+    }
+
+    if (!parsed) return null;
 
     if (!this.isAuthError(parsed)) return null;
 
@@ -296,8 +389,33 @@ export class Executor {
     if (required.length > 0) {
       for (const v of required) {
         const label = v.label ? ` — ${v.label}` : '';
-        lines.push(`  Set ${v.key}${label}:`);
-        lines.push(`    octopus config set ${v.key} <your-key>`);
+        const isSet = !!process.env[v.key];
+        if (isSet) {
+          lines.push(`  ✓ ${v.key} is set${label}`);
+        } else {
+          lines.push(`  Set ${v.key}${label}:`);
+          lines.push(`    octopus config set ${v.key} <your-key>`);
+        }
+      }
+    } else {
+      // No declared credentials — scan instructions for likely env var names
+      const envVarPattern = /\b([A-Z][A-Z0-9_]{2,}(?:_API_KEY|_KEY|_TOKEN|_SECRET|_APIKEY))\b/g;
+      const instructions = skill.instructions;
+      const foundVars = new Set<string>();
+      let m: RegExpExecArray | null;
+      while ((m = envVarPattern.exec(instructions)) !== null) {
+        foundVars.add(m[1]!);
+      }
+      if (foundVars.size > 0) {
+        for (const v of foundVars) {
+          const isSet = !!process.env[v];
+          if (isSet) {
+            lines.push(`  ✓ ${v} is set`);
+          } else {
+            lines.push(`  Set ${v}:`);
+            lines.push(`    octopus config set ${v} <your-key>`);
+          }
+        }
       }
     }
 

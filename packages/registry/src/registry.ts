@@ -104,6 +104,7 @@ export interface LoadedSkill {
   dirPath: string;
   rating: number;
   routingScore?: number;
+  negativeFeedbackCount?: number;
 }
 
 export class SkillRegistry {
@@ -145,6 +146,7 @@ export class SkillRegistry {
           dirPath: path.dirname(file),
           rating: manifest.rating,
           routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
+          negativeFeedbackCount: this.ratingStore.getOrCreate(manifest.name).recentFeedback.filter(f => !f.positive).length,
         });
       } catch {
         // silently skip incompatible skills from extra dir
@@ -179,6 +181,7 @@ export class SkillRegistry {
           dirPath: path.dirname(file),
           rating: manifest.rating,
           routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
+          negativeFeedbackCount: this.ratingStore.getOrCreate(manifest.name).recentFeedback.filter(f => !f.positive).length,
         });
       } catch {
         failCount++;
@@ -235,6 +238,7 @@ export class SkillRegistry {
         skill.manifest.rating = skill.rating;
       }
       skill.routingScore = this.ratingStore.getRoutingScore(skillName, skill.manifest.taskType);
+      skill.negativeFeedbackCount = this.ratingStore.getOrCreate(skillName).recentFeedback.filter(f => !f.positive).length;
     }
   }
 
