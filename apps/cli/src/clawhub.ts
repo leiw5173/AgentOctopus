@@ -35,10 +35,10 @@ export interface SkillIndexEntry {
   skillMd: string | null;
   /** Full content of _meta.json */
   metaJson: string | null;
-  /** Full content of scripts/invoke.js, or null when absent (legacy field) */
+  /** Full content of scripts/invoke.js, or null when absent (legacy format) */
   invokeScript: string | null;
-  /** All script files: filename → content (new field, replaces invokeScript) */
-  scripts?: Record<string, string> | null;
+  /** All scripts as filename → content map, or null when absent (new format) */
+  scripts: Record<string, string> | null;
 }
 
 interface SkillsIndex {
@@ -458,9 +458,11 @@ export async function downloadSkillsIndex(url?: string): Promise<SkillIndexEntry
  * Creates:
  *   <skillsDir>/<slug>/SKILL.md
  *   <skillsDir>/<slug>/_meta.json
- *   <skillsDir>/<slug>/scripts/*  (all bundled scripts)
+ *   <skillsDir>/<slug>/scripts/*  (all scripts from index)
  *
- * Silently skips if the skill directory already exists and `force` is false.
+ * Silently skips if the skill directory already exists and `force` is false,
+ * UNLESS the installed skill is missing scripts that the index has — in that
+ * case the missing scripts are written without requiring --force.
  */
 export function installFromIndex(
   entry: SkillIndexEntry,
@@ -468,8 +470,40 @@ export function installFromIndex(
   force = false,
 ): void {
   const skillDir = path.join(skillsDir, entry.slug);
+  const scriptsDir = path.join(skillDir, 'scripts');
 
-  if (fs.existsSync(skillDir) && !force) return;
+  // Resolve scripts map: prefer new `scripts` field, fall back to legacy `invokeScript`
+  const scriptsMap: Record<string, string> = {};
+  if (entry.scripts) {
+    Object.assign(scriptsMap, entry.scripts);
+  } else if (entry.invokeScript !== null) {
+    scriptsMap['invoke.js'] = entry.invokeScript;
+  }
+
+  // If skill already exists and not forcing, check for missing scripts
+  if (fs.existsSync(skillDir) && !force) {
+    if (Object.keys(scriptsMap).length === 0) return; // no scripts to install
+
+    // Write only the scripts that are missing on disk
+    let wroteAny = false;
+    for (const [filename, content] of Object.entries(scriptsMap)) {
+      const scriptPath = path.join(scriptsDir, filename);
+      if (!fs.existsSync(scriptPath)) {
+        fs.mkdirSync(scriptsDir, { recursive: true });
+        fs.writeFileSync(scriptPath, content, 'utf8');
+        wroteAny = true;
+      }
+    }
+    // Also update SKILL.md and _meta.json if forcing or if they don't exist
+    if (!fs.existsSync(path.join(skillDir, 'SKILL.md')) && entry.skillMd) {
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
+    }
+    if (!fs.existsSync(path.join(skillDir, '_meta.json')) && entry.metaJson) {
+      fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson, 'utf8');
+    }
+    if (wroteAny) return; // patched missing scripts, done
+    return; // nothing to update
+  }
 
   // Remove stale directory when force is set
   if (fs.existsSync(skillDir)) {
@@ -481,17 +515,11 @@ export function installFromIndex(
   fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
   fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson ?? '', 'utf8');
 
-  // Write all bundled scripts (new format: scripts map)
-  if (entry.scripts) {
-    for (const [filename, content] of Object.entries(entry.scripts)) {
-      const scriptPath = path.join(skillDir, 'scripts', filename);
-      fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
-      fs.writeFileSync(scriptPath, content, 'utf8');
-    }
-  } else if (entry.invokeScript !== null) {
-    // Legacy format: only invoke.js
-    const scriptsDir = path.join(skillDir, 'scripts');
+  // Write all scripts
+  if (Object.keys(scriptsMap).length > 0) {
     fs.mkdirSync(scriptsDir, { recursive: true });
-    fs.writeFileSync(path.join(scriptsDir, 'invoke.js'), entry.invokeScript, 'utf8');
+    for (const [filename, content] of Object.entries(scriptsMap)) {
+      fs.writeFileSync(path.join(scriptsDir, filename), content, 'utf8');
+    }
   }
 }
