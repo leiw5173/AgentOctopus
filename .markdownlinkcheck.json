@@ -1,0 +1,1 @@
+{"ignorePatterns": [{"pattern": "^http://localhost"}, {"pattern": "^https://your-"}, {"pattern": "^https://cloud:"}], "timeout": "10s", "retryOn429": true, "retryCount": 2}
