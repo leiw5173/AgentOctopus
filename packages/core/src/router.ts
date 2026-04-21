@@ -397,19 +397,25 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
 
     if (bestSkillName === 'none') return [];
 
-    const best = candidates.find(
+    // Return top candidates ranked by score, with the LLM's pick first
+    const ranked = candidates.slice().sort((a, b) => b.score - a.score);
+    const best = ranked.find(
       (c) => c.skill.manifest.name.toLowerCase() === bestSkillName,
     );
     if (!best) return [];
 
-    return [
-      {
-        skill: best.skill,
-        score: best.score,
-        confidence: normalizeConfidence(best.score),
-        reason: `Selected "${best.skill.manifest.name}" as the best match for your request.`,
-      },
-    ];
+    // Move the LLM's pick to the front, then remaining by score
+    const rest = ranked.filter(c => c.skill.manifest.name.toLowerCase() !== bestSkillName);
+    const ordered = [best, ...rest];
+
+    return ordered.map(c => ({
+      skill: c.skill,
+      score: c.score,
+      confidence: normalizeConfidence(c.score),
+      reason: c === best
+        ? `Selected "${c.skill.manifest.name}" as the best match for your request.`
+        : `Fallback candidate "${c.skill.manifest.name}" (score: ${c.score.toFixed(3)}).`,
+    }));
   }
 
   /**
