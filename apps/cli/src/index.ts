@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, type LLMConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, type LLMConfig, type CredentialMissingResult } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
@@ -293,11 +293,26 @@ program
           console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`));
         }
 
-        if (result.adapterResult.success) {
+        if ('type' in result && result.type === 'credential_missing') {
+          const lines = result.missing
+            .map((v: { key: string; label?: string }) => v.label ? `  • ${v.key} — ${v.label}` : `  • ${v.key}`)
+            .join('\n');
+          spinner.fail(`${result.skillName} requires unconfigured API keys`);
+          console.error(chalk.red(`\nMissing credentials:\n${lines}\n`));
+          console.error(chalk.yellow(`  To configure: octopus config set ${result.missing[0]?.key} <your-key>`));
+          if (i < candidates.length - 1) {
+            console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+          }
+          continue;
+        }
+
+        const execResult = result as import('@agentoctopus/core').ExecutionResult;
+
+        if (execResult.adapterResult.success) {
           succeeded = true;
           spinner.succeed('Execution successful\n');
           console.log(chalk.green('Result:'));
-          console.log(result.formattedOutput + '\n');
+          console.log(execResult.formattedOutput + '\n');
 
           // Ask for feedback
           if (options.prompt !== false) {
@@ -322,8 +337,8 @@ program
 
         // Execution failed
         spinner.fail(`${skill.manifest.name} execution failed\n`);
-        console.error(chalk.red('Error:'), result.adapterResult.error);
-        failedResults.push({ authGuidance: result.authGuidance });
+        console.error(chalk.red('Error:'), execResult.adapterResult.error);
+        failedResults.push({ authGuidance: execResult.authGuidance });
         if (i < candidates.length - 1) {
           console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
         }
