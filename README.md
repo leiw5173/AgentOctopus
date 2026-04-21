@@ -161,6 +161,12 @@ octopus ask "translate hello to French"
 octopus list       # show installed skills
 ```
 
+If the first matched skill fails, `octopus ask` automatically tries the next candidate (up to 3 by default). Configure this in `~/.agentoctopus/octopus.json`:
+
+```json
+{ "maxRetries": 5 }
+```
+
 From source:
 
 ```bash

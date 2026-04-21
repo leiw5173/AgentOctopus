@@ -34,6 +34,8 @@ User query
                pre-filters with isSkillEligible(), LLM re-ranks,
                returns [] if no skill fits (→ direct LLM answer)
   → Executor — picks adapter (http / mcp / subprocess), invokes skill
+               on failure: tries next candidate (up to maxRetries, default 3)
+               all failed → falls back to direct LLM answer
   → Result   — formatted, returned to caller; feedback updates ratings.json
 ```
 
@@ -97,7 +99,7 @@ When you install `@agentoctopus/cli` globally and run `octopus onboard`, the wiz
 ~/.agentoctopus/
   skills/          ← active skill registry (user-owned)
   ratings.json     ← persisted ratings
-  octopus.json     ← machine-level config: skills dir path + API key credentials
+  octopus.json     ← machine-level config: skills dir path + API key credentials + maxRetries
 ```
 
 To set or update a credential without re-running the full wizard:
@@ -125,7 +127,7 @@ fetching 5,000+ skills one-by-one from ClaWHub:
 GitHub Action (daily, 02:00 UTC)
   → fetch all slugs from awesome-openclaw-skills
   → download ZIPs from ClaWHub (server-side, generous delays)
-  → build skills-index.json  (slug, name, SKILL.md, _meta.json, invoke.js)
+  → build skills-index.json  (slug, name, SKILL.md, _meta.json, scripts/*, files/*)
   → gzip → upload to GitHub Release tag: skills-index-latest
 
 octopus sync
@@ -133,7 +135,8 @@ octopus sync
   → Phase 2: GET skills-index.json.gz  (1 request, ~3–5 MB)
   → gunzip + parse in memory
   → apply --category / --limit filters locally (no extra network calls)
-  → write SKILL.md + _meta.json + scripts/invoke.js per skill
+  → write SKILL.md + _meta.json + scripts/* + all other files per skill
+  → patch missing files for existing skills without --force
   → Phase 3 (optional): sync from cloud instance via --cloud-url
   → done in ~10 seconds for 5,000+ skills
 ```

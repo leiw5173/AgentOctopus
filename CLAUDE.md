@@ -127,6 +127,8 @@ User query
                pre-filters with isSkillEligible(), LLM re-ranks,
                returns [] if no skill fits (→ direct LLM answer)
   → Executor — picks adapter (http / mcp / subprocess), invokes skill
+               on failure: tries next candidate (up to maxRetries, default 3)
+               all failed → falls back to direct LLM answer
   → Result   — formatted, returned to caller; feedback updates ratings.json
 ```
 
