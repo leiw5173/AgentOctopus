@@ -8,6 +8,8 @@ export interface OctopusConfig {
   credentials: Record<string, string>;
   gistId?: string;
   feedbackSharing?: boolean;
+  /** Max skills to try on execution failure (default: 3) */
+  maxRetries?: number;
 }
 
 const DEFAULT_HOME = path.join(os.homedir(), '.agentoctopus');

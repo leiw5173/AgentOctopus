@@ -269,53 +269,74 @@ program
       return;
     }
 
-    const { skill, score, reason } = routes[0]!;
-    spinner.succeed(`Selected skill: ${chalk.cyan.bold(skill.manifest.name)}`);
-    console.log(chalk.gray(`  Reason: ${reason}`));
-    console.log(chalk.gray(`  Match Score: ${score.toFixed(3)}\n`));
+    // Determine max retries from config
+    const config = loadOctopusConfig();
+    const maxRetries = config?.maxRetries ?? 3;
+    const candidates = routes.slice(0, maxRetries);
+    const input = { query, text: query };
 
-    spinner.start(`Executing ${skill.manifest.name}...`);
-    try {
-      const input = { query, text: query };
+    let succeeded = false;
+    for (let i = 0; i < candidates.length; i++) {
+      const { skill, score, reason } = candidates[i]!;
+      const attemptLabel = candidates.length > 1 ? ` (attempt ${i + 1}/${candidates.length})` : '';
+      spinner.succeed(`Selected skill: ${chalk.cyan.bold(skill.manifest.name)}${attemptLabel}`);
+      console.log(chalk.gray(`  Reason: ${reason}`));
+      console.log(chalk.gray(`  Match Score: ${score.toFixed(3)}\n`));
 
-      const result = await engine.executor.execute(skill, input);
-      const t3 = Date.now();
+      spinner.start(`Executing ${skill.manifest.name}...`);
+      try {
+        const result = await engine.executor.execute(skill, input);
+        const t3 = Date.now();
 
-      if (process.env.OCTOPUS_TIMING) {
-        console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`));
-      }
-
-      if (result.adapterResult.success) {
-        spinner.succeed('Execution successful\n');
-        console.log(chalk.green('Result:'));
-        console.log(result.formattedOutput + '\n');
-
-        // Ask for feedback
-        if (options.prompt !== false) {
-          const rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout,
-          });
-
-          rl.question(chalk.yellow('Was this helpful? (y/n): '), (answer) => {
-            const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
-
-            rl.question(chalk.yellow('Any comments? (press Enter to skip): '), (comment) => {
-              const trimmed = comment.trim() || undefined;
-              engine.registry.recordFeedback(skill.manifest.name, isPositive, trimmed, 'cli');
-              console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
-              rl.close();
-            });
-          });
+        if (process.env.OCTOPUS_TIMING) {
+          console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`));
         }
-      } else {
-        spinner.fail('Execution failed\n');
+
+        if (result.adapterResult.success) {
+          succeeded = true;
+          spinner.succeed('Execution successful\n');
+          console.log(chalk.green('Result:'));
+          console.log(result.formattedOutput + '\n');
+
+          // Ask for feedback
+          if (options.prompt !== false) {
+            const rl = readline.createInterface({
+              input: process.stdin,
+              output: process.stdout,
+            });
+
+            rl.question(chalk.yellow('Was this helpful? (y/n): '), (answer) => {
+              const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+
+              rl.question(chalk.yellow('Any comments? (press Enter to skip): '), (comment) => {
+                const trimmed = comment.trim() || undefined;
+                engine.registry.recordFeedback(skill.manifest.name, isPositive, trimmed, 'cli');
+                console.log(chalk.gray('Thank you for your feedback! Rating updated.'));
+                rl.close();
+              });
+            });
+          }
+          break;
+        }
+
+        // Execution failed
+        spinner.fail(`${skill.manifest.name} execution failed\n`);
         console.error(chalk.red('Error:'), result.adapterResult.error);
+        if (i < candidates.length - 1) {
+          console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+        }
+      } catch (err) {
+        spinner.fail(`${skill.manifest.name} execution failed`);
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(chalk.red(message));
+        if (i < candidates.length - 1) {
+          console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+        }
       }
-    } catch (err) {
-      spinner.fail('Execution failed');
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(chalk.red(message));
+    }
+
+    if (!succeeded && candidates.length > 0) {
+      console.log(chalk.yellow(`\nAll ${candidates.length} skill(s) failed for this request.`));
     }
   });
 
