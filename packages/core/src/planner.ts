@@ -203,13 +203,27 @@ For multi-step with dependency:
         text: resolvedQuery,
       });
 
+      // Handle credential missing result
+      if ('type' in result && result.type === 'credential_missing') {
+        const keys = result.missing.map((m: any) => m.key).join(', ');
+        return {
+          stepId: step.id,
+          query: step.query,
+          skill: best.skill.manifest.name,
+          confidence: best.confidence,
+          output: `Skill requires missing credentials: ${keys}`,
+          success: false,
+        };
+      }
+
+      const execResult = result as any;
       return {
         stepId: step.id,
         query: step.query,
         skill: best.skill.manifest.name,
         confidence: best.confidence,
-        output: result.formattedOutput,
-        success: result.adapterResult.success,
+        output: execResult.formattedOutput,
+        success: execResult.adapterResult.success,
       };
     } catch (err) {
       return {

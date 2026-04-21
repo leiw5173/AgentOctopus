@@ -89,7 +89,7 @@ describe('Executor', () => {
     expect(result.formattedOutput).toBe('Error: Command failed');
   });
 
-  it('throws before invoking when a required credential env var is missing', async () => {
+  it('returns CredentialMissingResult when a required credential env var is missing', async () => {
     delete process.env['REQUIRED_KEY'];
 
     const executor = new Executor(mockRegistry);
@@ -101,8 +101,12 @@ describe('Executor', () => {
       },
     } as any;
 
-    await expect(executor.execute(mockSkill, { query: 'test' }))
-      .rejects.toThrow('REQUIRED_KEY');
+    const result = await executor.execute(mockSkill, { query: 'test' });
+    expect(result).toMatchObject({
+      type: 'credential_missing',
+      skillName: 'needs-key',
+      missing: [{ key: 'REQUIRED_KEY' }],
+    });
   });
 
   it('does not throw when all required credential env vars are set', async () => {
@@ -188,6 +192,35 @@ describe('Executor', () => {
     } as any;
 
     await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
+  });
+});
+
+describe('execute() with missing credentials', () => {
+  it('returns CredentialMissingResult instead of throwing when env var is absent', async () => {
+    delete process.env.MISSING_TEST_KEY_XYZ;
+
+    const skill = {
+      manifest: {
+        name: 'test-skill',
+        description: 'test',
+        adapter: 'http' as const,
+        credentials: [{ key: 'MISSING_TEST_KEY_XYZ', label: 'Get at https://example.com', required: true }],
+        metadata: {},
+      },
+      instructions: '',
+      dirPath: '/tmp',
+    } as any;
+
+    const registry = { recordInvocationMetrics: vi.fn(), recordFeedback: vi.fn() } as any;
+    const executor = new Executor(registry);
+
+    const result = await executor.execute(skill, { query: 'test' });
+
+    expect(result).toMatchObject({
+      type: 'credential_missing',
+      skillName: 'test-skill',
+      missing: [{ key: 'MISSING_TEST_KEY_XYZ' }],
+    });
   });
 });
 
