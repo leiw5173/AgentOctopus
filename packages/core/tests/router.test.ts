@@ -225,25 +225,27 @@ describe('penalizeMissingCredentials', () => {
 
   it('does not penalize a skill whose required env var IS set', () => {
     process.env.SET_TEST_KEY_XYZ_UNIQUE = 'my-value';
+    try {
+      const configuredSkill = {
+        manifest: {
+          name: 'configured-skill',
+          description: 'configured',
+          adapter: 'http' as const,
+          credentials: [{ key: 'SET_TEST_KEY_XYZ_UNIQUE', required: true }],
+          metadata: {},
+        },
+        instructions: '',
+        dirPath: '/tmp',
+      };
 
-    const configuredSkill = {
-      manifest: {
-        name: 'configured-skill',
-        description: 'configured',
-        adapter: 'http' as const,
-        credentials: [{ key: 'SET_TEST_KEY_XYZ_UNIQUE', required: true }],
-        metadata: {},
-      },
-      instructions: '',
-      dirPath: '/tmp',
-    };
+      const router = new Router({ provider: 'openai', model: 'gpt-4o', apiKey: 'test' });
+      const penalized = (router as any).penalizeMissingCredentials([
+        { skill: configuredSkill, score: 0.9 },
+      ]);
 
-    const router = new Router({ provider: 'openai', model: 'gpt-4o', apiKey: 'test' });
-    const penalized = (router as any).penalizeMissingCredentials([
-      { skill: configuredSkill, score: 0.9 },
-    ]);
-
-    expect(penalized[0].score).toBe(0.9);
-    delete process.env.SET_TEST_KEY_XYZ_UNIQUE;
+      expect(penalized[0].score).toBe(0.9);
+    } finally {
+      delete process.env.SET_TEST_KEY_XYZ_UNIQUE;
+    }
   });
 });

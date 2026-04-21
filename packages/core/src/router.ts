@@ -427,7 +427,7 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
     return candidates.map(entry => {
       const missing = getRequiredEnvVars(entry.skill.manifest).filter(v => !process.env[v.key]);
       if (missing.length === 0) return entry;
-      return { ...entry, score: entry.score - 0.25 };
+      return { ...entry, score: Math.max(0, entry.score - 0.25) };
     });
   }
 
