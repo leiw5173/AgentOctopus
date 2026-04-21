@@ -1,4 +1,4 @@
-import type { LoadedSkill, SkillRegistry } from '@agentoctopus/registry';
+import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/registry';
 import { getRequiredEnvVars } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
@@ -49,6 +49,12 @@ export interface ExecutionResult {
   formattedOutput: string;
   authGuidance?: string;
 }
+
+export type CredentialMissingResult = {
+  type: 'credential_missing';
+  skillName: string;
+  missing: RequiredEnvVar[];
+};
 
 export class Executor {
   private http = new HttpAdapter();

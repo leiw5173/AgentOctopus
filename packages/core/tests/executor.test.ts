@@ -190,3 +190,16 @@ describe('Executor', () => {
     await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
   });
 });
+
+describe('CredentialMissingResult type', () => {
+  it('is exported from executor', () => {
+    const result: import('../../src/executor.js').CredentialMissingResult = {
+      type: 'credential_missing',
+      skillName: 'test-skill',
+      missing: [{ key: 'TEST_KEY', label: 'Get at https://example.com' }],
+    };
+    expect(result.type).toBe('credential_missing');
+    expect(result.skillName).toBe('test-skill');
+    expect(result.missing[0].key).toBe('TEST_KEY');
+  });
+});
