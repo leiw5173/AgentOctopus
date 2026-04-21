@@ -3,6 +3,11 @@ const { App } = boltPkg;
 type AppOptions = ConstructorParameters<typeof App>[0];
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
+import { type CredentialMissingResult } from '@agentoctopus/core';
+
+function isCredentialMissing(result: unknown): result is CredentialMissingResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as any).type === 'credential_missing';
+}
 
 export interface SlackGatewayOptions {
   appOptions: AppOptions;
@@ -50,14 +55,28 @@ export async function startSlackGateway(options: SlackGatewayOptions): Promise<v
 
       const result = await engine.executor.execute(routing.skill, { query: text });
 
+      // Handle credential missing
+      if (isCredentialMissing(result)) {
+        const lines = result.missing
+          .map(v => `  - ${v.key}${v.label ? ` — ${v.label}` : ''}`)
+          .join('\n');
+        const setupCmd = result.missing[0]?.key
+          ? `\nRun: octopus config set ${result.missing[0].key} <your-key>`
+          : '';
+        await say({ text: `I matched a skill but it needs an unconfigured API key:\n${lines}${setupCmd}`, thread_ts: threadTs });
+        return;
+      }
+
+      const execResult = result as import('@agentoctopus/core').ExecutionResult;
+
       sessionManager.addMessage(session, {
         role: 'assistant',
-        content: result.formattedOutput,
+        content: execResult.formattedOutput,
         timestamp: Date.now(),
         skillUsed: routing.skill.manifest.name,
       });
 
-      await say({ text: result.formattedOutput, thread_ts: threadTs });
+      await say({ text: execResult.formattedOutput, thread_ts: threadTs });
     } catch (err) {
       await say({ text: `Error: ${(err as Error).message}`, thread_ts: threadTs });
     }
