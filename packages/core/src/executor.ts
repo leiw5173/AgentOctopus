@@ -3,6 +3,8 @@ import { getRequiredEnvVars } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 import type { ChatClient } from './llm-client.js';
+import fs from 'fs';
+import path from 'path';
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
 
@@ -22,10 +24,13 @@ Rules:
 - Read the skill instructions carefully to understand the API endpoints, methods, and parameters
 - Pick the endpoint and method that best matches the user's intent
 - Output ONLY the curl command to run, nothing else — no explanation, no markdown
+- ONLY produce curl commands — NEVER produce python3, node, bash, or any local script commands
+- If the instructions reference local scripts (e.g. python3 scripts/foo.py), ignore those — find the underlying HTTP API endpoint instead
 - Include the correct HTTP method (-X POST, -X DELETE, etc.)
 - Include -H "Content-Type: application/json" for JSON bodies
 - Include -H "Authorization: Bearer $API_KEY" if the API requires auth (use env var syntax)
 - Put the JSON body in -d '{...}' if needed
+- If you cannot determine a valid curl command from the instructions, output exactly "NONE"
 - The command will be executed via bash`;
 
 const AUTH_DIAGNOSIS_PROMPT = `You are a helpful assistant diagnosing an API authentication error. Given a skill's instructions and the error, provide a concise setup guide.
@@ -42,6 +47,7 @@ export interface ExecutionResult {
   skill: LoadedSkill;
   adapterResult: AdapterResult;
   formattedOutput: string;
+  authGuidance?: string;
 }
 
 export class Executor {
@@ -102,10 +108,19 @@ export class Executor {
 
     const formattedOutput = this.format(adapterResult);
 
+    // Post-execution: detect HTTP errors in "successful" subprocess output
+    // (curl returns exit 0 even on 429/401/403 — mark as failed so retry can try next skill)
+    if (adapterResult.success && adapterResult.rawText) {
+      const httpError = this.detectHttpErrorInOutput(adapterResult.rawText);
+      if (httpError) {
+        adapterResult = { success: false, error: httpError, rawText: adapterResult.rawText };
+      }
+    }
+
     // Post-execution: detect auth errors and append setup guidance
     const authGuidance = await this.diagnoseAuthError(adapterResult, skill);
 
-    return { skill, adapterResult, formattedOutput: authGuidance ? `${formattedOutput}\n\n${authGuidance}` : formattedOutput };
+    return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
   }
 
   /**
@@ -180,6 +195,12 @@ export class Executor {
       const [, prefix, , suffix] = absoluteScriptMatch;
       const scriptName = absoluteScriptMatch[2].split('/scripts/')[1];
       trimmedCommand = `${prefix}scripts/${scriptName}${suffix}`;
+    }
+
+    // Validate that any referenced scripts exist on disk
+    const scriptError = this.validateCommandScripts(trimmedCommand, skill.dirPath);
+    if (scriptError) {
+      return { success: false, error: scriptError };
     }
 
     // Rewrite OpenClaw workspace paths to the actual skill directory.
@@ -283,6 +304,17 @@ export class Executor {
       return { success: false, error: `LLM could not determine the API call for skill "${skill.manifest.name}"` };
     }
 
+    // If the LLM returned "NONE", it couldn't find a valid curl command
+    if (trimmedCommand.toUpperCase() === 'NONE') {
+      return { success: false, error: `Skill "${skill.manifest.name}" does not expose an HTTP API that can be called directly. Its instructions describe local scripts that are not installed.` };
+    }
+
+    // Validate that any referenced scripts exist on disk
+    const scriptError = this.validateCommandScripts(trimmedCommand, skill.dirPath);
+    if (scriptError) {
+      return { success: false, error: scriptError };
+    }
+
     // Execute the LLM-determined curl command
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
@@ -311,6 +343,34 @@ export class Executor {
 
       child.stdin.end();
     });
+  }
+
+  /**
+   * Validate that script paths referenced in a command exist on disk.
+   * Returns an error message if scripts are missing, null if all OK.
+   */
+  private validateCommandScripts(command: string, skillDir: string): string | null {
+    const scriptPattern = /scripts\/([\w.-]+\.(?:py|js|sh))/g;
+    const missing: string[] = [];
+    let match: RegExpExecArray | null;
+
+    while ((match = scriptPattern.exec(command)) !== null) {
+      const relPath = match[0]; // e.g. "scripts/init_collection_run.py"
+      const absPath = path.join(skillDir, relPath);
+      if (!fs.existsSync(absPath)) {
+        missing.push(relPath);
+      }
+    }
+
+    if (missing.length === 0) return null;
+
+    const skillName = path.basename(skillDir);
+    return (
+      `Skill "${skillName}" references scripts that are not installed locally:\n` +
+      missing.map(s => `  - ${s}`).join('\n') + '\n\n' +
+      `This skill was synced without its scripts. To install them, run:\n` +
+      `  octopus add ${skillName} --force`
+    );
   }
 
   private pickAdapter(skill: LoadedSkill) {
@@ -452,6 +512,63 @@ export class Executor {
   }
 
   /**
+   * Detect HTTP error responses in subprocess stdout.
+   * curl returns exit 0 even on 4xx/5xx, so we need to check the output.
+   * Returns an error message if found, or null if the output looks OK.
+   */
+  private detectHttpErrorInOutput(rawText: string): string | null {
+    try {
+      const parsed = JSON.parse(rawText.trim());
+      const status = parsed.status ?? parsed.statusCode ?? parsed.code ?? parsed.cod;
+      const message = parsed.message ?? parsed.error ?? parsed.reason;
+
+      // HTTP 4xx/5xx status codes in response body
+      if (typeof status === 'number' && status >= 400) {
+        return `HTTP ${status}: ${message ?? rawText.trim().slice(0, 200)}`;
+      }
+
+      // status: "error" with a report containing an HTTP error code
+      if (status === 'error' || parsed.status === 'error') {
+        const report = String(parsed.report ?? parsed.result ?? '');
+        const httpInReport = report.match(/\b(4\d{2}|5\d{2})\b/);
+        if (httpInReport) {
+          return `HTTP ${httpInReport[0]}: ${report.slice(0, 200)}`;
+        }
+      }
+
+      // Scan all string values for embedded HTTP error patterns
+      const allText = rawText.toLowerCase();
+      const embeddedHttp = allText.match(/(?:api error|http error|error)\s*\(\s*(4\d{2}|5\d{2})\s*\)/);
+      if (embeddedHttp) {
+        return `HTTP ${embeddedHttp[1]}: ${rawText.trim().slice(0, 200)}`;
+      }
+
+      // Common error patterns without explicit status
+      // Flatten nested error objects (e.g. {error: {message: "...", type: "..."}})
+      const errorObj = parsed.error;
+      const errorStr = (typeof errorObj === 'object' && errorObj !== null
+        ? String((errorObj as Record<string, unknown>).message ?? (errorObj as Record<string, unknown>).type ?? JSON.stringify(errorObj))
+        : String(errorObj ?? '')).toLowerCase();
+      const msg = String(parsed.message ?? '').toLowerCase();
+      const authPatterns = ['unauthorized', 'forbidden', 'rate limit', 'too many requests',
+        'access denied', 'invalid api key', 'invalid token', 'authentication'];
+      if (authPatterns.some(p => errorStr.includes(p) || msg.includes(p))) {
+        return `API error: ${message ?? errorStr}`;
+      }
+    } catch {
+      // Not JSON — check for HTTP status in raw text (e.g. curl -i output)
+      const httpStatusMatch = rawText.match(/HTTP\/[\d.]+\s+(\d{3})\s+(.+)/);
+      if (httpStatusMatch) {
+        const code = parseInt(httpStatusMatch[1]!, 10);
+        if (code >= 400) {
+          return `HTTP ${code}: ${httpStatusMatch[2]!.trim()}`;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Detect common auth error patterns in API responses.
    */
   private isAuthError(parsed: Record<string, unknown>): boolean {
@@ -470,7 +587,11 @@ export class Executor {
     }
 
     // HTTP status codes
-    if (status === 401 || status === 403) return true;
+    if (status === 401 || status === 403 || status === 429) return true;
+
+    // 429 / rate limit patterns in message
+    if (error.includes('rate limit') || desc.includes('rate limit') ||
+        error.includes('too many requests') || desc.includes('too many requests')) return true;
 
     return false;
   }

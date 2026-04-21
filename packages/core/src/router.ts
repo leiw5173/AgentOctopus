@@ -15,7 +15,7 @@ export interface RoutingResult {
 const RATING_WEIGHT = 0.35;
 const FAILURE_PENALTY = 0.50; // per negative feedback — must overcome keyword score advantages
 const CATCHALL_PENALTY = 2.0;  // penalty for skills with overly broad "catch-all" descriptions
-const LLM_RERANK_CAP = 20;    // max candidates sent to LLM reranker
+const LLM_RERANK_CAP = 10;    // max candidates sent to LLM reranker
 const RELIABILITY_FLOOR = 0.1; // minimum routingScore multiplier — even broken skills get a small chance
 const IP_ADDRESS_PATTERN = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/;
 const DOMAIN_PATTERN = /\b(?=.{1,253}\b)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/i;
@@ -108,7 +108,7 @@ interface EmbedCacheFile {
   skills: Record<string, { hash: string; embedding: number[] }>;
 }
 
-function isSkillEligible(skill: LoadedSkill, query: string): boolean {
+export function isSkillEligible(skill: LoadedSkill, query: string): boolean {
   const normalizedQuery = query.trim();
   const skillName = skill.manifest.name.toLowerCase();
 
@@ -121,6 +121,25 @@ function isSkillEligible(skill: LoadedSkill, query: string): boolean {
   if (skillName === 'translation') {
     return TRANSLATION_KEYWORDS.test(normalizedQuery);
   }
+
+  // Filter out http/no-endpoint skills that have zero keyword relevance to the query.
+  // These skills can only be executed via LLM-guided curl, and if they have no keyword
+  // overlap with the query they are almost certainly irrelevant noise.
+  if (
+    skill.manifest.adapter === 'http' &&
+    !skill.manifest.endpoint &&
+    !skill.manifest.llm_powered
+  ) {
+    const words = normalizedQuery.toLowerCase().split(/\W+/).filter(w => w.length > 2);
+    const haystack = (
+      skill.manifest.name + ' ' +
+      skill.manifest.description + ' ' +
+      skill.manifest.tags.join(' ')
+    ).toLowerCase();
+    const hasAnyMatch = words.some(w => haystack.includes(w));
+    if (!hasAnyMatch) return false;
+  }
+
   return true;
 }
 
@@ -378,19 +397,25 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
 
     if (bestSkillName === 'none') return [];
 
-    const best = candidates.find(
+    // Return top candidates ranked by score, with the LLM's pick first
+    const ranked = candidates.slice().sort((a, b) => b.score - a.score);
+    const best = ranked.find(
       (c) => c.skill.manifest.name.toLowerCase() === bestSkillName,
     );
     if (!best) return [];
 
-    return [
-      {
-        skill: best.skill,
-        score: best.score,
-        confidence: normalizeConfidence(best.score),
-        reason: `Selected "${best.skill.manifest.name}" as the best match for your request.`,
-      },
-    ];
+    // Move the LLM's pick to the front, then remaining by score
+    const rest = ranked.filter(c => c.skill.manifest.name.toLowerCase() !== bestSkillName);
+    const ordered = [best, ...rest];
+
+    return ordered.map(c => ({
+      skill: c.skill,
+      score: c.score,
+      confidence: normalizeConfidence(c.score),
+      reason: c === best
+        ? `Selected "${c.skill.manifest.name}" as the best match for your request.`
+        : `Fallback candidate "${c.skill.manifest.name}" (score: ${c.score.toFixed(3)}).`,
+    }));
   }
 
   /**

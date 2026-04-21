@@ -73,16 +73,40 @@ export async function POST(req: Request) {
       });
     }
 
-    const bestMatch = routes[0];
-    const { skill, adapterResult, formattedOutput } = await executor.execute(bestMatch.skill, { query });
+    // Try up to 3 candidates on execution failure
+    const maxRetries = 3;
+    const candidates = routes.slice(0, maxRetries);
+    for (let i = 0; i < candidates.length; i++) {
+      const route = candidates[i]!;
+      try {
+        const { skill, adapterResult, formattedOutput } = await executor.execute(route.skill, { query });
+        if (adapterResult.success) {
+          return NextResponse.json({
+            success: true,
+            skill: skill.manifest.name,
+            rating: skill.rating,
+            confidence: route.score,
+            adapterOutput: adapterResult,
+            response: formattedOutput,
+          });
+        }
+        // Failed — try next candidate
+      } catch {
+        // Threw — try next candidate
+      }
+    }
 
+    // All candidates failed — fall back to direct LLM answer
+    const answer = await chatClient.chat(
+      'You are a helpful assistant. Answer the user\'s question concisely and accurately.',
+      query,
+    );
     return NextResponse.json({
       success: true,
-      skill: skill.manifest.name,
-      rating: skill.rating,
-      confidence: bestMatch.score,
-      adapterOutput: adapterResult,
-      response: formattedOutput,
+      skill: null,
+      confidence: null,
+      rating: null,
+      response: answer,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);

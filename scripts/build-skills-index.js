@@ -91,6 +91,54 @@ function extractFileFromZip(zipBuffer, targetName) {
   return null;
 }
 
+/**
+ * Extract all files from the scripts/ directory in a ZIP.
+ * Returns a map of filename → content, or null if no scripts found.
+ */
+function extractScriptsFromZip(zipBuffer) {
+  const scripts = {};
+  for (const entry of parseZipEntries(zipBuffer)) {
+    if (entry.isDirectory) continue;
+    const parts = entry.name.split('/');
+    const scriptsIdx = parts.indexOf('scripts');
+    if (scriptsIdx >= 0 && scriptsIdx < parts.length - 1) {
+      const filename = parts.slice(scriptsIdx + 1).join('/');
+      scripts[filename] = entry.data.toString('utf8');
+    }
+  }
+  return Object.keys(scripts).length > 0 ? scripts : null;
+}
+
+/**
+ * Extract all non-directory files from a ZIP, keyed by relative path.
+ * Skips SKILL.md and _meta.json (stored as top-level fields) and
+ * files inside scripts/ (stored in the scripts field for backward compat).
+ * Returns a map of "relative/path" → content, or null if empty.
+ */
+function extractExtraFilesFromZip(zipBuffer) {
+  const files = {};
+  for (const entry of parseZipEntries(zipBuffer)) {
+    if (entry.isDirectory) continue;
+    const name = entry.name;
+    // Skip top-level files already stored as dedicated fields
+    if (name === 'SKILL.md' || name === '_meta.json') continue;
+    // Skip scripts/ — stored separately for backward compat
+    const parts = name.split('/');
+    if (parts.includes('scripts')) continue;
+    // Skip binary-ish files by extension
+    const ext = name.split('.').pop().toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'ico', 'svg', 'woff', 'woff2', 'ttf', 'eot'].includes(ext)) continue;
+    // Use the filename part after the first directory (which is the skill slug)
+    const relPath = parts.length > 1 ? parts.slice(1).join('/') : name;
+    try {
+      files[relPath] = entry.data.toString('utf8');
+    } catch {
+      // Skip files that can't be decoded as UTF-8 (binary)
+    }
+  }
+  return Object.keys(files).length > 0 ? files : null;
+}
+
 // ── Slug fetching ──────────────────────────────────────────────────────────
 
 async function fetchAwesomeSlugs() {
@@ -170,9 +218,14 @@ async function processSkill(ownerSlug) {
   if (!skillMd) return null;
 
   const metaJson = extractFileFromZip(zipBuffer, '_meta.json');
-  const invokeScript = extractFileFromZip(zipBuffer, 'invoke.js');
 
-  return { slug, name, description, version, author, skillMd, metaJson, invokeScript };
+  // Extract ALL script files from the scripts/ directory
+  const scripts = extractScriptsFromZip(zipBuffer);
+
+  // Extract all other files (reference docs, data, configs, etc.)
+  const files = extractExtraFilesFromZip(zipBuffer);
+
+  return { slug, name, description, version, author, skillMd, metaJson, scripts, files };
 }
 
 // ── Concurrency pool ───────────────────────────────────────────────────────

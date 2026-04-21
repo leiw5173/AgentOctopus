@@ -31,6 +31,8 @@ octopus ask "what's the weather in Tokyo"
 octopus ask "translate hello to French"
 ```
 
+If the selected skill fails (network error, missing API key, 429 rate limit), `octopus ask` automatically tries the next best-matching candidate. It retries up to `maxRetries` times (default: 3, configurable in `~/.agentoctopus/octopus.json`). If all candidates fail and the failure was auth-related, it shows the relevant `octopus config set` command to fix it.
+
 ### `octopus list`
 
 Show all installed skills with their names, adapters, and ratings.
