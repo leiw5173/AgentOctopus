@@ -109,4 +109,24 @@ octopus onboard
   octopus.json     ← machine-level config: skills dir path + API key credentials
 ```
 
+## octopus.json options
+
+`~/.agentoctopus/octopus.json` stores machine-level settings beyond credentials:
+
+| Field | Default | Description |
+|---|---|---|
+| `skillsDir` | `~/.agentoctopus/skills` | Path to active skill registry |
+| `ratingsPath` | `~/.agentoctopus/ratings.json` | Path to ratings file |
+| `maxRetries` | `3` | Max skill candidates to try before falling back to direct LLM answer |
+| `credentials` | `{}` | API key credentials set via `octopus config set` |
+| `gistId` | — | GitHub Gist ID for rating sync |
+
+Example — increase retry attempts:
+
+```json
+{ "maxRetries": 5 }
+```
+
+When a skill fails (network error, missing API key, 429 rate limit), `octopus ask` automatically tries the next best-matching candidate up to `maxRetries` times.
+
 See also: [Quick Start](quick-start.md) | [Deployment](../deployment/docker.md)
