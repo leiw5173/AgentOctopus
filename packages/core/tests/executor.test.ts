@@ -193,7 +193,7 @@ describe('Executor', () => {
 
 describe('CredentialMissingResult type', () => {
   it('is exported from executor', () => {
-    const result: import('../../src/executor.js').CredentialMissingResult = {
+    const result: import('../../src/index.js').CredentialMissingResult = {
       type: 'credential_missing',
       skillName: 'test-skill',
       missing: [{ key: 'TEST_KEY', label: 'Get at https://example.com' }],

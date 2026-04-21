@@ -50,11 +50,11 @@ export interface ExecutionResult {
   authGuidance?: string;
 }
 
-export type CredentialMissingResult = {
+export interface CredentialMissingResult {
   type: 'credential_missing';
   skillName: string;
   missing: RequiredEnvVar[];
-};
+}
 
 export class Executor {
   private http = new HttpAdapter();
