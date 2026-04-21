@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server';
-import { Router, Executor, createChatClient } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, type CredentialMissingResult } from '@agentoctopus/core';
 import { SkillRegistry } from '@agentoctopus/registry';
 import path from 'path';
+
+function isCredentialMissing(result: unknown): result is CredentialMissingResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as any).type === 'credential_missing';
+}
 
 // Singleton initialization for production (can be expanded for persistence)
 const registry = new SkillRegistry(
@@ -79,7 +83,19 @@ export async function POST(req: Request) {
     for (let i = 0; i < candidates.length; i++) {
       const route = candidates[i]!;
       try {
-        const { skill, adapterResult, formattedOutput } = await executor.execute(route.skill, { query });
+        const result = await executor.execute(route.skill, { query });
+
+        if (isCredentialMissing(result)) {
+          return NextResponse.json({
+            success: false,
+            type: 'credential_missing',
+            skillName: result.skillName,
+            missing: result.missing,
+            response: `This skill needs an unconfigured API key. Run: octopus config set ${result.missing[0]?.key ?? 'KEY'} <your-key>`,
+          });
+        }
+
+        const { skill, adapterResult, formattedOutput } = result;
         if (adapterResult.success) {
           return NextResponse.json({
             success: true,
