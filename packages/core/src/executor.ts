@@ -47,6 +47,7 @@ export interface ExecutionResult {
   skill: LoadedSkill;
   adapterResult: AdapterResult;
   formattedOutput: string;
+  authGuidance?: string;
 }
 
 export class Executor {
@@ -119,7 +120,7 @@ export class Executor {
     // Post-execution: detect auth errors and append setup guidance
     const authGuidance = await this.diagnoseAuthError(adapterResult, skill);
 
-    return { skill, adapterResult, formattedOutput: authGuidance ? `${formattedOutput}\n\n${authGuidance}` : formattedOutput };
+    return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
   }
 
   /**
@@ -518,7 +519,7 @@ export class Executor {
   private detectHttpErrorInOutput(rawText: string): string | null {
     try {
       const parsed = JSON.parse(rawText.trim());
-      const status = parsed.status ?? parsed.statusCode ?? parsed.code;
+      const status = parsed.status ?? parsed.statusCode ?? parsed.code ?? parsed.cod;
       const message = parsed.message ?? parsed.error ?? parsed.reason;
 
       // HTTP 4xx/5xx status codes in response body
@@ -526,12 +527,33 @@ export class Executor {
         return `HTTP ${status}: ${message ?? rawText.trim().slice(0, 200)}`;
       }
 
+      // status: "error" with a report containing an HTTP error code
+      if (status === 'error' || parsed.status === 'error') {
+        const report = String(parsed.report ?? parsed.result ?? '');
+        const httpInReport = report.match(/\b(4\d{2}|5\d{2})\b/);
+        if (httpInReport) {
+          return `HTTP ${httpInReport[0]}: ${report.slice(0, 200)}`;
+        }
+      }
+
+      // Scan all string values for embedded HTTP error patterns
+      const allText = rawText.toLowerCase();
+      const embeddedHttp = allText.match(/(?:api error|http error|error)\s*\(\s*(4\d{2}|5\d{2})\s*\)/);
+      if (embeddedHttp) {
+        return `HTTP ${embeddedHttp[1]}: ${rawText.trim().slice(0, 200)}`;
+      }
+
       // Common error patterns without explicit status
-      const error = String(parsed.error ?? '').toLowerCase();
-      if (error.includes('unauthorized') || error.includes('forbidden') ||
-          error.includes('rate limit') || error.includes('too many requests') ||
-          error.includes('access denied') || error.includes('invalid api key')) {
-        return `API error: ${message ?? error}`;
+      // Flatten nested error objects (e.g. {error: {message: "...", type: "..."}})
+      const errorObj = parsed.error;
+      const errorStr = (typeof errorObj === 'object' && errorObj !== null
+        ? String((errorObj as Record<string, unknown>).message ?? (errorObj as Record<string, unknown>).type ?? JSON.stringify(errorObj))
+        : String(errorObj ?? '')).toLowerCase();
+      const msg = String(parsed.message ?? '').toLowerCase();
+      const authPatterns = ['unauthorized', 'forbidden', 'rate limit', 'too many requests',
+        'access denied', 'invalid api key', 'invalid token', 'authentication'];
+      if (authPatterns.some(p => errorStr.includes(p) || msg.includes(p))) {
+        return `API error: ${message ?? errorStr}`;
       }
     } catch {
       // Not JSON — check for HTTP status in raw text (e.g. curl -i output)

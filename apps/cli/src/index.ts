@@ -276,6 +276,7 @@ program
     const input = { query, text: query };
 
     let succeeded = false;
+    const failedResults: Array<{ authGuidance?: string }> = [];
     for (let i = 0; i < candidates.length; i++) {
       const { skill, score, reason } = candidates[i]!;
       const attemptLabel = candidates.length > 1 ? ` (attempt ${i + 1}/${candidates.length})` : '';
@@ -322,6 +323,7 @@ program
         // Execution failed
         spinner.fail(`${skill.manifest.name} execution failed\n`);
         console.error(chalk.red('Error:'), result.adapterResult.error);
+        failedResults.push({ authGuidance: result.authGuidance });
         if (i < candidates.length - 1) {
           console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
         }
@@ -337,6 +339,10 @@ program
 
     if (!succeeded && candidates.length > 0) {
       console.log(chalk.yellow(`\nAll ${candidates.length} skill(s) failed for this request.`));
+      const authGuidance = failedResults.find(r => r.authGuidance)?.authGuidance;
+      if (authGuidance) {
+        console.log('\n' + authGuidance);
+      }
     }
   });
 
