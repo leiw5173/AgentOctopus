@@ -1,4 +1,5 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
+import { getRequiredEnvVars } from '@agentoctopus/registry';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
 import fs from 'fs';
 import path from 'path';
@@ -365,6 +366,8 @@ export class Router {
 
     if (candidates.length === 0) return [];
 
+    candidates = this.penalizeMissingCredentials(candidates);
+
     // LLM rerank
     const candidateList = candidates
       .map((c, i) => {
@@ -416,6 +419,16 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
         ? `Selected "${c.skill.manifest.name}" as the best match for your request.`
         : `Fallback candidate "${c.skill.manifest.name}" (score: ${c.score.toFixed(3)}).`,
     }));
+  }
+
+  private penalizeMissingCredentials(
+    candidates: Array<{ skill: LoadedSkill; score: number }>,
+  ): Array<{ skill: LoadedSkill; score: number }> {
+    return candidates.map(entry => {
+      const missing = getRequiredEnvVars(entry.skill.manifest).filter(v => !process.env[v.key]);
+      if (missing.length === 0) return entry;
+      return { ...entry, score: entry.score - 0.25 };
+    });
   }
 
   /**

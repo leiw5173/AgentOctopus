@@ -177,3 +177,73 @@ describe('Router — LLM-only mode (no embedConfig)', () => {
     expect(results).toHaveLength(0);
   });
 });
+
+describe('penalizeMissingCredentials', () => {
+  it('reduces score by 0.25 for a skill with a missing required env var', () => {
+    delete process.env.PAID_TEST_KEY_XYZ_UNIQUE;
+
+    const paidSkill = {
+      manifest: {
+        name: 'paid-skill',
+        description: 'paid',
+        adapter: 'http' as const,
+        endpoint: 'https://paid.example.com/api',
+        credentials: [{ key: 'PAID_TEST_KEY_XYZ_UNIQUE', label: 'Get at https://paid.example.com', required: true }],
+        metadata: {},
+      },
+      instructions: '',
+      dirPath: '/tmp/paid',
+    };
+
+    const freeSkill = {
+      manifest: {
+        name: 'free-skill',
+        description: 'free',
+        adapter: 'http' as const,
+        endpoint: 'https://free.example.com/api',
+        credentials: [],
+        metadata: {},
+      },
+      instructions: '',
+      dirPath: '/tmp/free',
+    };
+
+    // Access private method via type cast
+    const router = new Router({ provider: 'openai', model: 'gpt-4o', apiKey: 'test' });
+    const penalized = (router as any).penalizeMissingCredentials([
+      { skill: freeSkill, score: 0.8 },
+      { skill: paidSkill, score: 0.8 },
+    ]);
+
+    const free = penalized.find((e: any) => e.skill.manifest.name === 'free-skill');
+    const paid = penalized.find((e: any) => e.skill.manifest.name === 'paid-skill');
+
+    expect(free.score).toBe(0.8);
+    expect(paid.score).toBeCloseTo(0.55);
+    expect(paid.score).toBeLessThan(free.score);
+  });
+
+  it('does not penalize a skill whose required env var IS set', () => {
+    process.env.SET_TEST_KEY_XYZ_UNIQUE = 'my-value';
+
+    const configuredSkill = {
+      manifest: {
+        name: 'configured-skill',
+        description: 'configured',
+        adapter: 'http' as const,
+        credentials: [{ key: 'SET_TEST_KEY_XYZ_UNIQUE', required: true }],
+        metadata: {},
+      },
+      instructions: '',
+      dirPath: '/tmp',
+    };
+
+    const router = new Router({ provider: 'openai', model: 'gpt-4o', apiKey: 'test' });
+    const penalized = (router as any).penalizeMissingCredentials([
+      { skill: configuredSkill, score: 0.9 },
+    ]);
+
+    expect(penalized[0].score).toBe(0.9);
+    delete process.env.SET_TEST_KEY_XYZ_UNIQUE;
+  });
+});
