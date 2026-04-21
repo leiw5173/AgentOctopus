@@ -107,6 +107,15 @@ export class Executor {
 
     const formattedOutput = this.format(adapterResult);
 
+    // Post-execution: detect HTTP errors in "successful" subprocess output
+    // (curl returns exit 0 even on 429/401/403 — mark as failed so retry can try next skill)
+    if (adapterResult.success && adapterResult.rawText) {
+      const httpError = this.detectHttpErrorInOutput(adapterResult.rawText);
+      if (httpError) {
+        adapterResult = { success: false, error: httpError, rawText: adapterResult.rawText };
+      }
+    }
+
     // Post-execution: detect auth errors and append setup guidance
     const authGuidance = await this.diagnoseAuthError(adapterResult, skill);
 
@@ -502,6 +511,42 @@ export class Executor {
   }
 
   /**
+   * Detect HTTP error responses in subprocess stdout.
+   * curl returns exit 0 even on 4xx/5xx, so we need to check the output.
+   * Returns an error message if found, or null if the output looks OK.
+   */
+  private detectHttpErrorInOutput(rawText: string): string | null {
+    try {
+      const parsed = JSON.parse(rawText.trim());
+      const status = parsed.status ?? parsed.statusCode ?? parsed.code;
+      const message = parsed.message ?? parsed.error ?? parsed.reason;
+
+      // HTTP 4xx/5xx status codes in response body
+      if (typeof status === 'number' && status >= 400) {
+        return `HTTP ${status}: ${message ?? rawText.trim().slice(0, 200)}`;
+      }
+
+      // Common error patterns without explicit status
+      const error = String(parsed.error ?? '').toLowerCase();
+      if (error.includes('unauthorized') || error.includes('forbidden') ||
+          error.includes('rate limit') || error.includes('too many requests') ||
+          error.includes('access denied') || error.includes('invalid api key')) {
+        return `API error: ${message ?? error}`;
+      }
+    } catch {
+      // Not JSON — check for HTTP status in raw text (e.g. curl -i output)
+      const httpStatusMatch = rawText.match(/HTTP\/[\d.]+\s+(\d{3})\s+(.+)/);
+      if (httpStatusMatch) {
+        const code = parseInt(httpStatusMatch[1]!, 10);
+        if (code >= 400) {
+          return `HTTP ${code}: ${httpStatusMatch[2]!.trim()}`;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Detect common auth error patterns in API responses.
    */
   private isAuthError(parsed: Record<string, unknown>): boolean {
@@ -520,7 +565,11 @@ export class Executor {
     }
 
     // HTTP status codes
-    if (status === 401 || status === 403) return true;
+    if (status === 401 || status === 403 || status === 429) return true;
+
+    // 429 / rate limit patterns in message
+    if (error.includes('rate limit') || desc.includes('rate limit') ||
+        error.includes('too many requests') || desc.includes('too many requests')) return true;
 
     return false;
   }
