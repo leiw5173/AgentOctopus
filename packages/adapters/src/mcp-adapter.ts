@@ -3,6 +3,20 @@ import type { Adapter, AdapterResult } from './adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import cp from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+/** Read the SKILL.md body (below the frontmatter) without adding a gray-matter dependency. */
+function readSkillBody(dirPath: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(dirPath, 'SKILL.md'), 'utf-8');
+    // Strip YAML frontmatter (--- ... ---)
+    const match = raw.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
+    return (match ? match[1] : raw).trim();
+  } catch {
+    return '';
+  }
+}
 
 const MCP_CONNECT_TIMEOUT_MS = 15_000;
 
@@ -13,12 +27,13 @@ export class McpAdapter implements Adapter {
       // 1. manifest.endpoint (explicit)
       // 2. metadata.mcp_command (e.g. "npx mcp-remote https://mcp.zu.lk/mcp")
       // 3. metadata.mcp_url → "npx mcp-remote <url>"
-      // 4. skill.instructions (fallback, treated as command)
+      // 4. SKILL.md body (fallback, treated as command — lazy loaded)
       const meta = skill.manifest.metadata as Record<string, unknown> | undefined;
+      const skillInstructionsFallback = readSkillBody(skill.dirPath) || undefined;
       const mcpCommand = skill.manifest.endpoint
         || (meta?.mcp_command as string)
         || (meta?.mcp_url ? `npx mcp-remote ${meta.mcp_url}` : undefined)
-        || skill.instructions;
+        || skillInstructionsFallback;
 
       if (!mcpCommand) {
         return { success: false, error: 'No command or endpoint specified for MCP skill' };

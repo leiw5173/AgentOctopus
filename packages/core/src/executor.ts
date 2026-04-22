@@ -78,14 +78,16 @@ export class Executor {
 
     const adapter = this.pickAdapter(skill);
     const startTime = Date.now();
+    // Lazily load SKILL.md body from disk — only for the selected skill, not at startup
+    const instructions = this.registry.readInstructions(skill);
     let adapterResult: AdapterResult;
     try {
       // For subprocess skills, check if we should use LLM-guided execution
       if (skill.manifest.adapter === 'subprocess' && this.chatClient) {
-        adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter);
+        adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter, instructions);
       } else if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && this.chatClient) {
         // HTTP skill with no endpoint — use LLM-guided curl execution
-        adapterResult = await this.executeHttpWithLLM(skill, input);
+        adapterResult = await this.executeHttpWithLLM(skill, input, instructions);
       } else {
         adapterResult = await adapter.invoke(skill, input);
       }
@@ -120,7 +122,7 @@ export class Executor {
     }
 
     // Post-execution: detect auth errors and append setup guidance
-    const authGuidance = await this.diagnoseAuthError(adapterResult, skill);
+    const authGuidance = await this.diagnoseAuthError(adapterResult, skill, instructions);
 
     return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
   }
@@ -135,6 +137,7 @@ export class Executor {
     skill: LoadedSkill,
     input: Record<string, unknown>,
     adapter: { invoke: (skill: LoadedSkill, input: Record<string, unknown>) => Promise<AdapterResult> },
+    instructions: string,
   ): Promise<AdapterResult> {
     // If skill has invoke.js, use standard subprocess execution
     const fs = await import('fs');
@@ -156,7 +159,7 @@ export class Executor {
     // installed elsewhere (e.g. ~/.agentoctopus/skills/<name>/).
     const instrHomeDir = process.env.HOME || process.env.USERPROFILE || '';
     const instrPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
-    const rewrittenInstructions = skill.instructions.replace(instrPathPattern, (match) => {
+    const rewrittenInstructions = instructions.replace(instrPathPattern, (match) => {
       const expanded = match.replace(/^~/, instrHomeDir);
       if (fs.existsSync(expanded)) return match; // path exists, leave it
       return skill.dirPath; // redirect to actual install location
@@ -256,6 +259,7 @@ export class Executor {
   private async executeHttpWithLLM(
     skill: LoadedSkill,
     input: Record<string, unknown>,
+    instructions: string,
   ): Promise<AdapterResult> {
     if (!this.chatClient) {
       return { success: false, error: `Skill "${skill.manifest.name}" has no endpoint and no LLM available for guided execution` };
@@ -267,7 +271,7 @@ export class Executor {
     const fs = await import('fs');
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
     const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
-    const rewrittenInstructions = skill.instructions.replace(openclawPathPattern, (match) => {
+    const rewrittenInstructions = instructions.replace(openclawPathPattern, (match) => {
       const expanded = match.replace(/^~/, homeDir);
       if (fs.existsSync(expanded)) return match;
       return skill.dirPath;
@@ -413,7 +417,7 @@ export class Executor {
    * Detect auth errors in successful responses and provide setup guidance.
    * Uses the LLM to extract setup instructions from SKILL.md when available.
    */
-  private async diagnoseAuthError(result: AdapterResult, skill: LoadedSkill): Promise<string | null> {
+  private async diagnoseAuthError(result: AdapterResult, skill: LoadedSkill, instructions: string): Promise<string | null> {
     // Check results with rawText for auth error patterns.
     // Some skills return HTTP 200 with an error body like {"error": "Missing API key"}
     // so we check both success and failure results.
@@ -462,7 +466,6 @@ export class Executor {
     } else {
       // No declared credentials — scan instructions for likely env var names
       const envVarPattern = /\b([A-Z][A-Z0-9_]{2,}(?:_API_KEY|_KEY|_TOKEN|_SECRET|_APIKEY))\b/g;
-      const instructions = skill.instructions;
       const foundVars = new Set<string>();
       let m: RegExpExecArray | null;
       while ((m = envVarPattern.exec(instructions)) !== null) {
@@ -499,7 +502,7 @@ export class Executor {
       try {
         const llmGuidance = await this.chatClient.chat(
           AUTH_DIAGNOSIS_PROMPT,
-          `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${skill.instructions}\n\nError: ${JSON.stringify(parsed)}\n\nHow should the user set up authentication for this skill?`,
+          `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${instructions}\n\nError: ${JSON.stringify(parsed)}\n\nHow should the user set up authentication for this skill?`,
         );
         if (llmGuidance?.trim()) {
           lines.push('');

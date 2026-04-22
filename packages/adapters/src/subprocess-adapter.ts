@@ -4,6 +4,17 @@ import fs from 'node:fs';
 import type { LoadedSkill } from '@agentoctopus/registry';
 import type { Adapter, AdapterResult } from './adapter.js';
 
+/** Read the SKILL.md body (below the frontmatter) without adding a gray-matter dependency. */
+function readSkillBody(dirPath: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(dirPath, 'SKILL.md'), 'utf-8');
+    const match = raw.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
+    return (match ? match[1] : raw).trim();
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Find the entry script and runtime for a skill.
  *
@@ -27,7 +38,7 @@ function findEntryScript(skill: LoadedSkill): { scriptPath: string; runtime: str
   if (fs.existsSync(invokePy)) return { scriptPath: invokePy, runtime: 'python3' };
 
   // 3. Parse SKILL.md instructions for script references
-  const instructions = skill.instructions;
+  const instructions = readSkillBody(skill.dirPath);
   const scriptRef = parseScriptReference(instructions, scriptsDir);
   if (scriptRef) return scriptRef;
 

@@ -122,7 +122,5 @@ export function skillToText(skill: LoadedSkill): string {
   if (envVars.length > 0) {
     parts.push(`Credentials: ${envVars.map(e => e.label || e.key).join(', ')}`);
   }
-  // Include instructions (truncated) — this has the "when to use" and API details
-  parts.push(`Instructions: ${skill.instructions.slice(0, 500)}`);
   return parts.join('\n');
 }
