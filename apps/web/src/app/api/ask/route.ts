@@ -4,7 +4,7 @@ import { SkillRegistry } from '@agentoctopus/registry';
 import path from 'path';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as any).type === 'credential_missing';
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
 }
 
 // Singleton initialization for production (can be expanded for persistence)
