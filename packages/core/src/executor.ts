@@ -6,6 +6,21 @@ import type { ChatClient } from './llm-client.js';
 import fs from 'fs';
 import path from 'path';
 
+const SKILL_EXEC_TIMEOUT_MS = parseInt(process.env.SKILL_EXEC_TIMEOUT_MS ?? '30000', 10);
+
+const SANDBOX_PASSTHROUGH_VARS = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM'];
+
+function buildSandboxedEnv(skill: LoadedSkill): NodeJS.ProcessEnv {
+  const safe: NodeJS.ProcessEnv = {};
+  for (const key of SANDBOX_PASSTHROUGH_VARS) {
+    if (process.env[key] !== undefined) safe[key] = process.env[key];
+  }
+  for (const v of getRequiredEnvVars(skill.manifest)) {
+    if (process.env[v.key] !== undefined) safe[v.key] = process.env[v.key];
+  }
+  return safe;
+}
+
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
 
 Rules:
@@ -223,11 +238,18 @@ export class Executor {
     // Execute the LLM-determined command from the skill's directory
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
+      const sandboxEnv = buildSandboxedEnv(skill);
+      sandboxEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
       const child = cp.spawn('bash', ['-c', trimmedCommand], {
         cwd: skill.dirPath,
-        env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
+        env: sandboxEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+
+      const killTimer = setTimeout(() => {
+        child.kill('SIGTERM');
+        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms: ${trimmedCommand}` });
+      }, SKILL_EXEC_TIMEOUT_MS);
 
       let stdout = '';
       let stderr = '';
@@ -236,6 +258,7 @@ export class Executor {
       child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
       child.on('close', (code: number) => {
+        clearTimeout(killTimer);
         if (code !== 0) {
           resolve({ success: false, error: stderr || `Command exited with code ${code}: ${trimmedCommand}` });
         } else {
@@ -244,6 +267,7 @@ export class Executor {
       });
 
       child.on('error', (err: Error) => {
+        clearTimeout(killTimer);
         resolve({ success: false, error: err.message });
       });
 
@@ -324,10 +348,17 @@ export class Executor {
     // Execute the LLM-determined curl command
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
+      const sandboxEnv = buildSandboxedEnv(skill);
+      sandboxEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
       const child = cp.spawn('bash', ['-c', trimmedCommand], {
-        env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
+        env: sandboxEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+
+      const killTimer = setTimeout(() => {
+        child.kill('SIGTERM');
+        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms: ${trimmedCommand}` });
+      }, SKILL_EXEC_TIMEOUT_MS);
 
       let stdout = '';
       let stderr = '';
@@ -336,6 +367,7 @@ export class Executor {
       child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
       child.on('close', (code: number) => {
+        clearTimeout(killTimer);
         if (code !== 0) {
           resolve({ success: false, error: stderr || `Command exited with code ${code}: ${trimmedCommand}` });
         } else {
@@ -344,6 +376,7 @@ export class Executor {
       });
 
       child.on('error', (err: Error) => {
+        clearTimeout(killTimer);
         resolve({ success: false, error: err.message });
       });
 
