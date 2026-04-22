@@ -68,6 +68,26 @@ export interface RequiredEnvVar {
 }
 
 /**
+ * Extract required binary names from a skill manifest.
+ * Checks both metadata.openclaw.requires.bins and metadata.clawdbot.requires.bins.
+ */
+export function getRequiredBins(manifest: SkillManifest): string[] {
+  const bins = new Set<string>();
+
+  const openclawBins = (manifest.metadata as any)?.openclaw?.requires?.bins;
+  if (Array.isArray(openclawBins)) {
+    openclawBins.filter((b): b is string => typeof b === 'string').forEach(b => bins.add(b));
+  }
+
+  const clawdbotBins = (manifest.metadata as any)?.clawdbot?.requires?.bins;
+  if (Array.isArray(clawdbotBins)) {
+    clawdbotBins.filter((b): b is string => typeof b === 'string').forEach(b => bins.add(b));
+  }
+
+  return [...bins];
+}
+
+/**
  * Extract required env vars from a skill manifest.
  * Checks both `credentials` (our format) and `metadata.openclaw.env` (community format).
  */

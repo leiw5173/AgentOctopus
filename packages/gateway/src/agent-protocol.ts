@@ -5,10 +5,14 @@ import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, 
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
 import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
-import { type CredentialMissingResult } from '@agentoctopus/core';
+import { type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as any).type === 'credential_missing';
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
+}
+
+function isBinaryMissing(result: unknown): result is BinaryMissingResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
 }
 
 /**
@@ -196,6 +200,21 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
           skillName: result.skillName,
           missing: result.missing,
           response: `I matched a skill that could answer this, but it needs an API key that isn't configured:\n${lines}${setupCmd}`,
+          skill: routing.skill.manifest.name,
+          sessionId: session.id,
+          confidence: routing.score,
+        });
+        return;
+      }
+
+      if (isBinaryMissing(result)) {
+        const tools = result.missing.map(b => `  - ${b}`).join('\n');
+        res.json({
+          success: false,
+          type: 'binary_missing',
+          skillName: result.skillName,
+          missing: result.missing,
+          response: `I matched a skill but it requires tools that aren't installed:\n${tools}\n\nInstall the tool(s) above, then retry.`,
           skill: routing.skill.manifest.name,
           sessionId: session.id,
           confidence: routing.score,

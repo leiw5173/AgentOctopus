@@ -1,6 +1,7 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
-import { getRequiredEnvVars } from '@agentoctopus/registry';
+import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
+import { isBinAvailable } from './utils.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -366,7 +367,7 @@ export class Router {
 
     if (candidates.length === 0) return [];
 
-    candidates = this.penalizeMissingCredentials(candidates);
+    candidates = this.penalizeUnconfiguredSkills(candidates);
 
     // LLM rerank
     const candidateList = candidates
@@ -421,13 +422,15 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
     }));
   }
 
-  private penalizeMissingCredentials(
+  private penalizeUnconfiguredSkills(
     candidates: Array<{ skill: LoadedSkill; score: number }>,
   ): Array<{ skill: LoadedSkill; score: number }> {
     return candidates.map(entry => {
-      const missing = getRequiredEnvVars(entry.skill.manifest).filter(v => !process.env[v.key]);
-      if (missing.length === 0) return entry;
-      return { ...entry, score: Math.max(0, entry.score - 0.25) };
+      const missingCreds = getRequiredEnvVars(entry.skill.manifest).filter(v => !process.env[v.key]);
+      const missingBins = getRequiredBins(entry.skill.manifest).filter(b => !isBinAvailable(b));
+      const penalty = (missingCreds.length > 0 ? 0.25 : 0) + (missingBins.length > 0 ? 0.25 : 0);
+      if (penalty === 0) return entry;
+      return { ...entry, score: Math.max(0, entry.score - penalty) };
     });
   }
 

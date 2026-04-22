@@ -19,6 +19,7 @@ describe('Executor', () => {
     mockRegistry = {
       recordInvocation: vi.fn(),
       recordInvocationMetrics: vi.fn(),
+      readInstructions: vi.fn().mockReturnValue(''),
     } as any;
     
     // Setup instances returned by constructor mocks
@@ -207,11 +208,10 @@ describe('execute() with missing credentials', () => {
         credentials: [{ key: 'MISSING_TEST_KEY_XYZ', label: 'Get at https://example.com', required: true }],
         metadata: {},
       },
-      instructions: '',
       dirPath: '/tmp',
     } as any;
 
-    const registry = { recordInvocationMetrics: vi.fn(), recordFeedback: vi.fn() } as any;
+    const registry = { recordInvocationMetrics: vi.fn(), recordFeedback: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
     const executor = new Executor(registry);
 
     const result = await executor.execute(skill, { query: 'test' });

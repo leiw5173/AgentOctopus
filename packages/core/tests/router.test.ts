@@ -178,7 +178,7 @@ describe('Router — LLM-only mode (no embedConfig)', () => {
   });
 });
 
-describe('penalizeMissingCredentials', () => {
+describe('penalizeUnconfiguredSkills', () => {
   it('reduces score by 0.25 for a skill with a missing required env var', () => {
     delete process.env.PAID_TEST_KEY_XYZ_UNIQUE;
 
@@ -191,7 +191,6 @@ describe('penalizeMissingCredentials', () => {
         credentials: [{ key: 'PAID_TEST_KEY_XYZ_UNIQUE', label: 'Get at https://paid.example.com', required: true }],
         metadata: {},
       },
-      instructions: '',
       dirPath: '/tmp/paid',
     };
 
@@ -204,13 +203,12 @@ describe('penalizeMissingCredentials', () => {
         credentials: [],
         metadata: {},
       },
-      instructions: '',
       dirPath: '/tmp/free',
     };
 
     // Access private method via type cast
     const router = new Router({ provider: 'openai', model: 'gpt-4o', apiKey: 'test' });
-    const penalized = (router as any).penalizeMissingCredentials([
+    const penalized = (router as any).penalizeUnconfiguredSkills([
       { skill: freeSkill, score: 0.8 },
       { skill: paidSkill, score: 0.8 },
     ]);
@@ -234,12 +232,11 @@ describe('penalizeMissingCredentials', () => {
           credentials: [{ key: 'SET_TEST_KEY_XYZ_UNIQUE', required: true }],
           metadata: {},
         },
-        instructions: '',
         dirPath: '/tmp',
       };
 
       const router = new Router({ provider: 'openai', model: 'gpt-4o', apiKey: 'test' });
-      const penalized = (router as any).penalizeMissingCredentials([
+      const penalized = (router as any).penalizeUnconfiguredSkills([
         { skill: configuredSkill, score: 0.9 },
       ]);
 

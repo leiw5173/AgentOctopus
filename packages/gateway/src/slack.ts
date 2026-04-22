@@ -3,10 +3,14 @@ const { App } = boltPkg;
 type AppOptions = ConstructorParameters<typeof App>[0];
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
-import { type CredentialMissingResult } from '@agentoctopus/core';
+import { type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as any).type === 'credential_missing';
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
+}
+
+function isBinaryMissing(result: unknown): result is BinaryMissingResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
 }
 
 export interface SlackGatewayOptions {
@@ -64,6 +68,12 @@ export async function startSlackGateway(options: SlackGatewayOptions): Promise<v
           ? `\nRun: octopus config set ${result.missing[0].key} <your-key>`
           : '';
         await say({ text: `I matched a skill but it needs an unconfigured API key:\n${lines}${setupCmd}`, thread_ts: threadTs });
+        return;
+      }
+
+      if (isBinaryMissing(result)) {
+        const tools = result.missing.map(b => `  - ${b}`).join('\n');
+        await say({ text: `I matched a skill but it requires tools that aren't installed:\n${tools}\n\nInstall the tool(s) above, then retry.`, thread_ts: threadTs });
         return;
       }
 

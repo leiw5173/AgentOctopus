@@ -1,10 +1,14 @@
 import { NextResponse } from 'next/server';
-import { Router, Executor, createChatClient, type CredentialMissingResult } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
 import { SkillRegistry } from '@agentoctopus/registry';
 import path from 'path';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
+}
+
+function isBinaryMissing(result: unknown): result is BinaryMissingResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
 }
 
 // Singleton initialization for production (can be expanded for persistence)
@@ -92,6 +96,16 @@ export async function POST(req: Request) {
             skillName: result.skillName,
             missing: result.missing,
             response: `This skill needs an unconfigured API key. Run: octopus config set ${result.missing[0]?.key ?? 'KEY'} <your-key>`,
+          });
+        }
+
+        if (isBinaryMissing(result)) {
+          return NextResponse.json({
+            success: false,
+            type: 'binary_missing',
+            skillName: result.skillName,
+            missing: result.missing,
+            response: `This skill requires tools that aren't installed: ${result.missing.join(', ')}. Install them, then retry.`,
           });
         }
 

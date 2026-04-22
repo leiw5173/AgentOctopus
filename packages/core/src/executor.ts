@@ -1,8 +1,9 @@
 import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/registry';
-import { getRequiredEnvVars } from '@agentoctopus/registry';
+import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 import type { ChatClient } from './llm-client.js';
+import { isBinAvailable } from './utils.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -71,6 +72,12 @@ export interface CredentialMissingResult {
   missing: RequiredEnvVar[];
 }
 
+export interface BinaryMissingResult {
+  type: 'binary_missing';
+  skillName: string;
+  missing: string[];
+}
+
 export class Executor {
   private http = new HttpAdapter();
   private mcp = new McpAdapter();
@@ -78,7 +85,7 @@ export class Executor {
 
   constructor(private registry: SkillRegistry, private chatClient?: ChatClient) {}
 
-  async execute(skill: LoadedSkill, input: Record<string, unknown>): Promise<ExecutionResult | CredentialMissingResult> {
+  async execute(skill: LoadedSkill, input: Record<string, unknown>): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
     // Check required credentials before invoking
     const required = getRequiredEnvVars(skill.manifest);
     const missing = required.filter(v => !process.env[v.key]);
@@ -89,6 +96,13 @@ export class Executor {
         skillName: skill.manifest.name,
         missing,
       } satisfies CredentialMissingResult;
+    }
+
+    // Check required binaries before invoking
+    const requiredBins = getRequiredBins(skill.manifest);
+    const missingBins = requiredBins.filter(bin => !isBinAvailable(bin));
+    if (missingBins.length > 0) {
+      return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
     }
 
     const adapter = this.pickAdapter(skill);

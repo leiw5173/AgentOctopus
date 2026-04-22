@@ -306,6 +306,17 @@ program
           continue;
         }
 
+        if ('type' in result && result.type === 'binary_missing') {
+          const tools = (result.missing as string[]).map(b => `  • ${b}`).join('\n');
+          spinner.fail(`${result.skillName} requires missing tools`);
+          console.error(chalk.red(`\nMissing binaries:\n${tools}\n`));
+          console.error(chalk.yellow(`  Install the tool(s) above, then retry.`));
+          if (i < candidates.length - 1) {
+            console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+          }
+          continue;
+        }
+
         const execResult = result as import('@agentoctopus/core').ExecutionResult;
 
         if (execResult.adapterResult.success) {
