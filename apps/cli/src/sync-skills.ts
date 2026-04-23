@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { dbg } from '@agentoctopus/core';
 import ora from 'ora';
 import fs from 'fs';
 import path from 'path';
@@ -32,6 +33,7 @@ export interface SyncSkillsOptions {
   force?: boolean;
   dryRun?: boolean;
   registryUrl?: string;
+  debug?: boolean;
 }
 
 export interface SyncSkillsResult {
@@ -53,15 +55,19 @@ export interface SyncSkillsResult {
  */
 export async function checkSkillUpdates(
   skillsDir: string,
+  debug = false,
 ): Promise<SkillUpdate[]> {
   const updates: SkillUpdate[] = [];
 
   // Download the full skills index for version comparison
   let indexEntries: SkillIndexEntry[];
   try {
+    dbg(debug, 'Fetching skills index from ClaWHub...');
+    const t0 = Date.now();
     indexEntries = await downloadSkillsIndex();
+    dbg(debug, `Skills index: ${indexEntries.length} entries received (${Date.now() - t0}ms)`);
   } catch {
-    // Index unavailable — cannot check versions
+    dbg(debug, 'Skills index fetch failed — cannot check versions');
     return updates;
   }
 
@@ -78,11 +84,12 @@ export async function checkSkillUpdates(
     (name) => fs.existsSync(path.join(skillsDir, name, 'SKILL.md')),
   );
 
+  const comparisonRows: Array<{ slug: string; installed: string; available: string; action: string }> = [];
+
   for (const slug of installedSlugs) {
     const skillMdPath = path.join(skillsDir, slug, 'SKILL.md');
     try {
       const content = fs.readFileSync(skillMdPath, 'utf8');
-      // Parse frontmatter to get version
       const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
       if (!frontmatterMatch) continue;
 
@@ -92,18 +99,28 @@ export async function checkSkillUpdates(
 
       const currentVersion = versionMatch[1]!.trim();
       const indexEntry = indexMap.get(slug);
-      if (!indexEntry) continue;
 
-      // Compare versions (simple string compare — semver would be better but YAGNI)
+      if (!indexEntry) {
+        comparisonRows.push({ slug, installed: currentVersion, available: '(not found)', action: 'SKIP (not in registry)' });
+        continue;
+      }
+
       if (indexEntry.version !== currentVersion && indexEntry.version > currentVersion) {
-        updates.push({
-          slug,
-          currentVersion,
-          latestVersion: indexEntry.version,
-        });
+        comparisonRows.push({ slug, installed: currentVersion, available: indexEntry.version, action: 'UPDATE' });
+        updates.push({ slug, currentVersion, latestVersion: indexEntry.version });
+      } else {
+        comparisonRows.push({ slug, installed: currentVersion, available: indexEntry.version, action: 'SKIP (up to date)' });
       }
     } catch {
       // Skip skills with unreadable manifests
+    }
+  }
+
+  if (debug && comparisonRows.length > 0) {
+    dbg(debug, 'Version comparison:');
+    dbg(debug, `  ${'skill'.padEnd(22)}${'installed'.padEnd(12)}${'available'.padEnd(14)}action`);
+    for (const row of comparisonRows) {
+      dbg(debug, `  ${row.slug.padEnd(22)}${row.installed.padEnd(12)}${row.available.padEnd(14)}${row.action}`);
     }
   }
 
@@ -298,7 +315,7 @@ export async function runSync(options: SyncSkillsOptions): Promise<SyncSkillsRes
   // Phase 1: Marketplace version check
   const spinner1 = ora('Checking for skill updates...').start();
   try {
-    result.updatesAvailable = await checkSkillUpdates(options.skillsDir);
+    result.updatesAvailable = await checkSkillUpdates(options.skillsDir, options.debug);
     spinner1.succeed(
       result.updatesAvailable.length > 0
         ? `Found ${result.updatesAvailable.length} skill(s) with updates`
