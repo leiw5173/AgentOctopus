@@ -548,6 +548,7 @@ program
   .option('--pull', 'Pull ratings from cloud to local')
   .option('--push', 'Push local ratings to cloud')
   .option('--no-feedback-sharing', 'Don\'t share feedback comments in sync')
+  .option('--debug', 'Show HTTP traces and version comparison details')
   .action(async (options: {
     cloudUrl?: string;
     category?: string;
@@ -561,6 +562,7 @@ program
     pull?: boolean;
     push?: boolean;
     noFeedbackSharing?: boolean;
+    debug?: boolean;
   }) => {
     // If --ratings or --setup-gist explicitly passed, run rating sync directly
     if (options.ratings || options.setupGist) {
@@ -600,6 +602,7 @@ program
         force: options.force,
         dryRun: options.dryRun,
         registryUrl: options.registry,
+        debug: options.debug,
       });
       return;
     }
@@ -620,6 +623,7 @@ program
         skillsDir,
         force: options.force,
         dryRun: options.dryRun,
+        debug: options.debug,
       });
     }
 

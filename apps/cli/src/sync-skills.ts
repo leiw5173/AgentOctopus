@@ -177,8 +177,10 @@ export async function installAwesomeSkills(
     force?: boolean;
     dryRun?: boolean;
     registryUrl?: string;
+    debug?: boolean;
   },
 ): Promise<AwesomeInstallResult> {
+  const debug = options.debug ?? false;
   const result: AwesomeInstallResult = { installed: 0, skipped: 0, failed: 0, failedSlugs: [] };
 
   // Step 1: resolve slug filter for --category
@@ -191,9 +193,12 @@ export async function installAwesomeSkills(
   // Step 2: try index-first path
   let indexEntries: SkillIndexEntry[] | null = null;
   try {
+    dbg(debug, 'Fetching skills index from ClaWHub (index path)...');
+    const t0 = Date.now();
     indexEntries = await downloadSkillsIndex();
+    dbg(debug, `Skills index: ${indexEntries.length} entries received (${Date.now() - t0}ms)`);
   } catch {
-    // Index unavailable — fall back to per-skill fetch
+    dbg(debug, 'Skills index fetch failed — falling back to per-skill fetch');
   }
 
   if (indexEntries !== null) {
@@ -260,10 +265,13 @@ export async function installAwesomeSkills(
     const slug = slugs[i]!;
     const prefix = chalk.gray(`[${i + 1}/${slugs.length}]`);
     try {
+      dbg(debug, `Installing ${slug} from ClaWHub...`);
+      const t0 = Date.now();
       await installSkill(slug, options.skillsDir, {
         registryUrl: options.registryUrl,
         force: options.force,
       });
+      dbg(debug, `${slug} installed (${Date.now() - t0}ms)`);
       console.log(`${prefix} ${chalk.green('✔')} ${chalk.cyan(slug)}`);
       result.installed++;
     } catch (err) {
@@ -363,6 +371,7 @@ export async function runSync(options: SyncSkillsOptions): Promise<SyncSkillsRes
       force: options.force,
       dryRun: options.dryRun,
       registryUrl: options.registryUrl,
+      debug: options.debug,
     });
     result.awesomeInstalled = awesomeResult.installed;
     result.awesomeSkipped = awesomeResult.skipped;
