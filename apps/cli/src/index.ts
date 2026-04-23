@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, type LLMConfig, type CredentialMissingResult } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
@@ -238,7 +238,8 @@ program
   .command('ask <query>')
   .description('Ask AgentOctopus to route your request to the best skill')
   .option('--no-prompt', 'Skip the interactive feedback prompt (for programmatic use)')
-  .action(async (query: string, options: { prompt: boolean }) => {
+  .option('--debug', 'Show routing and execution internals')
+  .action(async (query: string, options: { prompt: boolean; debug?: boolean }) => {
     // Auto-trigger onboarding if .env is missing
     const onboarded = await ensureOnboarded();
     if (!onboarded) return;
@@ -250,7 +251,7 @@ program
     let engine;
     try {
       engine = await bootstrap();
-      await engine.router.buildIndex(engine.registry.getAll());
+      await engine.router.buildIndex(engine.registry.getAll(), { debug: !!options.debug });
     } catch (err) {
       spinner.fail(`Initialization failed: ${err}`);
       return;
@@ -258,7 +259,7 @@ program
     const t1 = Date.now();
 
     spinner.text = 'Finding the best skill...';
-    const routes = await engine.router.route(query);
+    const routes = await engine.router.route(query, 20, { debug: !!options.debug });
     const t2 = Date.now();
 
     if (routes.length === 0) {
@@ -286,10 +287,12 @@ program
 
       spinner.start(`Executing ${skill.manifest.name}...`);
       try {
-        const result = await engine.executor.execute(skill, input);
+        const result = await engine.executor.execute(skill, input, { debug: !!options.debug });
         const t3 = Date.now();
 
-        if (process.env.OCTOPUS_TIMING) {
+        if (options.debug) {
+          dbg(true, `Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`);
+        } else if (process.env.OCTOPUS_TIMING) {
           console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`));
         }
 
