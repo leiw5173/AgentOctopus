@@ -280,20 +280,46 @@ export class Router {
     const { debug = false } = opts;
     if (this.index.length === 0) return [];
 
-    // Translate non-English queries to English
+    // For non-Latin queries: merge translation + intent extraction into a single LLM call.
+    // For Latin queries: only extract intent (translation not needed).
     let routingQuery = query;
-    if (hasNonLatinChars(query)) {
+    let embedQuery = query;
+    const isNonLatin = hasNonLatinChars(query);
+
+    if (isNonLatin) {
+      // Combined prompt: translate AND extract intent in one round-trip
       try {
-        const translated = await this.chatClient.chat(
-          'Translate the following to English. Output ONLY the translation, nothing else. Preserve any URLs or technical terms as-is.',
+        const combined = await this.chatClient.chat(
+          'Given this user request, output JSON with exactly two fields:\n' +
+          '  "translation": English translation of the request (preserve URLs and technical terms as-is)\n' +
+          '  "intent": a short English phrase describing what the user wants to do (e.g. "get AI news", "shorten a URL")\n' +
+          'Output ONLY the JSON object, no other text.',
           query,
         );
-        const trimmed = translated.trim();
-        if (trimmed) {
-          routingQuery = `${query} ${trimmed}`;
+        try {
+          const parsed = JSON.parse(combined.trim()) as { translation?: string; intent?: string };
+          if (parsed.translation) routingQuery = `${query} ${parsed.translation}`;
+          if (parsed.intent && parsed.intent.length < routingQuery.length) embedQuery = parsed.intent;
+          else embedQuery = routingQuery;
+        } catch {
+          // JSON parse failed — fall back to full query
+          embedQuery = routingQuery;
         }
       } catch {
-        // Translation failed — proceed with original query
+        // LLM call failed — proceed with original query
+        embedQuery = routingQuery;
+      }
+    } else {
+      // Latin query: extract intent only (no translation needed)
+      try {
+        const intent = await this.chatClient.chat(
+          'Extract the user\'s core intent from this request. Output ONLY a short phrase describing what they want to do (e.g. "shorten a URL", "get weather forecast", "translate text to French"). Remove URLs, code snippets, and domain names. Do not explain, just output the intent.',
+          query,
+        );
+        const trimmed = intent.trim();
+        if (trimmed && trimmed.length < query.length) embedQuery = trimmed;
+      } catch {
+        // Intent extraction failed — use full query for embedding
       }
     }
 
@@ -304,24 +330,6 @@ export class Router {
       if (pass) eligible.push(entry);
     }
     if (eligible.length === 0) return [];
-
-    // Extract the user's intent for embedding matching.
-    // This distills noisy queries (URLs, code, domain names) into a clean
-    // intent phrase, so embeddings match the *purpose* not the noise.
-    // e.g. "make this link as short link: https://clawhub.ai/..." → "shorten a URL"
-    let embedQuery = routingQuery;
-    try {
-      const intent = await this.chatClient.chat(
-        'Extract the user\'s core intent from this request. Output ONLY a short phrase describing what they want to do (e.g. "shorten a URL", "get weather forecast", "translate text to French"). Remove URLs, code snippets, and domain names. Do not explain, just output the intent.',
-        routingQuery,
-      );
-      const trimmed = intent.trim();
-      if (trimmed && trimmed.length < routingQuery.length) {
-        embedQuery = trimmed;
-      }
-    } catch {
-      // Intent extraction failed — use full query for embedding
-    }
 
     let candidates: RoutingResultCandidate[];
     const hasEmbeddings = eligible.some(e => e.embedding.length > 0);

@@ -290,6 +290,24 @@ export async function installSkill(
 }
 
 /**
+ * Ensure all executable script files in a skill's scripts/ directory
+ * have the execute bit set. Downloads from zip/index arrive as 644.
+ */
+function makeScriptsExecutable(skillDir: string): void {
+  const scriptsDir = path.join(skillDir, 'scripts');
+  if (!fs.existsSync(scriptsDir)) return;
+  for (const file of fs.readdirSync(scriptsDir)) {
+    if (/\.(py|sh|js|ts)$/i.test(file)) {
+      try {
+        fs.chmodSync(path.join(scriptsDir, file), 0o755);
+      } catch {
+        // chmod failure is non-fatal (e.g. read-only filesystem)
+      }
+    }
+  }
+}
+
+/**
  * Minimal ZIP extractor using Node built-ins.
  */
 function extractZip(zipBuffer: Buffer, targetDir: string): void {
@@ -309,6 +327,9 @@ function extractZip(zipBuffer: Buffer, targetDir: string): void {
       fs.writeFileSync(fullPath, entry.data);
     }
   }
+
+  // Fix execute permissions on all scripts after extraction
+  makeScriptsExecutable(targetDir);
 }
 
 interface ZipEntry {
@@ -478,7 +499,9 @@ export function installFromIndex(
   // Resolve scripts map: prefer new `scripts` field, fall back to legacy `invokeScript`
   const scriptsMap: Record<string, string> = {};
   if (entry.scripts) {
-    Object.assign(scriptsMap, entry.scripts);
+    for (const [k, v] of Object.entries(entry.scripts)) {
+      if (typeof v === 'string') scriptsMap[k] = v;
+    }
   } else if (entry.invokeScript !== null) {
     scriptsMap['invoke.js'] = entry.invokeScript;
   }
@@ -500,10 +523,13 @@ export function installFromIndex(
         wroteAny = true;
       }
     }
+    // Fix permissions on any newly-written scripts
+    if (wroteAny) makeScriptsExecutable(skillDir);
 
     // Write missing extra files (reference docs, data, configs)
     if (entry.files) {
       for (const [relPath, content] of Object.entries(entry.files)) {
+        if (typeof content !== 'string') continue;
         const filePath = path.join(skillDir, relPath);
         if (!fs.existsSync(filePath)) {
           fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -535,17 +561,19 @@ export function installFromIndex(
   fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
   fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson ?? '', 'utf8');
 
-  // Write all scripts
+  // Write all scripts and make them executable
   if (Object.keys(scriptsMap).length > 0) {
     fs.mkdirSync(scriptsDir, { recursive: true });
     for (const [filename, content] of Object.entries(scriptsMap)) {
       fs.writeFileSync(path.join(scriptsDir, filename), content, 'utf8');
     }
+    makeScriptsExecutable(skillDir);
   }
 
   // Write all extra files (reference docs, data, configs)
   if (entry.files) {
     for (const [relPath, content] of Object.entries(entry.files)) {
+      if (typeof content !== 'string') continue;
       const filePath = path.join(skillDir, relPath);
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, content, 'utf8');

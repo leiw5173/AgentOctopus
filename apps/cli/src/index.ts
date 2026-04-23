@@ -263,11 +263,24 @@ program
     const t2 = Date.now();
 
     if (routes.length === 0) {
-      spinner.fail('No matching skill found for your request.');
+      spinner.stop();
       if (options.debug) {
         dbg(true, `Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`);
       } else if (process.env.OCTOPUS_TIMING) {
         console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`));
+      }
+      // No skill matched — fall back to a direct LLM answer
+      const fallbackSpinner = ora('Answering directly...').start();
+      try {
+        const answer = await (engine.executor as any).chatClient?.chat(
+          'You are a helpful assistant. Answer the user\'s question concisely and accurately.',
+          query,
+        );
+        const tFb = Date.now();
+        fallbackSpinner.succeed(`Answer (${((tFb - t0) / 1000).toFixed(1)}s):\n`);
+        console.log(chalk.white(answer ?? '(no response)') + '\n');
+      } catch {
+        fallbackSpinner.fail('No matching skill found and could not generate a direct answer.');
       }
       return;
     }
@@ -284,8 +297,15 @@ program
       const { skill, score, reason } = candidates[i]!;
       const attemptLabel = candidates.length > 1 ? ` (attempt ${i + 1}/${candidates.length})` : '';
       spinner.succeed(`Selected skill: ${chalk.cyan.bold(skill.manifest.name)}${attemptLabel}`);
-      console.log(chalk.gray(`  Reason: ${reason}`));
-      console.log(chalk.gray(`  Match Score: ${score.toFixed(3)}\n`));
+      // Show skill description snippet instead of generic routing reason
+      const descSnippet = skill.manifest.description.length > 90
+        ? skill.manifest.description.slice(0, 90) + '…'
+        : skill.manifest.description;
+      console.log(chalk.gray(`  ${descSnippet}`));
+      if (options.debug) {
+        dbg(true, `Score: ${score.toFixed(3)}  Reason: ${reason}`);
+      }
+      console.log();
 
       spinner.start(`Executing ${skill.manifest.name}...`);
       try {
@@ -326,7 +346,8 @@ program
 
         if (execResult.adapterResult.success) {
           succeeded = true;
-          spinner.succeed('Execution successful\n');
+          const totalSec = ((t3 - t0) / 1000).toFixed(1);
+          spinner.succeed(`Execution successful (${totalSec}s)\n`);
           console.log(chalk.green('Result:'));
           console.log(execResult.formattedOutput + '\n');
 
@@ -351,9 +372,23 @@ program
           break;
         }
 
-        // Execution failed
+        // Execution failed — show friendly, actionable error messages
+        const errMsg = execResult.adapterResult.error ?? 'Unknown error';
         spinner.fail(`${skill.manifest.name} execution failed\n`);
-        console.error(chalk.red('Error:'), execResult.adapterResult.error);
+        if (/Permission denied/i.test(errMsg) && /scripts\//.test(errMsg)) {
+          // Script file missing execute bit
+          console.error(chalk.red('  Script is not executable.') + chalk.gray(' Fix with:'));
+          console.error(chalk.cyan(`  chmod +x ~/.agentoctopus/skills/${skill.manifest.name}/scripts/*`));
+        } else if (/uses local scripts/i.test(errMsg)) {
+          // http-adapter skill whose SKILL.md only describes local scripts
+          console.error(chalk.red('  Skill requires local scripts not installed on this machine.'));
+          console.error(chalk.yellow(`  To install: octopus add ${skill.manifest.name} --force`));
+        } else {
+          console.error(chalk.red('  Error:'), errMsg.split('\n')[0]);
+          if (options.debug && errMsg.includes('\n')) {
+            console.error(chalk.gray(errMsg.split('\n').slice(1).join('\n')));
+          }
+        }
         failedResults.push({ authGuidance: execResult.authGuidance });
         if (i < candidates.length - 1) {
           console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
@@ -369,10 +404,23 @@ program
     }
 
     if (!succeeded && candidates.length > 0) {
-      console.log(chalk.yellow(`\nAll ${candidates.length} skill(s) failed for this request.`));
       const authGuidance = failedResults.find(r => r.authGuidance)?.authGuidance;
       if (authGuidance) {
         console.log('\n' + authGuidance);
+      }
+      // All skill retries failed — fall back to a direct LLM answer
+      console.log(chalk.yellow(`\nAll ${candidates.length} skill(s) failed. Answering directly...\n`));
+      const fallbackSpinner = ora('Thinking...').start();
+      try {
+        const answer = await (engine.executor as any).chatClient?.chat(
+          'You are a helpful assistant. Answer the user\'s question concisely and accurately.',
+          query,
+        );
+        const tFb = Date.now();
+        fallbackSpinner.succeed(`Answer (${((tFb - t0) / 1000).toFixed(1)}s):\n`);
+        console.log(chalk.white(answer ?? '(no response)') + '\n');
+      } catch {
+        fallbackSpinner.fail('Could not generate a fallback answer.');
       }
     }
   });

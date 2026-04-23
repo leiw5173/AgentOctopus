@@ -315,6 +315,18 @@ export class Executor {
       return { success: false, error: `Skill "${skill.manifest.name}" has no endpoint and no LLM available for guided execution` };
     }
 
+    // Pre-flight: if the SKILL.md describes only local scripts (no https:// URLs),
+    // the LLM-guided curl path will always fail. Return immediately with a helpful error.
+    const hasHttpUrl = /https?:\/\//.test(instructions);
+    const hasLocalScripts = /scripts\/[\w.-]+\.(?:py|js|sh|ts)/.test(instructions);
+    if (hasLocalScripts && !hasHttpUrl) {
+      const skillName = skill.manifest.name;
+      return {
+        success: false,
+        error: `Skill "${skillName}" uses local scripts that aren\'t installed on this machine. Install it with:\n  octopus add ${skillName} --force`,
+      };
+    }
+
     const query = (input.query ?? input.text ?? '') as string;
 
     // Rewrite OpenClaw workspace paths in instructions (same as subprocess path)

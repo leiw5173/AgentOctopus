@@ -84,8 +84,12 @@ export async function POST(req: Request) {
     // Try up to 3 candidates on execution failure
     const maxRetries = 3;
     const candidates = routes.slice(0, maxRetries);
+    const skillsAttempted: string[] = [];
+    const executionErrors: string[] = [];
+
     for (let i = 0; i < candidates.length; i++) {
       const route = candidates[i]!;
+      skillsAttempted.push(route.skill.manifest.name);
       try {
         const result = await executor.execute(route.skill, { query });
 
@@ -95,6 +99,7 @@ export async function POST(req: Request) {
             type: 'credential_missing',
             skillName: result.skillName,
             missing: result.missing,
+            skillsAttempted,
             response: `This skill needs an unconfigured API key. Run: octopus config set ${result.missing[0]?.key ?? 'KEY'} <your-key>`,
           });
         }
@@ -105,6 +110,7 @@ export async function POST(req: Request) {
             type: 'binary_missing',
             skillName: result.skillName,
             missing: result.missing,
+            skillsAttempted,
             response: `This skill requires tools that aren't installed: ${result.missing.join(', ')}. Install them, then retry.`,
           });
         }
@@ -117,12 +123,14 @@ export async function POST(req: Request) {
             rating: skill.rating,
             confidence: route.score,
             adapterOutput: adapterResult,
+            skillsAttempted,
             response: formattedOutput,
           });
         }
-        // Failed — try next candidate
-      } catch {
-        // Threw — try next candidate
+        // Failed — record error and try next candidate
+        executionErrors.push(adapterResult.error ?? 'unknown error');
+      } catch (err) {
+        executionErrors.push(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -136,6 +144,9 @@ export async function POST(req: Request) {
       skill: null,
       confidence: null,
       rating: null,
+      skillsAttempted,
+      fallbackReason: `All ${skillsAttempted.length} skill(s) failed`,
+      ...(process.env.NODE_ENV !== 'production' ? { executionErrors } : {}),
       response: answer,
     });
   } catch (error: unknown) {
