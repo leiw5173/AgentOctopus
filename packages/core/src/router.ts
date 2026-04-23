@@ -270,9 +270,6 @@ export class Router {
     }
 
     dbg(debug, `Embedding index built: ${cachedCount} cached + ${embeddedCount} newly embedded (${Date.now() - t0}ms)`);
-    if (embeddedCount > 0 || cachedCount > 0) {
-      console.log(`[Router] Index built: ${cachedCount} cached + ${embeddedCount} newly embedded = ${cachedCount + embeddedCount} skills`);
-    }
   }
 
   /**
@@ -351,12 +348,10 @@ export class Router {
           });
         scored.sort((a, b) => b.score - a.score);
 
-        if (debug) {
-          dbg(debug, `Cosine scores (top ${Math.min(5, scored.length)}):`);
-          for (const s of scored.slice(0, 5)) {
-            const rs = Math.max(RELIABILITY_FLOOR, s.skill.routingScore ?? (s.skill.rating / 5));
-            dbg(debug, `  ${s.skill.manifest.name.padEnd(20)} score=${s.score.toFixed(3)}  routingScore=${rs.toFixed(3)}`);
-          }
+        dbg(debug, `Cosine scores (top ${Math.min(5, scored.length)}):`);
+        for (const s of scored.slice(0, 5)) {
+          const rs = Math.max(RELIABILITY_FLOOR, s.skill.routingScore ?? (s.skill.rating / 5));
+          dbg(debug, `  ${s.skill.manifest.name.padEnd(20)} score=${s.score.toFixed(3)}  routingScore=${rs.toFixed(3)}`);
         }
 
         // Take top K by cosine, but also boost in skills with strong keyword matches
