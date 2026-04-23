@@ -4,6 +4,7 @@ import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
+import { dbg } from './debug.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -85,7 +86,8 @@ export class Executor {
 
   constructor(private registry: SkillRegistry, private chatClient?: ChatClient) {}
 
-  async execute(skill: LoadedSkill, input: Record<string, unknown>): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
+  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
+    const { debug = false } = opts;
     // Check required credentials before invoking
     const required = getRequiredEnvVars(skill.manifest);
     const missing = required.filter(v => !process.env[v.key]);
@@ -106,6 +108,8 @@ export class Executor {
     }
 
     const adapter = this.pickAdapter(skill);
+    dbg(debug, `Adapter: ${skill.manifest.adapter}`);
+    dbg(debug, `Input payload: ${JSON.stringify(input).slice(0, 200)}`);
     const startTime = Date.now();
     // Lazily load SKILL.md body from disk — only for the selected skill, not at startup
     const instructions = this.registry.readInstructions(skill);
@@ -130,6 +134,14 @@ export class Executor {
       throw err;
     }
     const latencyMs = Date.now() - startTime;
+
+    if (adapterResult.rawText) {
+      dbg(debug, `Raw output (first 200 chars): "${adapterResult.rawText.slice(0, 200).trim()}"`);
+    }
+    if (!adapterResult.success && adapterResult.error) {
+      dbg(debug, `Adapter error: ${adapterResult.error.slice(0, 200)}`);
+    }
+    dbg(debug, `Execution time: ${latencyMs}ms`);
 
     // Record invocation metrics in registry
     const tokenUsage = typeof (adapterResult as any).tokenUsage === 'number' ? (adapterResult as any).tokenUsage : 0;

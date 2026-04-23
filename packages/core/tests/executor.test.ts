@@ -194,6 +194,49 @@ describe('Executor', () => {
 
     await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
   });
+
+  it('accepts debug option in execute and emits debug lines', async () => {
+    const mockRegistryLocal = {
+      readInstructions: vi.fn(() => ''),
+      recordInvocationMetrics: vi.fn(),
+      recordFeedback: vi.fn(),
+    };
+    const mockChatClient = { chat: vi.fn(async () => 'node scripts/invoke.js') };
+
+    const executor = new Executor(mockRegistryLocal as any, mockChatClient as any);
+
+    const mockSkill = {
+      manifest: {
+        name: 'test-skill',
+        description: 'Test',
+        tags: [],
+        version: '1',
+        adapter: 'subprocess',
+        hosting: 'local',
+        auth: 'none',
+        rating: 4,
+        invocations: 0,
+        enabled: true,
+        llm_powered: false,
+      },
+      instructions: '',
+      dirPath: '/tmp/nonexistent-skill-debug-test',
+      rating: 4,
+    } as any;
+
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+
+    // execute will fail (no real script) but should still emit adapter debug line before failing
+    await executor.execute(mockSkill, { query: 'test' }, { debug: true }).catch(() => {});
+
+    spy.mockRestore();
+
+    expect(writes.some(w => w.includes('[debug]') && w.includes('subprocess'))).toBe(true);
+  });
 });
 
 describe('execute() with missing credentials', () => {
