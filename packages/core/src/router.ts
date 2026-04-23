@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { createHash } from 'crypto';
+import { dbg } from './debug.js';
 
 export interface RoutingResult {
   skill: LoadedSkill;
@@ -216,7 +217,10 @@ export class Router {
    * so subsequent runs are instant — only new/changed skills need embedding.
    * First run with 4000+ skills takes time, but cache makes it fast after.
    */
-  async buildIndex(skills: LoadedSkill[]): Promise<void> {
+  async buildIndex(skills: LoadedSkill[], opts: { debug?: boolean } = {}): Promise<void> {
+    const { debug = false } = opts;
+    const t0 = Date.now();
+    dbg(debug, `Registry: ${skills.length} skill(s) loaded`);
     this.index = [];
 
     if (!this.embedClient) {
@@ -265,6 +269,7 @@ export class Router {
       this.saveEmbedCacheFile(newCache);
     }
 
+    dbg(debug, `Embedding index built: ${cachedCount} cached + ${embeddedCount} newly embedded (${Date.now() - t0}ms)`);
     if (embeddedCount > 0 || cachedCount > 0) {
       console.log(`[Router] Index built: ${cachedCount} cached + ${embeddedCount} newly embedded = ${cachedCount + embeddedCount} skills`);
     }
@@ -274,7 +279,8 @@ export class Router {
    * Route a query to the best skill.
    * Flow: translate → eligibility filter → embed query → cosine × routingScore → top K → LLM rerank
    */
-  async route(query: string, topK = 20): Promise<RoutingResult[]> {
+  async route(query: string, topK = 20, opts: { debug?: boolean } = {}): Promise<RoutingResult[]> {
+    const { debug = false } = opts;
     if (this.index.length === 0) return [];
 
     // Translate non-English queries to English
@@ -294,7 +300,12 @@ export class Router {
       }
     }
 
-    const eligible = this.index.filter(({ skill }) => isSkillEligible(skill, routingQuery));
+    const eligible: VectorEntry[] = [];
+    for (const entry of this.index) {
+      const pass = isSkillEligible(entry.skill, routingQuery);
+      dbg(debug, `isSkillEligible: ${entry.skill.manifest.name} → ${pass ? 'PASS' : 'SKIP'}`);
+      if (pass) eligible.push(entry);
+    }
     if (eligible.length === 0) return [];
 
     // Extract the user's intent for embedding matching.
@@ -339,6 +350,14 @@ export class Router {
             return { skill, score: cosine * routingScore - penalty - catchAllPenalty };
           });
         scored.sort((a, b) => b.score - a.score);
+
+        if (debug) {
+          dbg(debug, `Cosine scores (top ${Math.min(5, scored.length)}):`);
+          for (const s of scored.slice(0, 5)) {
+            const rs = Math.max(RELIABILITY_FLOOR, s.skill.routingScore ?? (s.skill.rating / 5));
+            dbg(debug, `  ${s.skill.manifest.name.padEnd(20)} score=${s.score.toFixed(3)}  routingScore=${rs.toFixed(3)}`);
+          }
+        }
 
         // Take top K by cosine, but also boost in skills with strong keyword matches
         // that may have been missed by embedding similarity.
@@ -393,7 +412,11 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
 
     let bestSkillName: string;
     try {
-      bestSkillName = parseRerankDecision(await this.chatClient.chat(systemPrompt, userMessage), candidates);
+      dbg(debug, `Reranker prompt sent (${candidates.length} candidate(s) + "none")`);
+      const rawRerankerResponse = await this.chatClient.chat(systemPrompt, userMessage);
+      dbg(debug, `Reranker raw response: "${rawRerankerResponse.trim()}"`);
+      bestSkillName = parseRerankDecision(rawRerankerResponse, candidates);
+      dbg(debug, `Reranker decision: ${bestSkillName}`);
     } catch (err) {
       console.warn(`[Router] LLM re-rank failed, returning no skill: ${(err as Error).message || err}`);
       bestSkillName = 'none';

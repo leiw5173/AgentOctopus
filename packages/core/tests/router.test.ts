@@ -90,6 +90,37 @@ describe('Router', () => {
 
     expect(result).toEqual([]);
   });
+
+  it('accepts debug option in buildIndex and route without throwing', async () => {
+    const { createChatClient } = await import('../src/llm-client.js');
+    vi.mocked(createChatClient).mockReturnValue({
+      chat: vi.fn(async () => 'translation'),
+    } as any);
+
+    const config = { provider: 'openai' as const, model: 'gpt-4o' };
+    const router = new Router(config, config);
+
+    const mockSkills: LoadedSkill[] = [
+      {
+        manifest: { name: 'translation', description: 'Translates text', tags: [], version: '1', adapter: 'http', hosting: 'cloud', auth: 'none', rating: 4, invocations: 0, enabled: true, llm_powered: false },
+        instructions: '', dirPath: '', rating: 4
+      },
+    ];
+
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+
+    await router.buildIndex(mockSkills, { debug: true });
+    const result = await router.route('translate hello', 20, { debug: true });
+
+    spy.mockRestore();
+
+    expect(writes.some(w => w.includes('[debug]'))).toBe(true);
+    expect(result.length).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
