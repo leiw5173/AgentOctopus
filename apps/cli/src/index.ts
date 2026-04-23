@@ -264,7 +264,9 @@ program
 
     if (routes.length === 0) {
       spinner.fail('No matching skill found for your request.');
-      if (process.env.OCTOPUS_TIMING) {
+      if (options.debug) {
+        dbg(true, `Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`);
+      } else if (process.env.OCTOPUS_TIMING) {
         console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`));
       }
       return;
