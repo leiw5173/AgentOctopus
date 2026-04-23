@@ -411,7 +411,9 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
       const rawRerankerResponse = await this.chatClient.chat(systemPrompt, userMessage);
       dbg(debug, `Reranker raw response: "${rawRerankerResponse.trim()}"`);
       bestSkillName = parseRerankDecision(rawRerankerResponse, candidates);
-      dbg(debug, `Reranker decision: ${bestSkillName}`);
+      const chosenEntry = candidates.find(c => c.skill.manifest.name.toLowerCase() === bestSkillName);
+      const decisionConfidence = chosenEntry ? normalizeConfidence(chosenEntry.score) : 0;
+      dbg(debug, `Reranker decision: ${bestSkillName} (confidence=${decisionConfidence.toFixed(2)})`);
     } catch (err) {
       console.warn(`[Router] LLM re-rank failed, returning no skill: ${(err as Error).message || err}`);
       bestSkillName = 'none';
