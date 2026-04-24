@@ -502,7 +502,7 @@ export function installFromIndex(
     for (const [k, v] of Object.entries(entry.scripts)) {
       if (typeof v === 'string') scriptsMap[k] = v;
     }
-  } else if (entry.invokeScript !== null) {
+  } else if (entry.invokeScript != null) {
     scriptsMap['invoke.js'] = entry.invokeScript;
   }
 
@@ -518,7 +518,7 @@ export function installFromIndex(
     for (const [filename, content] of Object.entries(scriptsMap)) {
       const scriptPath = path.join(scriptsDir, filename);
       if (!fs.existsSync(scriptPath)) {
-        fs.mkdirSync(scriptsDir, { recursive: true });
+        fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
         fs.writeFileSync(scriptPath, content, 'utf8');
         wroteAny = true;
       }
@@ -563,9 +563,10 @@ export function installFromIndex(
 
   // Write all scripts and make them executable
   if (Object.keys(scriptsMap).length > 0) {
-    fs.mkdirSync(scriptsDir, { recursive: true });
     for (const [filename, content] of Object.entries(scriptsMap)) {
-      fs.writeFileSync(path.join(scriptsDir, filename), content, 'utf8');
+      const scriptPath = path.join(scriptsDir, filename);
+      fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+      fs.writeFileSync(scriptPath, content, 'utf8');
     }
     makeScriptsExecutable(skillDir);
   }

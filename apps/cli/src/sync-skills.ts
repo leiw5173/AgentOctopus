@@ -223,6 +223,10 @@ export async function installAwesomeSkills(
       const prefix = chalk.gray(`[${i + 1}/${entries.length}]`);
       const alreadyExists = fs.existsSync(path.join(options.skillsDir, entry.slug));
       if (alreadyExists && !options.force) {
+        // Patch missing scripts/files even when the skill already exists locally.
+        // installFromIndex's patch path only writes files that are absent,
+        // so this is safe to call on every sync without --force.
+        installFromIndex(entry, options.skillsDir, false);
         console.log(
           `${prefix} ${chalk.gray('–')} ${entry.slug} ${chalk.gray('(already installed, use --force to overwrite)')}`,
         );
