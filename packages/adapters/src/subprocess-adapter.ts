@@ -4,6 +4,17 @@ import fs from 'node:fs';
 import type { LoadedSkill } from '@agentoctopus/registry';
 import type { Adapter, AdapterResult } from './adapter.js';
 
+/** Read the SKILL.md body (below the frontmatter) without adding a gray-matter dependency. */
+function readSkillBody(dirPath: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(dirPath, 'SKILL.md'), 'utf-8');
+    const match = raw.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
+    return (match ? match[1] : raw).trim();
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Find the entry script and runtime for a skill.
  *
@@ -27,7 +38,7 @@ function findEntryScript(skill: LoadedSkill): { scriptPath: string; runtime: str
   if (fs.existsSync(invokePy)) return { scriptPath: invokePy, runtime: 'python3' };
 
   // 3. Parse SKILL.md instructions for script references
-  const instructions = skill.instructions;
+  const instructions = readSkillBody(skill.dirPath);
   const scriptRef = parseScriptReference(instructions, scriptsDir);
   if (scriptRef) return scriptRef;
 
@@ -75,6 +86,10 @@ function parseScriptReference(instructions: string, scriptsDir: string): { scrip
   return null;
 }
 
+/** Env vars always passed through to subprocess skills. */
+const SANDBOX_PASSTHROUGH_VARS = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM'];
+const SKILL_EXEC_TIMEOUT_MS = parseInt(process.env.SKILL_EXEC_TIMEOUT_MS ?? '30000', 10);
+
 export class SubprocessAdapter implements Adapter {
   async invoke(skill: LoadedSkill, input: Record<string, unknown>): Promise<AdapterResult> {
     const entry = findEntryScript(skill);
@@ -86,14 +101,36 @@ export class SubprocessAdapter implements Adapter {
     const isNode = entry.runtime === 'node';
 
     return new Promise((resolve) => {
+      // Build sandboxed env: only safe vars + skill-declared credentials
+      const safeEnv: NodeJS.ProcessEnv = {};
+      for (const key of SANDBOX_PASSTHROUGH_VARS) {
+        if (process.env[key] !== undefined) safeEnv[key] = process.env[key];
+      }
+      const credKeys: string[] = [];
+      const creds = (skill.manifest.credentials ?? []) as Array<{ key: string }>;
+      for (const c of creds) credKeys.push(c.key);
+      const ocEnv = (skill.manifest.metadata as any)?.openclaw?.env;
+      if (Array.isArray(ocEnv)) {
+        for (const k of ocEnv) { if (typeof k === 'string') credKeys.push(k); }
+      }
+      for (const key of credKeys) {
+        if (process.env[key] !== undefined) safeEnv[key] = process.env[key];
+      }
+      safeEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
+
       // For Node scripts: use process.execPath to ensure we use the current Node binary
       // and bypass Turbopack's constant folding for spawn/exec asset tracing.
       // For Python scripts: use python3 from PATH.
       const cmd = isNode ? process.execPath : entry.runtime;
       const child = cp.spawn(cmd, [entry.scriptPath], {
-        env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
+        env: safeEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+
+      const killTimer = setTimeout(() => {
+        child.kill('SIGTERM');
+        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms` });
+      }, SKILL_EXEC_TIMEOUT_MS);
 
       let stdout = '';
       let stderr = '';
@@ -102,6 +139,7 @@ export class SubprocessAdapter implements Adapter {
       child.stderr.on('data', (d) => { stderr += d.toString(); });
 
       child.on('close', (code) => {
+        clearTimeout(killTimer);
         if (code !== 0) {
           resolve({ success: false, error: stderr || `Process exited with code ${code}` });
         } else {
@@ -115,6 +153,7 @@ export class SubprocessAdapter implements Adapter {
       });
 
       child.on('error', (err) => {
+        clearTimeout(killTimer);
         resolve({ success: false, error: err.message });
       });
 

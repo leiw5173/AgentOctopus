@@ -39,7 +39,6 @@ Mock instructions`;
     console.log(JSON.stringify(skills[0], null, 2));
     expect(skills.length).toBe(1);
     expect(skills[0].manifest.name).toBe('search-skill');
-    expect(skills[0].instructions).toBe('Mock instructions');
     expect(skills[0].dirPath).toBe('/mock/skills/search');
     expect(skills[0].rating).toBe(4.5);
   });

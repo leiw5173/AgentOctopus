@@ -101,7 +101,6 @@ function normalizeSkillData(data: Record<string, unknown>, dirName: string, skil
 
 export interface LoadedSkill {
   manifest: SkillManifest;
-  instructions: string;
   dirPath: string;
   rating: number;
   routingScore?: number;
@@ -130,7 +129,7 @@ export class SkillRegistry {
     for (const file of files) {
       try {
         const raw = fs.readFileSync(file, 'utf-8');
-        const { data, content } = matter(raw);
+        const { data } = matter(raw);
         const dirName = path.basename(path.dirname(file));
         const skillDir = path.dirname(file);
         const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName, skillDir));
@@ -143,7 +142,6 @@ export class SkillRegistry {
 
         this.skills.set(manifest.name, {
           manifest,
-          instructions: content.trim(),
           dirPath: path.dirname(file),
           rating: manifest.rating,
           routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
@@ -191,7 +189,6 @@ export class SkillRegistry {
               }
               this.skills.set(manifest.name, {
                 manifest,
-                instructions: s.instructions,
                 dirPath: s.dirPath,
                 rating: manifest.rating,
                 routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
@@ -208,7 +205,7 @@ export class SkillRegistry {
     for (const file of files) {
       try {
         const raw = fs.readFileSync(file, 'utf-8');
-        const { data, content } = matter(raw);
+        const { data } = matter(raw);
         const dirName = path.basename(path.dirname(file));
         const skillDir = path.dirname(file);
         const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName, skillDir));
@@ -222,7 +219,6 @@ export class SkillRegistry {
 
         this.skills.set(manifest.name, {
           manifest,
-          instructions: content.trim(),
           dirPath: path.dirname(file),
           rating: manifest.rating,
           routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
@@ -245,7 +241,6 @@ export class SkillRegistry {
       const hash = this.computeFilesHash(files);
       const serialized = Array.from(this.skills.values()).map(s => ({
         manifest: s.manifest,
-        instructions: s.instructions,
         dirPath: s.dirPath,
       }));
       fs.writeFileSync(this.cachePath(), JSON.stringify({ hash, skills: serialized }));
@@ -258,6 +253,17 @@ export class SkillRegistry {
 
   getByName(name: string): LoadedSkill | undefined {
     return this.skills.get(name);
+  }
+
+  /**
+   * Lazily read the SKILL.md body (instructions) from disk for a selected skill.
+   * Called at execution time, not at registry load time.
+   */
+  readInstructions(skill: LoadedSkill): string {
+    const skillMdPath = path.join(skill.dirPath, 'SKILL.md');
+    const raw = fs.readFileSync(skillMdPath, 'utf-8');
+    const { content } = matter(raw);
+    return content.trim();
   }
 
   search(query: string): LoadedSkill[] {

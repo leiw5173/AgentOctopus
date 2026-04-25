@@ -19,6 +19,7 @@ describe('Executor', () => {
     mockRegistry = {
       recordInvocation: vi.fn(),
       recordInvocationMetrics: vi.fn(),
+      readInstructions: vi.fn().mockReturnValue(''),
     } as any;
     
     // Setup instances returned by constructor mocks
@@ -89,7 +90,7 @@ describe('Executor', () => {
     expect(result.formattedOutput).toBe('Error: Command failed');
   });
 
-  it('throws before invoking when a required credential env var is missing', async () => {
+  it('returns CredentialMissingResult when a required credential env var is missing', async () => {
     delete process.env['REQUIRED_KEY'];
 
     const executor = new Executor(mockRegistry);
@@ -101,8 +102,12 @@ describe('Executor', () => {
       },
     } as any;
 
-    await expect(executor.execute(mockSkill, { query: 'test' }))
-      .rejects.toThrow('REQUIRED_KEY');
+    const result = await executor.execute(mockSkill, { query: 'test' });
+    expect(result).toMatchObject({
+      type: 'credential_missing',
+      skillName: 'needs-key',
+      missing: [{ key: 'REQUIRED_KEY' }],
+    });
   });
 
   it('does not throw when all required credential env vars are set', async () => {
@@ -188,5 +193,89 @@ describe('Executor', () => {
     } as any;
 
     await expect(executor.execute(mockSkill, { query: 'test' })).resolves.toBeDefined();
+  });
+
+  it('accepts debug option in execute and emits debug lines', async () => {
+    const mockRegistryLocal = {
+      readInstructions: vi.fn(() => ''),
+      recordInvocationMetrics: vi.fn(),
+      recordFeedback: vi.fn(),
+    };
+    const mockChatClient = { chat: vi.fn(async () => 'node scripts/invoke.js') };
+
+    const executor = new Executor(mockRegistryLocal as any, mockChatClient as any);
+
+    const mockSkill = {
+      manifest: {
+        name: 'test-skill',
+        description: 'Test',
+        tags: [],
+        version: '1',
+        adapter: 'subprocess',
+        hosting: 'local',
+        auth: 'none',
+        rating: 4,
+        invocations: 0,
+        enabled: true,
+        llm_powered: false,
+      },
+      instructions: '',
+      dirPath: '/tmp/nonexistent-skill-debug-test',
+      rating: 4,
+    } as any;
+
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      writes.push(String(chunk));
+      return true;
+    });
+
+    // execute will fail (no real script) but should still emit adapter debug line before failing
+    await executor.execute(mockSkill, { query: 'test' }, { debug: true }).catch(() => {});
+
+    spy.mockRestore();
+
+    expect(writes.some(w => w.includes('[debug]') && w.includes('subprocess'))).toBe(true);
+  });
+});
+
+describe('execute() with missing credentials', () => {
+  it('returns CredentialMissingResult instead of throwing when env var is absent', async () => {
+    delete process.env.MISSING_TEST_KEY_XYZ;
+
+    const skill = {
+      manifest: {
+        name: 'test-skill',
+        description: 'test',
+        adapter: 'http' as const,
+        credentials: [{ key: 'MISSING_TEST_KEY_XYZ', label: 'Get at https://example.com', required: true }],
+        metadata: {},
+      },
+      dirPath: '/tmp',
+    } as any;
+
+    const registry = { recordInvocationMetrics: vi.fn(), recordFeedback: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry);
+
+    const result = await executor.execute(skill, { query: 'test' });
+
+    expect(result).toMatchObject({
+      type: 'credential_missing',
+      skillName: 'test-skill',
+      missing: [{ key: 'MISSING_TEST_KEY_XYZ' }],
+    });
+  });
+});
+
+describe('CredentialMissingResult type', () => {
+  it('is exported from executor', () => {
+    const result: import('../../src/index.js').CredentialMissingResult = {
+      type: 'credential_missing',
+      skillName: 'test-skill',
+      missing: [{ key: 'TEST_KEY', label: 'Get at https://example.com' }],
+    };
+    expect(result.type).toBe('credential_missing');
+    expect(result.skillName).toBe('test-skill');
+    expect(result.missing[0].key).toBe('TEST_KEY');
   });
 });

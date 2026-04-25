@@ -1,10 +1,27 @@
-import type { LoadedSkill, SkillRegistry } from '@agentoctopus/registry';
-import { getRequiredEnvVars } from '@agentoctopus/registry';
+import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/registry';
+import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 import type { ChatClient } from './llm-client.js';
+import { isBinAvailable } from './utils.js';
+import { dbg } from './debug.js';
 import fs from 'fs';
 import path from 'path';
+
+const SKILL_EXEC_TIMEOUT_MS = parseInt(process.env.SKILL_EXEC_TIMEOUT_MS ?? '30000', 10);
+
+const SANDBOX_PASSTHROUGH_VARS = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM'];
+
+function buildSandboxedEnv(skill: LoadedSkill): NodeJS.ProcessEnv {
+  const safe: NodeJS.ProcessEnv = {};
+  for (const key of SANDBOX_PASSTHROUGH_VARS) {
+    if (process.env[key] !== undefined) safe[key] = process.env[key];
+  }
+  for (const v of getRequiredEnvVars(skill.manifest)) {
+    if (process.env[v.key] !== undefined) safe[v.key] = process.env[v.key];
+  }
+  return safe;
+}
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
 
@@ -50,6 +67,18 @@ export interface ExecutionResult {
   authGuidance?: string;
 }
 
+export interface CredentialMissingResult {
+  type: 'credential_missing';
+  skillName: string;
+  missing: RequiredEnvVar[];
+}
+
+export interface BinaryMissingResult {
+  type: 'binary_missing';
+  skillName: string;
+  missing: string[];
+}
+
 export class Executor {
   private http = new HttpAdapter();
   private mcp = new McpAdapter();
@@ -57,33 +86,41 @@ export class Executor {
 
   constructor(private registry: SkillRegistry, private chatClient?: ChatClient) {}
 
-  async execute(skill: LoadedSkill, input: Record<string, unknown>): Promise<ExecutionResult> {
+  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
+    const { debug = false } = opts;
     // Check required credentials before invoking
     const required = getRequiredEnvVars(skill.manifest);
     const missing = required.filter(v => !process.env[v.key]);
 
     if (missing.length > 0) {
-      const lines = missing.map(v => {
-        if (v.label) return `  - ${v.key} — ${v.label}`;
-        return `  - ${v.key}`;
-      }).join('\n');
-      const homepage = skill.manifest.metadata?.openclaw?.homepage;
-      const hint = homepage ? `\n  Get your key at: ${homepage}` : '';
-      throw new Error(
-        `Skill "${skill.manifest.name}" requires API keys that are not configured:\n\n${lines}${hint}\n\n  To set a key, run:\n    octopus config set ${missing[0].key} <your-key>`,
-      );
+      return {
+        type: 'credential_missing',
+        skillName: skill.manifest.name,
+        missing,
+      } satisfies CredentialMissingResult;
+    }
+
+    // Check required binaries before invoking
+    const requiredBins = getRequiredBins(skill.manifest);
+    const missingBins = requiredBins.filter(bin => !isBinAvailable(bin));
+    if (missingBins.length > 0) {
+      return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
     }
 
     const adapter = this.pickAdapter(skill);
+    dbg(debug, `Adapter: ${skill.manifest.adapter}`);
+    dbg(debug, `Input payload: ${JSON.stringify(input).slice(0, 200)}`);
     const startTime = Date.now();
+    // Lazily load SKILL.md body from disk — only for the selected skill, not at startup
+    const instructions = this.registry.readInstructions(skill);
     let adapterResult: AdapterResult;
     try {
       // For subprocess skills, check if we should use LLM-guided execution
       if (skill.manifest.adapter === 'subprocess' && this.chatClient) {
-        adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter);
+        adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter, instructions);
       } else if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && this.chatClient) {
         // HTTP skill with no endpoint — use LLM-guided curl execution
-        adapterResult = await this.executeHttpWithLLM(skill, input);
+        adapterResult = await this.executeHttpWithLLM(skill, input, instructions);
       } else {
         adapterResult = await adapter.invoke(skill, input);
       }
@@ -97,6 +134,14 @@ export class Executor {
       throw err;
     }
     const latencyMs = Date.now() - startTime;
+
+    if (adapterResult.rawText) {
+      dbg(debug, `Raw output (first 200 chars): "${adapterResult.rawText.slice(0, 200).trim()}"`);
+    }
+    if (!adapterResult.success && adapterResult.error) {
+      dbg(debug, `Adapter error: ${adapterResult.error.slice(0, 200)}`);
+    }
+    dbg(debug, `Execution time: ${latencyMs}ms`);
 
     // Record invocation metrics in registry
     const tokenUsage = typeof (adapterResult as any).tokenUsage === 'number' ? (adapterResult as any).tokenUsage : 0;
@@ -118,7 +163,7 @@ export class Executor {
     }
 
     // Post-execution: detect auth errors and append setup guidance
-    const authGuidance = await this.diagnoseAuthError(adapterResult, skill);
+    const authGuidance = await this.diagnoseAuthError(adapterResult, skill, instructions);
 
     return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
   }
@@ -133,6 +178,7 @@ export class Executor {
     skill: LoadedSkill,
     input: Record<string, unknown>,
     adapter: { invoke: (skill: LoadedSkill, input: Record<string, unknown>) => Promise<AdapterResult> },
+    instructions: string,
   ): Promise<AdapterResult> {
     // If skill has invoke.js, use standard subprocess execution
     const fs = await import('fs');
@@ -154,7 +200,7 @@ export class Executor {
     // installed elsewhere (e.g. ~/.agentoctopus/skills/<name>/).
     const instrHomeDir = process.env.HOME || process.env.USERPROFILE || '';
     const instrPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
-    const rewrittenInstructions = skill.instructions.replace(instrPathPattern, (match) => {
+    const rewrittenInstructions = instructions.replace(instrPathPattern, (match) => {
       const expanded = match.replace(/^~/, instrHomeDir);
       if (fs.existsSync(expanded)) return match; // path exists, leave it
       return skill.dirPath; // redirect to actual install location
@@ -218,11 +264,18 @@ export class Executor {
     // Execute the LLM-determined command from the skill's directory
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
+      const sandboxEnv = buildSandboxedEnv(skill);
+      sandboxEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
       const child = cp.spawn('bash', ['-c', trimmedCommand], {
         cwd: skill.dirPath,
-        env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
+        env: sandboxEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+
+      const killTimer = setTimeout(() => {
+        child.kill('SIGTERM');
+        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms: ${trimmedCommand}` });
+      }, SKILL_EXEC_TIMEOUT_MS);
 
       let stdout = '';
       let stderr = '';
@@ -231,6 +284,7 @@ export class Executor {
       child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
       child.on('close', (code: number) => {
+        clearTimeout(killTimer);
         if (code !== 0) {
           resolve({ success: false, error: stderr || `Command exited with code ${code}: ${trimmedCommand}` });
         } else {
@@ -239,6 +293,7 @@ export class Executor {
       });
 
       child.on('error', (err: Error) => {
+        clearTimeout(killTimer);
         resolve({ success: false, error: err.message });
       });
 
@@ -254,9 +309,22 @@ export class Executor {
   private async executeHttpWithLLM(
     skill: LoadedSkill,
     input: Record<string, unknown>,
+    instructions: string,
   ): Promise<AdapterResult> {
     if (!this.chatClient) {
       return { success: false, error: `Skill "${skill.manifest.name}" has no endpoint and no LLM available for guided execution` };
+    }
+
+    // Pre-flight: if the SKILL.md describes only local scripts (no https:// URLs),
+    // the LLM-guided curl path will always fail. Return immediately with a helpful error.
+    const hasHttpUrl = /https?:\/\//.test(instructions);
+    const hasLocalScripts = /scripts\/[\w.-]+\.(?:py|js|sh|ts)/.test(instructions);
+    if (hasLocalScripts && !hasHttpUrl) {
+      const skillName = skill.manifest.name;
+      return {
+        success: false,
+        error: `Skill "${skillName}" uses local scripts that aren\'t installed on this machine. Install it with:\n  octopus add ${skillName} --force`,
+      };
     }
 
     const query = (input.query ?? input.text ?? '') as string;
@@ -265,7 +333,7 @@ export class Executor {
     const fs = await import('fs');
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
     const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
-    const rewrittenInstructions = skill.instructions.replace(openclawPathPattern, (match) => {
+    const rewrittenInstructions = instructions.replace(openclawPathPattern, (match) => {
       const expanded = match.replace(/^~/, homeDir);
       if (fs.existsSync(expanded)) return match;
       return skill.dirPath;
@@ -318,10 +386,17 @@ export class Executor {
     // Execute the LLM-determined curl command
     const cp = await import('node:child_process');
     return new Promise((resolve) => {
+      const sandboxEnv = buildSandboxedEnv(skill);
+      sandboxEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
       const child = cp.spawn('bash', ['-c', trimmedCommand], {
-        env: { ...process.env, OCTOPUS_INPUT: JSON.stringify(input) },
+        env: sandboxEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+
+      const killTimer = setTimeout(() => {
+        child.kill('SIGTERM');
+        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms: ${trimmedCommand}` });
+      }, SKILL_EXEC_TIMEOUT_MS);
 
       let stdout = '';
       let stderr = '';
@@ -330,6 +405,7 @@ export class Executor {
       child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
       child.on('close', (code: number) => {
+        clearTimeout(killTimer);
         if (code !== 0) {
           resolve({ success: false, error: stderr || `Command exited with code ${code}: ${trimmedCommand}` });
         } else {
@@ -338,6 +414,7 @@ export class Executor {
       });
 
       child.on('error', (err: Error) => {
+        clearTimeout(killTimer);
         resolve({ success: false, error: err.message });
       });
 
@@ -411,7 +488,7 @@ export class Executor {
    * Detect auth errors in successful responses and provide setup guidance.
    * Uses the LLM to extract setup instructions from SKILL.md when available.
    */
-  private async diagnoseAuthError(result: AdapterResult, skill: LoadedSkill): Promise<string | null> {
+  private async diagnoseAuthError(result: AdapterResult, skill: LoadedSkill, instructions: string): Promise<string | null> {
     // Check results with rawText for auth error patterns.
     // Some skills return HTTP 200 with an error body like {"error": "Missing API key"}
     // so we check both success and failure results.
@@ -460,7 +537,6 @@ export class Executor {
     } else {
       // No declared credentials — scan instructions for likely env var names
       const envVarPattern = /\b([A-Z][A-Z0-9_]{2,}(?:_API_KEY|_KEY|_TOKEN|_SECRET|_APIKEY))\b/g;
-      const instructions = skill.instructions;
       const foundVars = new Set<string>();
       let m: RegExpExecArray | null;
       while ((m = envVarPattern.exec(instructions)) !== null) {
@@ -497,7 +573,7 @@ export class Executor {
       try {
         const llmGuidance = await this.chatClient.chat(
           AUTH_DIAGNOSIS_PROMPT,
-          `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${skill.instructions}\n\nError: ${JSON.stringify(parsed)}\n\nHow should the user set up authentication for this skill?`,
+          `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${instructions}\n\nError: ${JSON.stringify(parsed)}\n\nHow should the user set up authentication for this skill?`,
         );
         if (llmGuidance?.trim()) {
           lines.push('');

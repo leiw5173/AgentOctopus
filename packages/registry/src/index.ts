@@ -1,5 +1,5 @@
 export { SkillRegistry } from './registry.js';
-export { SkillManifestSchema, getRequiredEnvVars, type SkillManifest, type Adapter, type Auth, type SkillCredential, type RequiredEnvVar } from './manifest-schema.js';
+export { SkillManifestSchema, getRequiredEnvVars, getRequiredBins, type SkillManifest, type Adapter, type Auth, type SkillCredential, type RequiredEnvVar } from './manifest-schema.js';
 export { RatingStore, type RatingEntry, type RatingsStore, type FeedbackEntry, type InvocationMetrics } from './rating.js';
 export type { LoadedSkill } from './registry.js';
 export {

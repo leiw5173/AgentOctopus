@@ -3,6 +3,15 @@ const { Telegraf } = telegrafPkg;
 type Context = import('telegraf').Context;
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
+import { type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
+
+function isCredentialMissing(result: unknown): result is CredentialMissingResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
+}
+
+function isBinaryMissing(result: unknown): result is BinaryMissingResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
+}
 
 export interface TelegramGatewayOptions {
   token: string;
@@ -39,15 +48,35 @@ export async function startTelegramGateway(options: TelegramGatewayOptions): Pro
 
       const result = await engine.executor.execute(routing.skill, { query: text });
 
+      // Handle credential missing
+      if (isCredentialMissing(result)) {
+        const lines = result.missing
+          .map(v => `  - ${v.key}${v.label ? ` — ${v.label}` : ''}`)
+          .join('\n');
+        const setupCmd = result.missing[0]?.key
+          ? `\nRun: octopus config set ${result.missing[0].key} <your-key>`
+          : '';
+        await ctx.reply(`I matched a skill but it needs an unconfigured API key:\n${lines}${setupCmd}`);
+        return;
+      }
+
+      if (isBinaryMissing(result)) {
+        const tools = result.missing.map(b => `  - ${b}`).join('\n');
+        await ctx.reply(`I matched a skill but it requires tools that aren't installed:\n${tools}\n\nInstall the tool(s) above, then retry.`);
+        return;
+      }
+
+      const execResult = result as import('@agentoctopus/core').ExecutionResult;
+
       sessionManager.addMessage(session, {
         role: 'assistant',
-        content: result.formattedOutput,
+        content: execResult.formattedOutput,
         timestamp: Date.now(),
         skillUsed: routing.skill.manifest.name,
       });
 
       // Telegram limit is 4096 chars
-      await ctx.reply(result.formattedOutput.slice(0, 4096));
+      await ctx.reply(execResult.formattedOutput.slice(0, 4096));
     } catch (err) {
       await ctx.reply(`Error: ${(err as Error).message}`);
     }

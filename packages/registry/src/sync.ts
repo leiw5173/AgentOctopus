@@ -72,6 +72,10 @@ export async function syncFromCloud(
 
       // Write SKILL.md
       fs.mkdirSync(skillDir, { recursive: true });
+      if (typeof entry.skillMd !== 'string') {
+        result.errors.push(`${entry.name}: missing SKILL.md content`);
+        continue;
+      }
       fs.writeFileSync(skillMdPath, entry.skillMd, 'utf-8');
 
       // Write script files
@@ -79,6 +83,7 @@ export async function syncFromCloud(
         const scriptsDir = path.join(skillDir, 'scripts');
         fs.mkdirSync(scriptsDir, { recursive: true });
         for (const [filename, content] of Object.entries(entry.scripts)) {
+          if (typeof content !== 'string') continue;
           fs.writeFileSync(path.join(scriptsDir, filename), content, 'utf-8');
         }
       }

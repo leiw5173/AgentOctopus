@@ -38,7 +38,6 @@ describe('Integration: Registry -> Router -> Executor', () => {
     // Manually inject a skill bypassing fs
     const mockSkill = {
       manifest: { name: 'test-skill', description: 'desc', adapter: 'subprocess', tags: [], version: '1', hosting: 'local', auth: 'none', rating: 4, invocations: 0, enabled: true, llm_powered: false },
-      instructions: '',
       dirPath: '/dummy',
       rating: 4.0
     };
@@ -48,6 +47,7 @@ describe('Integration: Registry -> Router -> Executor', () => {
     vi.spyOn(registry, 'getByName').mockReturnValue(mockSkill as any);
     vi.spyOn(registry, 'recordInvocation').mockImplementation(() => {});
     vi.spyOn(registry, 'recordInvocationMetrics').mockImplementation(() => {});
+    vi.spyOn(registry, 'readInstructions').mockReturnValue('');
 
     // Initialize Router
     const router = new Router({ provider: 'openai', model: 'gpt-4o' }, { provider: 'openai', model: 'text-embedding-3-small' });

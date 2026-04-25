@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, type LLMConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
@@ -238,7 +238,8 @@ program
   .command('ask <query>')
   .description('Ask AgentOctopus to route your request to the best skill')
   .option('--no-prompt', 'Skip the interactive feedback prompt (for programmatic use)')
-  .action(async (query: string, options: { prompt: boolean }) => {
+  .option('--debug', 'Show routing and execution internals')
+  .action(async (query: string, options: { prompt: boolean; debug?: boolean }) => {
     // Auto-trigger onboarding if .env is missing
     const onboarded = await ensureOnboarded();
     if (!onboarded) return;
@@ -250,7 +251,7 @@ program
     let engine;
     try {
       engine = await bootstrap();
-      await engine.router.buildIndex(engine.registry.getAll());
+      await engine.router.buildIndex(engine.registry.getAll(), { debug: !!options.debug });
     } catch (err) {
       spinner.fail(`Initialization failed: ${err}`);
       return;
@@ -258,13 +259,28 @@ program
     const t1 = Date.now();
 
     spinner.text = 'Finding the best skill...';
-    const routes = await engine.router.route(query);
+    const routes = await engine.router.route(query, 20, { debug: !!options.debug });
     const t2 = Date.now();
 
     if (routes.length === 0) {
-      spinner.fail('No matching skill found for your request.');
-      if (process.env.OCTOPUS_TIMING) {
+      spinner.stop();
+      if (options.debug) {
+        dbg(true, `Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`);
+      } else if (process.env.OCTOPUS_TIMING) {
         console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`));
+      }
+      // No skill matched — fall back to a direct LLM answer
+      const fallbackSpinner = ora('Answering directly...').start();
+      try {
+        const answer = await (engine.executor as any).chatClient?.chat(
+          'You are a helpful assistant. Answer the user\'s question concisely and accurately.',
+          query,
+        );
+        const tFb = Date.now();
+        fallbackSpinner.succeed(`Answer (${((tFb - t0) / 1000).toFixed(1)}s):\n`);
+        console.log(chalk.white(answer ?? '(no response)') + '\n');
+      } catch {
+        fallbackSpinner.fail('No matching skill found and could not generate a direct answer.');
       }
       return;
     }
@@ -281,23 +297,59 @@ program
       const { skill, score, reason } = candidates[i]!;
       const attemptLabel = candidates.length > 1 ? ` (attempt ${i + 1}/${candidates.length})` : '';
       spinner.succeed(`Selected skill: ${chalk.cyan.bold(skill.manifest.name)}${attemptLabel}`);
-      console.log(chalk.gray(`  Reason: ${reason}`));
-      console.log(chalk.gray(`  Match Score: ${score.toFixed(3)}\n`));
+      // Show skill description snippet instead of generic routing reason
+      const descSnippet = skill.manifest.description.length > 90
+        ? skill.manifest.description.slice(0, 90) + '…'
+        : skill.manifest.description;
+      console.log(chalk.gray(`  ${descSnippet}`));
+      if (options.debug) {
+        dbg(true, `Score: ${score.toFixed(3)}  Reason: ${reason}`);
+      }
+      console.log();
 
       spinner.start(`Executing ${skill.manifest.name}...`);
       try {
-        const result = await engine.executor.execute(skill, input);
+        const result = await engine.executor.execute(skill, input, { debug: !!options.debug });
         const t3 = Date.now();
 
-        if (process.env.OCTOPUS_TIMING) {
+        if (options.debug) {
+          dbg(true, `Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`);
+        } else if (process.env.OCTOPUS_TIMING) {
           console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`));
         }
 
-        if (result.adapterResult.success) {
+        if ('type' in result && result.type === 'credential_missing') {
+          const lines = result.missing
+            .map((v: { key: string; label?: string }) => v.label ? `  • ${v.key} — ${v.label}` : `  • ${v.key}`)
+            .join('\n');
+          spinner.fail(`${result.skillName} requires unconfigured API keys`);
+          console.error(chalk.red(`\nMissing credentials:\n${lines}\n`));
+          console.error(chalk.yellow(`  To configure: octopus config set ${result.missing[0]?.key} <your-key>`));
+          if (i < candidates.length - 1) {
+            console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+          }
+          continue;
+        }
+
+        if ('type' in result && result.type === 'binary_missing') {
+          const tools = (result.missing as string[]).map(b => `  • ${b}`).join('\n');
+          spinner.fail(`${result.skillName} requires missing tools`);
+          console.error(chalk.red(`\nMissing binaries:\n${tools}\n`));
+          console.error(chalk.yellow(`  Install the tool(s) above, then retry.`));
+          if (i < candidates.length - 1) {
+            console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+          }
+          continue;
+        }
+
+        const execResult = result as import('@agentoctopus/core').ExecutionResult;
+
+        if (execResult.adapterResult.success) {
           succeeded = true;
-          spinner.succeed('Execution successful\n');
+          const totalSec = ((t3 - t0) / 1000).toFixed(1);
+          spinner.succeed(`Execution successful (${totalSec}s)\n`);
           console.log(chalk.green('Result:'));
-          console.log(result.formattedOutput + '\n');
+          console.log(execResult.formattedOutput + '\n');
 
           // Ask for feedback
           if (options.prompt !== false) {
@@ -320,10 +372,24 @@ program
           break;
         }
 
-        // Execution failed
+        // Execution failed — show friendly, actionable error messages
+        const errMsg = execResult.adapterResult.error ?? 'Unknown error';
         spinner.fail(`${skill.manifest.name} execution failed\n`);
-        console.error(chalk.red('Error:'), result.adapterResult.error);
-        failedResults.push({ authGuidance: result.authGuidance });
+        if (/Permission denied/i.test(errMsg) && /scripts\//.test(errMsg)) {
+          // Script file missing execute bit
+          console.error(chalk.red('  Script is not executable.') + chalk.gray(' Fix with:'));
+          console.error(chalk.cyan(`  chmod +x ~/.agentoctopus/skills/${skill.manifest.name}/scripts/*`));
+        } else if (/uses local scripts/i.test(errMsg)) {
+          // http-adapter skill whose SKILL.md only describes local scripts
+          console.error(chalk.red('  Skill requires local scripts not installed on this machine.'));
+          console.error(chalk.yellow(`  To install: octopus add ${skill.manifest.name} --force`));
+        } else {
+          console.error(chalk.red('  Error:'), errMsg.split('\n')[0]);
+          if (options.debug && errMsg.includes('\n')) {
+            console.error(chalk.gray(errMsg.split('\n').slice(1).join('\n')));
+          }
+        }
+        failedResults.push({ authGuidance: execResult.authGuidance });
         if (i < candidates.length - 1) {
           console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
         }
@@ -338,10 +404,23 @@ program
     }
 
     if (!succeeded && candidates.length > 0) {
-      console.log(chalk.yellow(`\nAll ${candidates.length} skill(s) failed for this request.`));
       const authGuidance = failedResults.find(r => r.authGuidance)?.authGuidance;
       if (authGuidance) {
         console.log('\n' + authGuidance);
+      }
+      // All skill retries failed — fall back to a direct LLM answer
+      console.log(chalk.yellow(`\nAll ${candidates.length} skill(s) failed. Answering directly...\n`));
+      const fallbackSpinner = ora('Thinking...').start();
+      try {
+        const answer = await (engine.executor as any).chatClient?.chat(
+          'You are a helpful assistant. Answer the user\'s question concisely and accurately.',
+          query,
+        );
+        const tFb = Date.now();
+        fallbackSpinner.succeed(`Answer (${((tFb - t0) / 1000).toFixed(1)}s):\n`);
+        console.log(chalk.white(answer ?? '(no response)') + '\n');
+      } catch {
+        fallbackSpinner.fail('Could not generate a fallback answer.');
       }
     }
   });
@@ -517,6 +596,7 @@ program
   .option('--pull', 'Pull ratings from cloud to local')
   .option('--push', 'Push local ratings to cloud')
   .option('--no-feedback-sharing', 'Don\'t share feedback comments in sync')
+  .option('--debug', 'Show HTTP traces and version comparison details')
   .action(async (options: {
     cloudUrl?: string;
     category?: string;
@@ -530,6 +610,7 @@ program
     pull?: boolean;
     push?: boolean;
     noFeedbackSharing?: boolean;
+    debug?: boolean;
   }) => {
     // If --ratings or --setup-gist explicitly passed, run rating sync directly
     if (options.ratings || options.setupGist) {
@@ -569,6 +650,7 @@ program
         force: options.force,
         dryRun: options.dryRun,
         registryUrl: options.registry,
+        debug: options.debug,
       });
       return;
     }
@@ -589,6 +671,7 @@ program
         skillsDir,
         force: options.force,
         dryRun: options.dryRun,
+        debug: options.debug,
       });
     }
 

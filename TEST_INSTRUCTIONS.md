@@ -507,7 +507,7 @@ node apps/cli/dist/index.js sync-awesome --limit 2
 node apps/cli/dist/index.js sync-awesome --limit 2
 ```
 
-**Expected:** Second run shows `Installed: 0  Skipped: 2  Failed: 0` and each line shows `(already installed, use --force to overwrite)`.
+**Expected:** Second run produces no per-skill output lines for unchanged skills — they are counted silently. The unified footer shows `Sync: N unchanged` (e.g. `Sync: 2 unchanged`). Use `--force` to overwrite already-installed skills.
 
 ---
 
@@ -748,3 +748,35 @@ node apps/cli/dist/index.js sync --cloud-url https://your-cloud-instance.com
 ```
 
 **Expected:** Three-phase output: version check → awesome install → cloud sync results.
+
+---
+
+### 9.6 Debug mode — ask
+
+```bash
+node apps/cli/dist/index.js ask --debug "What's the weather in Tokyo?"
+```
+
+**Expected:** `[debug]` lines appear inline showing `isSkillEligible` decisions, cosine scores, reranker I/O, adapter chosen, and timing — followed by the normal skill response.
+
+### 9.7 Debug mode — sync
+
+```bash
+node apps/cli/dist/index.js sync --debug
+```
+
+**Expected:** `[debug]` lines show version comparison table (installed vs available) and HTTP fetch timing alongside the normal sync output.
+
+---
+
+## Pass / Fail Checklist (Phase 9 — Update & Sync)
+
+| # | Test | Pass |
+|---|---|---|
+| 9.1 | `octopus update --check` shows version table | ☐ |
+| 9.2 | `octopus sync --check` shows skill update status | ☐ |
+| 9.3 | `octopus sync --dry-run` previews skills without writing | ☐ |
+| 9.4 | `octopus sync --category git-and-github --dry-run` filters correctly | ☐ |
+| 9.5 | `octopus sync --cloud-url` produces three-phase output | ☐ |
+| 9.6 | `octopus ask --debug` shows `[debug]` routing internals inline | ☐ |
+| 9.7 | `octopus sync --debug` shows `[debug]` version table and HTTP timing | ☐ |
