@@ -223,29 +223,75 @@ export async function installAwesomeSkills(
 
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]!;
-      const prefix = chalk.gray(`[${i + 1}/${entries.length}]`);
       const alreadyExists = fs.existsSync(path.join(options.skillsDir, entry.slug));
       if (alreadyExists && !options.force) {
-        // Patch missing scripts/files even when the skill already exists locally.
-        // installFromIndex's patch path only writes files that are absent,
-        // so this is safe to call on every sync without --force.
+        // Count files before patching to detect if any missing files are added
+        const sd = path.join(options.skillsDir, entry.slug, 'scripts');
+        let beforeCount = 0;
+        if (fs.existsSync(sd)) {
+          const walk = (d: string): void => {
+            for (const f of fs.readdirSync(d)) {
+              const fp = path.join(d, f);
+              fs.statSync(fp).isDirectory() ? walk(fp) : beforeCount++;
+            }
+          };
+          walk(sd);
+        }
         installFromIndex(entry, options.skillsDir, false);
-        console.log(
-          `${prefix} ${chalk.gray('–')} ${entry.slug} ${chalk.gray('(already installed, use --force to overwrite)')}`,
-        );
-        result.skipped++;
+        let afterCount = 0;
+        if (fs.existsSync(sd)) {
+          const walk = (d: string): void => {
+            for (const f of fs.readdirSync(d)) {
+              const fp = path.join(d, f);
+              fs.statSync(fp).isDirectory() ? walk(fp) : afterCount++;
+            }
+          };
+          walk(sd);
+        }
+        if (afterCount > beforeCount) {
+          console.log(
+            `  ${chalk.green('✔')} ${chalk.cyan(entry.slug)} ${chalk.gray(`(updated — filled ${afterCount - beforeCount} missing files)`)}`,
+          );
+          result.installed++;
+        } else {
+          result.skipped++;
+        }
       } else {
         try {
           installFromIndex(entry, options.skillsDir, options.force);
-          console.log(`${prefix} ${chalk.green('✔')} ${chalk.cyan(entry.slug)}`);
+          const status = alreadyExists ? 'updated' : 'new';
+          console.log(
+            `  ${chalk.green('✔')} ${chalk.cyan(entry.slug)} ${chalk.gray(`(${status})`)}`,
+          );
           result.installed++;
         } catch (err) {
-          console.log(`${prefix} ${chalk.red('✘')} ${entry.slug} — ${chalk.red((err as Error).message)}`);
+          console.log(`  ${chalk.red('✘')} ${entry.slug} — ${chalk.red((err as Error).message)}`);
           result.failed++;
           result.failedSlugs.push(entry.slug);
         }
       }
     }
+
+    // Delete local skills not in the index (stale/removed from registry)
+    if (!slugFilter && fs.existsSync(options.skillsDir)) {
+      const localSlugs = fs.readdirSync(options.skillsDir).filter(
+        (name) => fs.existsSync(path.join(options.skillsDir, name, 'SKILL.md')),
+      );
+      const indexSlugs = new Set(indexEntries.map((e) => e.slug));
+      for (const slug of localSlugs) {
+        if (!indexSlugs.has(slug)) {
+          const dir = path.join(options.skillsDir, slug);
+          if (options.dryRun) {
+            console.log(`  ${chalk.red('✘')} ${slug} ${chalk.gray('(would delete — removed from registry)')}`);
+          } else {
+            fs.rmSync(dir, { recursive: true });
+            console.log(`  ${chalk.red('✘')} ${slug} ${chalk.gray('(deleted — removed from registry)')}`);
+          }
+          result.deleted++;
+        }
+      }
+    }
+
     return result;
   }
 
@@ -270,7 +316,6 @@ export async function installAwesomeSkills(
 
   for (let i = 0; i < slugs.length; i++) {
     const slug = slugs[i]!;
-    const prefix = chalk.gray(`[${i + 1}/${slugs.length}]`);
     try {
       dbg(debug, `Installing ${slug} from ClaWHub...`);
       const t0 = Date.now();
@@ -279,17 +324,14 @@ export async function installAwesomeSkills(
         force: options.force,
       });
       dbg(debug, `${slug} installed (${Date.now() - t0}ms)`);
-      console.log(`${prefix} ${chalk.green('✔')} ${chalk.cyan(slug)}`);
+      console.log(`  ${chalk.green('✔')} ${chalk.cyan(slug)} ${chalk.gray('(new)')}`);
       result.installed++;
     } catch (err) {
       const msg = (err as Error).message ?? '';
       if (msg.includes('already exists')) {
-        console.log(
-          `${prefix} ${chalk.gray('–')} ${slug} ${chalk.gray('(already installed, use --force to overwrite)')}`,
-        );
         result.skipped++;
       } else {
-        console.log(`${prefix} ${chalk.red('✘')} ${slug} — ${chalk.red(msg)}`);
+        console.log(`  ${chalk.red('✘')} ${slug} — ${chalk.red(msg)}`);
         result.failed++;
         result.failedSlugs.push(slug);
       }
@@ -384,12 +426,17 @@ export async function runSync(options: SyncSkillsOptions): Promise<SyncSkillsRes
     });
     result.awesomeInstalled = awesomeResult.installed;
     result.awesomeSkipped = awesomeResult.skipped;
+    result.awesomeDeleted = awesomeResult.deleted;
+    result.awesomeFailed = awesomeResult.failed;
 
-    console.log(
-      chalk.bold(
-        `\n  Awesome: Installed: ${awesomeResult.installed}  Skipped: ${awesomeResult.skipped}  Failed: ${awesomeResult.failed}`,
-      ),
-    );
+    const p2Parts: string[] = [];
+    if (awesomeResult.installed > 0) p2Parts.push(`${awesomeResult.installed} added`);
+    if (awesomeResult.deleted > 0) p2Parts.push(`${awesomeResult.deleted} deleted`);
+    if (awesomeResult.failed > 0) p2Parts.push(`${awesomeResult.failed} failed`);
+    if (awesomeResult.skipped > 0) p2Parts.push(`${awesomeResult.skipped} unchanged`);
+    if (p2Parts.length > 0) {
+      console.log(chalk.bold(`\n  Phase 2: ${p2Parts.join(', ')}`));
+    }
   } catch (err) {
     console.log(chalk.red(`  Awesome sync failed: ${(err as Error).message}`));
   }
