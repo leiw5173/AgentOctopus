@@ -446,17 +446,13 @@ export async function runSync(options: SyncSkillsOptions): Promise<SyncSkillsRes
       );
       spinner3.succeed('Cloud sync complete');
 
-      if (result.cloudResult.added.length > 0) {
-        console.log(chalk.green(`  Added: ${result.cloudResult.added.join(', ')}`));
-      }
-      if (result.cloudResult.updated.length > 0) {
-        console.log(chalk.cyan(`  Updated: ${result.cloudResult.updated.join(', ')}`));
-      }
-      if (result.cloudResult.skipped.length > 0) {
-        console.log(chalk.gray(`  Skipped: ${result.cloudResult.skipped.join(', ')}`));
-      }
-      if (result.cloudResult.errors.length > 0) {
-        console.log(chalk.red(`  Errors: ${result.cloudResult.errors.join(', ')}`));
+      const p3Parts: string[] = [];
+      if (result.cloudResult.added.length > 0) p3Parts.push(`${result.cloudResult.added.length} added`);
+      if (result.cloudResult.updated.length > 0) p3Parts.push(`${result.cloudResult.updated.length} updated`);
+      if (result.cloudResult.errors.length > 0) p3Parts.push(`${result.cloudResult.errors.length} errors`);
+      if (result.cloudResult.skipped.length > 0) p3Parts.push(`${result.cloudResult.skipped.length} skipped`);
+      if (p3Parts.length > 0) {
+        console.log(`  Cloud (${options.cloudUrl}): ${p3Parts.join(', ')}`);
       }
     } catch (err) {
       spinner3.fail(`Cloud sync failed: ${(err as Error).message}`);
