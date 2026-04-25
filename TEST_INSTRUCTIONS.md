@@ -507,7 +507,7 @@ node apps/cli/dist/index.js sync-awesome --limit 2
 node apps/cli/dist/index.js sync-awesome --limit 2
 ```
 
-**Expected:** Second run shows `Installed: 0  Skipped: 2  Failed: 0` and each line shows `(already installed, use --force to overwrite)`.
+**Expected:** Second run produces no per-skill output lines for unchanged skills — they are counted silently. The unified footer shows `Sync: N unchanged` (e.g. `Sync: 2 unchanged`). Use `--force` to overwrite already-installed skills.
 
 ---
 
