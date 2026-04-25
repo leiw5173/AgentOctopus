@@ -459,13 +459,23 @@ export async function runSync(options: SyncSkillsOptions): Promise<SyncSkillsRes
     }
   }
 
-  // Summary
-  const totalUpdated = result.skillsUpdated.length + result.awesomeInstalled + (result.cloudResult?.added.length ?? 0) + (result.cloudResult?.updated.length ?? 0);
-  if (totalUpdated > 0) {
-    const msg = options.cloudUrl
-      ? `Updated ${totalUpdated} skill(s). Restart the server to pick up changes.`
-      : `Updated ${totalUpdated} skill(s).`;
-    console.log(chalk.yellow(`\n  ${msg}`));
+  // Unified footer
+  const totalAdded = result.awesomeInstalled + (result.cloudResult?.added.length ?? 0);
+  const totalUpdated = result.skillsUpdated.length + (result.cloudResult?.updated.length ?? 0);
+  const totalDeleted = result.awesomeDeleted;
+  const totalUnchanged = result.awesomeSkipped + (result.cloudResult?.skipped.length ?? 0);
+  const totalFailed = result.awesomeFailed + (result.cloudResult?.errors.length ?? 0);
+
+  const footerParts: string[] = [];
+  if (totalAdded > 0) footerParts.push(`${chalk.green(totalAdded)} added`);
+  if (totalUpdated > 0) footerParts.push(`${chalk.cyan(totalUpdated)} updated`);
+  if (totalDeleted > 0) footerParts.push(`${chalk.red(totalDeleted)} deleted`);
+  if (totalUnchanged > 0) footerParts.push(`${chalk.gray(totalUnchanged)} unchanged`);
+  if (totalFailed > 0) footerParts.push(`${chalk.red(totalFailed)} failed`);
+
+  if (footerParts.length > 0) {
+    console.log(chalk.bold(`\n${chalk.gray('━━━━━━━━━━━━━━━━━━━━━━━━━━━━')}`));
+    console.log(chalk.bold(`Sync: ${footerParts.join(', ')}`));
   }
 
   return result;
