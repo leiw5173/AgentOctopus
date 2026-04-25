@@ -226,28 +226,22 @@ export async function installAwesomeSkills(
       const alreadyExists = fs.existsSync(path.join(options.skillsDir, entry.slug));
       if (alreadyExists && !options.force) {
         // Count files before patching to detect if any missing files are added
-        const sd = path.join(options.skillsDir, entry.slug, 'scripts');
-        let beforeCount = 0;
-        if (fs.existsSync(sd)) {
+        const skillDir = path.join(options.skillsDir, entry.slug);
+        const countFiles = (dir: string): number => {
+          if (!fs.existsSync(dir)) return 0;
+          let n = 0;
           const walk = (d: string): void => {
             for (const f of fs.readdirSync(d)) {
               const fp = path.join(d, f);
-              fs.statSync(fp).isDirectory() ? walk(fp) : beforeCount++;
+              fs.statSync(fp).isDirectory() ? walk(fp) : n++;
             }
           };
-          walk(sd);
-        }
+          walk(dir);
+          return n;
+        };
+        const beforeCount = countFiles(skillDir);
         installFromIndex(entry, options.skillsDir, false);
-        let afterCount = 0;
-        if (fs.existsSync(sd)) {
-          const walk = (d: string): void => {
-            for (const f of fs.readdirSync(d)) {
-              const fp = path.join(d, f);
-              fs.statSync(fp).isDirectory() ? walk(fp) : afterCount++;
-            }
-          };
-          walk(sd);
-        }
+        const afterCount = countFiles(skillDir);
         if (afterCount > beforeCount) {
           console.log(
             `  ${chalk.green('✔')} ${chalk.cyan(entry.slug)} ${chalk.gray(`(updated — filled ${afterCount - beforeCount} missing files)`)}`,
@@ -286,8 +280,8 @@ export async function installAwesomeSkills(
           } else {
             fs.rmSync(dir, { recursive: true });
             console.log(`  ${chalk.red('✘')} ${slug} ${chalk.gray('(deleted — removed from registry)')}`);
+            result.deleted++;
           }
-          result.deleted++;
         }
       }
     }
