@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { checkSkillUpdates, applySkillUpdates } from '../src/sync-skills.js';
+import { checkSkillUpdates, applySkillUpdates, installAwesomeSkills } from '../src/sync-skills.js';
 import type { SkillUpdate } from '../src/sync-skills.js';
 import { gzipSync } from 'zlib';
 
@@ -181,5 +181,58 @@ describe('applySkillUpdates', () => {
 
     const updated = applySkillUpdates(updates, tmpDir, []);
     expect(updated).toEqual([]);
+  });
+});
+
+describe('installAwesomeSkills — deleted', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'octopus-sync-del-'));
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it('deletes local skills not present in the index', async () => {
+    // Create a stale local skill
+    const staleDir = path.join(tmpDir, 'stale-skill');
+    fs.mkdirSync(staleDir, { recursive: true });
+    fs.writeFileSync(path.join(staleDir, 'SKILL.md'), '---\nname: stale-skill\nversion: 1.0.0\n---');
+
+    // Index with only one skill — NOT stale-skill
+    const skills = [
+      {
+        slug: 'good-skill',
+        name: 'Good Skill',
+        description: 'desc',
+        version: '1.0.0',
+        author: 'alice',
+        skillMd: '---\nname: good-skill\nversion: 1.0.0\n---\n\n# Good',
+        metaJson: '{}',
+        invokeScript: null,
+        scripts: null,
+        files: null,
+      },
+    ];
+    const gz = makeIndexGz(skills);
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength),
+    } as unknown as Response);
+
+    const result = await installAwesomeSkills({
+      skillsDir: tmpDir,
+      force: false,
+    });
+
+    expect(result.deleted).toBe(1);
+    expect(fs.existsSync(staleDir)).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'good-skill'))).toBe(true);
   });
 });
