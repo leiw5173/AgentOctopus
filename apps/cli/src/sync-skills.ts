@@ -43,6 +43,8 @@ export interface SyncSkillsResult {
   /** Phase 2 results */
   awesomeInstalled: number;
   awesomeSkipped: number;
+  awesomeDeleted: number;
+  awesomeFailed: number;
   /** Phase 3 results */
   cloudResult: SyncResult | null;
 }
@@ -161,6 +163,7 @@ export function applySkillUpdates(
 export interface AwesomeInstallResult {
   installed: number;
   skipped: number;
+  deleted: number;
   failed: number;
   failedSlugs: string[];
 }
@@ -181,7 +184,7 @@ export async function installAwesomeSkills(
   },
 ): Promise<AwesomeInstallResult> {
   const debug = options.debug ?? false;
-  const result: AwesomeInstallResult = { installed: 0, skipped: 0, failed: 0, failedSlugs: [] };
+  const result: AwesomeInstallResult = { installed: 0, skipped: 0, deleted: 0, failed: 0, failedSlugs: [] };
 
   // Step 1: resolve slug filter for --category
   let slugFilter: Set<string> | null = null;
@@ -321,6 +324,8 @@ export async function runSync(options: SyncSkillsOptions): Promise<SyncSkillsRes
     skillsUpdated: [],
     awesomeInstalled: 0,
     awesomeSkipped: 0,
+    awesomeDeleted: 0,
+    awesomeFailed: 0,
     cloudResult: null,
   };
 
