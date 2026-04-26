@@ -106,8 +106,25 @@ export class Executor {
       return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
     }
 
-    const adapter = this.pickAdapter(skill);
-    dbg(debug, `Adapter: ${skill.manifest.adapter}`);
+    let adapter = this.pickAdapter(skill);
+
+    // Infer subprocess adapter for skills that have scripts but no endpoint declared.
+    // Many community skills omit the adapter field (defaulting to http) but ship
+    // scripts/ that should be invoked as subprocess, not LLM-guided curl.
+    if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && skill.dirPath) {
+      const scriptsDir = path.join(skill.dirPath, 'scripts');
+      try {
+        const hasScripts = fs.existsSync(scriptsDir) && fs.readdirSync(scriptsDir).length > 0;
+        if (hasScripts) {
+          adapter = this.subprocess;
+        }
+      } catch {
+        // scripts/ not readable — stay with http adapter
+      }
+    }
+
+    const effectiveAdapterName = adapter === this.subprocess ? 'subprocess' : adapter === this.mcp ? 'mcp' : 'http';
+    dbg(debug, `Adapter: ${effectiveAdapterName}${effectiveAdapterName !== skill.manifest.adapter ? ` (manifest: ${skill.manifest.adapter})` : ''}`);
     dbg(debug, `Input payload: ${JSON.stringify(input).slice(0, 200)}`);
     const startTime = Date.now();
     // Lazily load SKILL.md body from disk — only for the selected skill, not at startup
@@ -115,7 +132,7 @@ export class Executor {
     let adapterResult: AdapterResult;
     try {
       // For subprocess skills, check if we should use LLM-guided execution
-      if (skill.manifest.adapter === 'subprocess' && this.chatClient) {
+      if (adapter === this.subprocess && this.chatClient) {
         adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter, instructions);
       } else if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && this.chatClient) {
         // HTTP skill with no endpoint — use LLM-guided curl execution
@@ -318,7 +335,19 @@ export class Executor {
     // the LLM-guided curl path will always fail. Return immediately with a helpful error.
     const hasHttpUrl = /https?:\/\//.test(instructions);
     const hasLocalScripts = /scripts\/[\w.-]+\.(?:py|js|sh|ts)/.test(instructions);
-    if (hasLocalScripts && !hasHttpUrl) {
+
+    // Also check for actual script files on disk — some skills have scripts/
+    // but don't reference them explicitly in SKILL.md.
+    let hasScriptFiles = false;
+    try {
+      const scriptsDir = path.join(skill.dirPath, 'scripts');
+      hasScriptFiles = fs.existsSync(scriptsDir)
+        && fs.readdirSync(scriptsDir).some(f => /\.(?:py|js|sh|ts)$/.test(f));
+    } catch {
+      // not readable
+    }
+
+    if ((hasLocalScripts || hasScriptFiles) && !hasHttpUrl) {
       const skillName = skill.manifest.name;
       return {
         success: false,
@@ -329,7 +358,6 @@ export class Executor {
     const query = (input.query ?? input.text ?? '') as string;
 
     // Rewrite OpenClaw workspace paths in instructions (same as subprocess path)
-    const fs = await import('fs');
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
     const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
     const rewrittenInstructions = instructions.replace(openclawPathPattern, (match) => {
