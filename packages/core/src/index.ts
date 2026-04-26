@@ -3,3 +3,10 @@ export { Executor, type ExecutionResult, type CredentialMissingResult, type Bina
 export { createChatClient, createEmbedClient, skillToText, type ChatClient, type EmbedClient, type LLMConfig } from './llm-client.js';
 export { Planner, type ExecutionPlan, type PlanStep, type PlanStepResult, type PlanExecutionResult } from './planner.js';
 export { dbg } from './debug.js';
+
+export {
+  loadConfig, getConfig, resetConfig,
+  getConfigDir, getConfigPath, getEnvPath,
+  saveConfigFile, saveEnvFile,
+} from './config-resolver.js';
+export type { ResolvedConfig, OctopusConfigV2 } from './config-types.js';
