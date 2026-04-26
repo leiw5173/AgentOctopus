@@ -9,7 +9,7 @@ import {
   type GistContent,
 } from '@agentoctopus/registry';
 import type { RatingEntry, RatingsStore } from '@agentoctopus/registry';
-import { loadOctopusConfig, saveOctopusConfig } from './config.js';
+import { loadConfig, saveConfigFile, getConfigPath } from '@agentoctopus/core';
 
 export interface RatingSyncOptions {
   pull?: boolean;
@@ -21,11 +21,7 @@ export interface RatingSyncOptions {
 }
 
 export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
-  const config = loadOctopusConfig();
-  if (!config) {
-    console.error(chalk.red('No AgentOctopus config found. Run `octopus onboard` first.'));
-    return;
-  }
+  const config = loadConfig();
 
   const githubToken = process.env.GITHUB_TOKEN;
   if (!githubToken) {
@@ -38,8 +34,10 @@ export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
     const spinner = ora('Setting up GitHub Gist for rating sync...').start();
     try {
       const gistId = await findOrCreateGist(githubToken);
-      config.gistId = gistId;
-      saveOctopusConfig(config);
+      const octoPath = getConfigPath();
+      const raw = fs.existsSync(octoPath) ? JSON.parse(fs.readFileSync(octoPath, 'utf8')) : { version: 2 };
+      raw.rating = { ...(raw.rating || {}), gistId };
+      saveConfigFile(raw);
       spinner.succeed(`Gist setup complete. ID: ${gistId}`);
     } catch (err) {
       spinner.fail(`Gist setup failed: ${(err as Error).message}`);
@@ -47,21 +45,21 @@ export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
     return;
   }
 
-  if (!config.gistId) {
+  if (!config.rating.gistId) {
     console.error(chalk.red('No gist ID configured. Run `octopus sync --setup-gist` first.'));
     return;
   }
 
   // Load local ratings
-  const localRatings: RatingsStore = fs.existsSync(config.ratingsPath)
-    ? JSON.parse(fs.readFileSync(config.ratingsPath, 'utf-8'))
+  const localRatings: RatingsStore = fs.existsSync(config.registry.ratingsPath)
+    ? JSON.parse(fs.readFileSync(config.registry.ratingsPath, 'utf-8'))
     : {};
 
   // Pull
   if (options.pull || (!options.push && !options.pull)) {
     const spinner = ora('Pulling ratings from GitHub Gist...').start();
     try {
-      const cloudContent = await pullFromGist(config.gistId, githubToken);
+      const cloudContent = await pullFromGist(config.rating.gistId, githubToken);
       const cloudRatings = cloudContent.ratings;
 
       if (options.force) {
@@ -69,7 +67,7 @@ export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
           spinner.info('Dry run: would overwrite local ratings with cloud data');
           printDiff(localRatings, cloudRatings);
         } else {
-          fs.writeFileSync(config.ratingsPath, JSON.stringify(cloudRatings, null, 2), 'utf-8');
+          fs.writeFileSync(config.registry.ratingsPath, JSON.stringify(cloudRatings, null, 2), 'utf-8');
           spinner.succeed('Overwrote local ratings with cloud data (force pull)');
         }
       } else {
@@ -98,7 +96,7 @@ export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
           spinner.info('Dry run: would merge ratings from cloud');
           printDiff(localRatings, merged);
         } else {
-          fs.writeFileSync(config.ratingsPath, JSON.stringify(merged, null, 2), 'utf-8');
+          fs.writeFileSync(config.registry.ratingsPath, JSON.stringify(merged, null, 2), 'utf-8');
           spinner.succeed(`Synced ${allSkills.size} skills. ${updated} updated from cloud.`);
         }
       }
@@ -113,7 +111,7 @@ export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
     const spinner = ora('Pushing ratings to GitHub Gist...').start();
     try {
       const currentRatings: RatingsStore = JSON.parse(
-        fs.readFileSync(config.ratingsPath, 'utf-8'),
+        fs.readFileSync(config.registry.ratingsPath, 'utf-8'),
       );
       const feedbackLog: Record<string, any> = {};
 
@@ -136,7 +134,7 @@ export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
       };
 
       if (!options.dryRun) {
-        await pushToGist(config.gistId, githubToken, content);
+        await pushToGist(config.rating.gistId, githubToken, content);
         spinner.succeed('Pushed ratings to GitHub Gist');
       } else {
         spinner.info('Dry run: would push ratings to GitHub Gist');
