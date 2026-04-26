@@ -106,7 +106,7 @@ export function loadConfig(): ResolvedConfig {
   };
 
   if (raw && raw.version !== 2) {
-    try { saveConfigFile({ version: 2, ...resolved }); } catch { /* non-fatal */ }
+    try { saveConfigFile(configObj as unknown as OctopusConfigV2); } catch { /* non-fatal */ }
   }
 
   _config = Object.freeze(resolved) as ResolvedConfig;
@@ -114,8 +114,7 @@ export function loadConfig(): ResolvedConfig {
 }
 
 export function getConfig(): ResolvedConfig {
-  if (!_config) throw new Error('Config not loaded. Call loadConfig() first.');
-  return _config;
+  return _config ?? loadConfig();
 }
 
 export function resetConfig(): void {

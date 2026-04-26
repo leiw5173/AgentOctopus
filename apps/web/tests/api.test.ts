@@ -20,7 +20,19 @@ vi.mock('@agentoctopus/core', () => ({
   })),
   createChatClient: vi.fn().mockReturnValue({
     chat: vi.fn().mockResolvedValue('mock direct answer')
-  })
+  }),
+  loadConfig: vi.fn().mockReturnValue({
+    llm: { provider: 'openai' as const, model: 'gpt-4o', apiKey: '', baseUrl: 'https://api.openai.com/v1' },
+    embed: { provider: 'openai' as const, model: 'text-embedding-3-small', apiKey: '', baseUrl: '' },
+    rerank: { model: 'gpt-4o-mini' },
+    gateway: { port: 3002, corsOrigins: ['*'], cloudUrl: null as string | null, syncOnStartup: true },
+    registry: { skillsDir: './registry/skills', ratingsPath: './registry/ratings.json', noCache: false },
+    execution: { timeoutMs: 30000, maxRetries: 3, timing: false },
+    deploy: { mode: 'local' as const, root: null as string | null },
+    auth: { enabled: true, apiKeysPath: null as string | null, rateLimitEnabled: true },
+    rating: { feedbackSharing: true, gistId: null as string | null },
+    slack: { port: 3001 },
+  }),
 }));
 
 // Mock @agentoctopus/registry
