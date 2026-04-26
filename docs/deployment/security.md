@@ -36,21 +36,24 @@ Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Res
 
 ## Audit logging
 
-All requests are logged to `logs/audit.jsonl` with:
+All requests are logged to `<deploy.root>/logs/audit.jsonl` (defaults to `./logs`) with:
 
 - Timestamp, HTTP method, path, IP address
 - Masked API key, user ID, tier
 - Status code, response time, query content
 
-## Environment variables
+## Configuration
 
-| Variable | Default | Description |
-|---|---|---|
-| `AUTH_ENABLED` | `true` | Enable/disable API key authentication |
-| `RATE_LIMIT_ENABLED` | `true` | Enable/disable rate limiting |
-| `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
-| `API_KEYS_PATH` | `./api-keys.json` | Path to API keys store |
-| `AUDIT_LOG_DIR` | `./logs` | Directory for audit log files |
+Security settings are configured in `~/.agentoctopus/octopus.json` under the `auth` and `gateway` sections:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `auth.enabled` | boolean | `true` | Enable/disable API key authentication |
+| `auth.rateLimitEnabled` | boolean | `true` | Enable/disable rate limiting |
+| `auth.apiKeysPath` | string \| null | `null` | Path to API keys store |
+| `gateway.corsOrigins` | string[] | `["*"]` | Allowed CORS origins |
+
+See [Configuration](../getting-started/configuration.md) for all available settings.
 
 ## Security considerations
 
