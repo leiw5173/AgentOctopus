@@ -3,7 +3,7 @@ const { App } = boltPkg;
 type AppOptions = ConstructorParameters<typeof App>[0];
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
-import { type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
+import { getConfig, type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
@@ -118,7 +118,7 @@ export async function startSlackGateway(options: SlackGatewayOptions): Promise<v
     });
   });
 
-  const port = Number(process.env.SLACK_PORT ?? 3001);
+  const port = getConfig().slack.port;
   await app.start(port);
   console.log(`[Slack Gateway] Listening on port ${port}`);
 }
