@@ -181,18 +181,16 @@ Current real skills (all free APIs, no keys):
 
 ### Environment
 
-The web app symlinks `apps/web/.env → ../../.env`. Key variables:
+Configuration is loaded from `~/.agentoctopus/octopus.json` (v2 format) with `${ENV_VAR}` secrets resolved from `~/.agentoctopus/.env`. See `packages/core/src/config-resolver.ts`.
 
-```
-EMBED_PROVIDER / EMBED_MODEL / EMBED_API_KEY / EMBED_BASE_URL  # for embedding
-RERANK_MODEL                                                    # chat model for re-ranking
-LLM_PROVIDER / LLM_MODEL / OPENAI_API_KEY / OPENAI_BASE_URL   # fallback direct-answer LLM
-DEPLOY_MODE                                                     # "cloud" or "local" (default: local)
-CLOUD_URL                                                       # cloud instance URL for skill sync (local mode)
-SYNC_ON_STARTUP                                                 # auto-sync on boot (default: true)
-```
+Key config sections:
+- `llm` — provider, model, apiKey, baseUrl
+- `embed` — provider, model, apiKey, baseUrl
+- `rerank` — model
+- `deploy` — mode ("local" | "cloud"), root
+- `gateway` — port, corsOrigins, cloudUrl, syncOnStartup
 
-Embedding and re-ranking can use a different provider/endpoint than the main LLM. The web `initOctopus()` in `apps/web/src/app/api/ask/route.ts` is a singleton — restart the server after changing skills or `.env`.
+Embedding and re-ranking can use a different provider/endpoint than the main LLM. The web `initOctopus()` in `apps/web/src/app/api/ask/route.ts` is a singleton — restart the server after changing skills or config.
 
 ### Next.js specifics
 

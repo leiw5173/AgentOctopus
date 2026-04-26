@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { Router, Executor, createChatClient, type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, loadConfig, type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
 import { SkillRegistry } from '@agentoctopus/registry';
 import path from 'path';
 
@@ -25,26 +25,27 @@ let chatClient: ReturnType<typeof createChatClient>;
 
 async function initOctopus() {
   if (!isInitialized) {
+    const config = loadConfig();
+
     await registry.load();
 
     const chatConfig = {
-      provider: (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') ?? 'openai',
-      model: process.env.LLM_MODEL ?? 'gpt-4o',
-      apiKey: process.env.OPENAI_API_KEY ?? process.env.GEMINI_API_KEY,
-      baseUrl: process.env.OPENAI_BASE_URL ?? process.env.OLLAMA_BASE_URL,
+      provider: config.llm.provider,
+      model: config.llm.model,
+      apiKey: config.llm.apiKey || undefined,
+      baseUrl: config.llm.baseUrl,
     };
 
     const embedConfig = {
-      provider: (process.env.EMBED_PROVIDER as 'openai' | 'gemini' | 'ollama') ?? chatConfig.provider,
-      model: process.env.EMBED_MODEL ?? 'text-embedding-3-small',
-      apiKey: process.env.EMBED_API_KEY ?? chatConfig.apiKey,
-      baseUrl: process.env.EMBED_BASE_URL ?? chatConfig.baseUrl,
+      provider: config.embed.provider,
+      model: config.embed.model,
+      apiKey: config.embed.apiKey || chatConfig.apiKey,
+      baseUrl: config.embed.baseUrl || chatConfig.baseUrl,
     };
 
-    // Use embed provider for chat re-ranking if the primary chat endpoint is unreachable
     const rerankConfig = {
       ...embedConfig,
-      model: process.env.RERANK_MODEL ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
+      model: config.rerank.model,
     };
 
     router = new Router(rerankConfig, embedConfig);

@@ -110,6 +110,7 @@ export interface LoadedSkill {
 export class SkillRegistry {
   private skills: Map<string, LoadedSkill> = new Map();
   private ratingStore: RatingStore;
+  public noCache = false;
 
   constructor(
     private skillsDir: string,
@@ -172,7 +173,7 @@ export class SkillRegistry {
     const files = await glob(pattern);
 
     // Check file-based cache
-    if (!process.env.OCTOPUS_NO_CACHE) {
+    if (!this.noCache) {
       const hash = this.computeFilesHash(files);
       try {
         const cacheRaw = fs.readFileSync(this.cachePath(), 'utf-8');

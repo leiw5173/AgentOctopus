@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import type { ApiKeyTier } from './auth-middleware.js';
+import { getConfig } from '@agentoctopus/core';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -78,7 +79,7 @@ function getLimit(req: Request): number {
  */
 export function rateLimiter(req: Request, res: Response, next: NextFunction): void {
   // Skip if rate limiting is disabled
-  if (process.env.RATE_LIMIT_ENABLED === 'false') {
+  if (!getConfig().auth.rateLimitEnabled) {
     next();
     return;
   }

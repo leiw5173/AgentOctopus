@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
+import { getConfig } from '@agentoctopus/core';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -43,8 +44,9 @@ let _storePath: string = '';
 
 function getStorePath(): string {
   if (_storePath) return _storePath;
-  const root = process.env.OCTOPUS_ROOT ?? process.cwd();
-  _storePath = process.env.API_KEYS_PATH ?? path.join(root, 'api-keys.json');
+  const config = getConfig();
+  const root = config.deploy.root ?? process.cwd();
+  _storePath = config.auth.apiKeysPath ?? path.join(root, 'api-keys.json');
   return _storePath;
 }
 
@@ -205,7 +207,7 @@ const PUBLIC_PATHS = ['/health', '/register'];
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   // Skip auth if disabled
-  if (process.env.AUTH_ENABLED === 'false') {
+  if (!getConfig().auth.enabled) {
     next();
     return;
   }

@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
-import { loadOctopusConfig, saveOctopusConfig, getDefaultHome } from './config.js';
+import { saveConfigFile, saveEnvFile, getConfigPath, type OctopusConfigV2 } from '@agentoctopus/core';
 
 interface OpenClawAuthProfiles {
   version: number;
@@ -122,45 +122,35 @@ export async function connectOpenClaw(): Promise<void> {
   console.log(chalk.gray(`    Model    : ${extracted.model}`));
   console.log(chalk.gray(`    API Key  : ${extracted.apiKey.slice(0, 8)}...\n`));
 
-  const existing = loadOctopusConfig();
-  const skillsDir = existing?.skillsDir ?? path.join(getDefaultHome(), 'skills');
-  const ratingsPath = existing?.ratingsPath ?? path.join(getDefaultHome(), 'ratings.json');
-  const credentials = existing?.credentials ?? {};
+  const v2: OctopusConfigV2 = { version: 2 };
 
-  credentials['LLM_PROVIDER'] = extracted.provider;
-  credentials['LLM_MODEL'] = extracted.model;
-  credentials['OPENAI_API_KEY'] = extracted.apiKey;
-  credentials['OPENAI_BASE_URL'] = extracted.baseUrl;
+  v2.llm = {
+    provider: extracted.provider,
+    model: extracted.model,
+    apiKey: '${OPENAI_API_KEY}',
+    baseUrl: extracted.baseUrl,
+  };
 
-  // Only write EMBED_* keys for providers that support embedding.
-  // OpenRouter has no embedding endpoint — omitting EMBED_* triggers LLM-only routing.
+  saveEnvFile(`OPENAI_API_KEY=${extracted.apiKey}\n`);
+
   const supportsEmbedding = extracted.rawProvider !== 'openrouter';
   if (supportsEmbedding) {
-    const embedModelDefaults: Record<string, string> = {
-      openai: 'text-embedding-3-small',
-      gemini: 'text-embedding-004',
-      ollama: 'nomic-embed-text',
+    const embedModelDefaults: Record<string, string> = { openai: 'text-embedding-3-small', gemini: 'text-embedding-004', ollama: 'nomic-embed-text' };
+    v2.embed = {
+      provider: extracted.provider,
+      model: embedModelDefaults[extracted.rawProvider] ?? 'text-embedding-3-small',
+      apiKey: '${OPENAI_API_KEY}',
+      baseUrl: extracted.baseUrl,
     };
-    credentials['EMBED_PROVIDER'] = extracted.provider;
-    credentials['EMBED_MODEL'] = embedModelDefaults[extracted.rawProvider] ?? 'text-embedding-3-small';
-    credentials['EMBED_API_KEY'] = extracted.apiKey;
-    credentials['EMBED_BASE_URL'] = extracted.baseUrl;
-  } else {
-    // Remove any stale EMBED_* keys from a prior connect run
-    delete credentials['EMBED_PROVIDER'];
-    delete credentials['EMBED_MODEL'];
-    delete credentials['EMBED_API_KEY'];
-    delete credentials['EMBED_BASE_URL'];
   }
 
-  saveOctopusConfig({ skillsDir, ratingsPath, credentials });
+  saveConfigFile(v2);
 
+  console.log(chalk.green('  AgentOctopus configured with your OpenClaw LLM settings.'));
   const routingMode = supportsEmbedding
     ? chalk.gray('  Routing mode: Embedding + LLM re-rank')
     : chalk.yellow('  Routing mode: LLM-only (OpenRouter does not support embeddings)');
-
-  console.log(chalk.green('  AgentOctopus configured with your OpenClaw LLM settings.'));
   console.log(routingMode);
-  console.log(chalk.gray(`  Config saved to: ${path.join(getDefaultHome(), 'octopus.json')}\n`));
+  console.log(chalk.gray(`  Config saved to: ${getConfigPath()}\n`));
   console.log(chalk.cyan('  You can now run: octopus ask "translate hello to French"\n'));
 }

@@ -14,9 +14,11 @@ docker compose --profile cloud up --build
 Gateway only, syncs skills from cloud:
 
 ```bash
-CLOUD_URL=https://your-cloud-instance:3002 docker compose --profile local up --build
+docker compose --profile local up --build
 # → Gateway on http://localhost:3002
 ```
+
+Set `gateway.cloudUrl` in `~/.agentoctopus/octopus.json` or mount the config directory.
 
 ## Custom Dockerfile
 
@@ -29,7 +31,7 @@ CMD ["agentoctopus-gateway"]
 
 ```bash
 docker build -t agentoctopus-gateway .
-docker run -p 3002:3002 --env-file .env agentoctopus-gateway
+docker run -p 3002:3002 -v ~/.agentoctopus:/root/.agentoctopus agentoctopus-gateway
 ```
 
 ## Other process managers

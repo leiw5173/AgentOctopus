@@ -10,15 +10,15 @@ Interactive setup wizard. Configures LLM provider, API keys, and copies built-in
 
 ### `octopus connect <target>`
 
-Import configuration from a platform (e.g., `openclaw`). Shares LLM config so you don't re-enter API keys.
+Import configuration from a platform (e.g., `openclaw`). Writes LLM config to `octopus.json` v2 format.
 
 ### `octopus config set <key> <value>`
 
-Write a credential to `~/.agentoctopus/octopus.json` and export it into the current session.
+Write a credential to `~/.agentoctopus/.env` and update the `${VAR}` reference in `~/.agentoctopus/octopus.json`.
 
 ### `octopus config list`
 
-List all stored credentials (values masked).
+List all stored credentials from `octopus.json` (values masked).
 
 ## Query
 
@@ -114,6 +114,6 @@ Check for and install package updates.
 
 ### `octopus start`
 
-Start the agent gateway on `http://localhost:3002` (or `AGENT_GATEWAY_PORT`).
+Start the agent gateway on `http://localhost:3002` (port configured via `gateway.port` in `~/.agentoctopus/octopus.json`).
 
 See also: [REST API](rest-api.md) | [Configuration](../getting-started/configuration.md)

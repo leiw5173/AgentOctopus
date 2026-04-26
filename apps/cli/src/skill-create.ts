@@ -1,8 +1,9 @@
 import { input, select, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { loadOctopusConfig } from './config.js';
+import { loadConfig, getConfig } from '@agentoctopus/core';
 
 // ── Template scaffold ─────────────────────────────────────────────────────────
 
@@ -90,10 +91,11 @@ output_schema:
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function resolveSkillsDir(): string {
-  if (process.env.REGISTRY_PATH) return process.env.REGISTRY_PATH;
-  const config = loadOctopusConfig();
-  if (config?.skillsDir) return config.skillsDir;
-  return path.join(process.cwd(), 'registry', 'skills');
+  loadConfig();
+  const registryDir = getConfig().registry.skillsDir;
+  if (registryDir !== './registry/skills') return registryDir;
+  // Fall back to ~/.agentoctopus/skills for default projects
+  return path.join(os.homedir(), '.agentoctopus', 'skills');
 }
 
 function writeSkillFiles(skillDir: string, skillMd: string, writeScript: boolean): void {
@@ -177,12 +179,12 @@ export async function runSkillCreateWizard(skillsDir?: string): Promise<void> {
   let llmChat: (systemPrompt: string, userMessage: string) => Promise<string>;
   try {
     const { createChatClient } = await import('@agentoctopus/core');
-    const llmProvider = (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') || 'openai';
+    const c = getConfig();
     const llmConfig = {
-      provider: llmProvider,
-      model: process.env.LLM_MODEL || 'gpt-4o-mini',
-      apiKey: process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY,
-      baseUrl: llmProvider === 'openai' ? process.env.OPENAI_BASE_URL : process.env.OLLAMA_BASE_URL,
+      provider: c.llm.provider,
+      model: c.llm.model,
+      apiKey: c.llm.apiKey || undefined,
+      baseUrl: c.llm.baseUrl,
     };
     const chatClient = createChatClient(llmConfig);
     llmChat = (systemPrompt, userMessage) => chatClient.chat(systemPrompt, userMessage);

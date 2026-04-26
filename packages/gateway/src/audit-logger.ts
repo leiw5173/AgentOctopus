@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { Request, Response, NextFunction } from 'express';
+import { getConfig } from '@agentoctopus/core';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -25,8 +26,9 @@ let _writeStream: fs.WriteStream | null = null;
 
 function getLogDir(): string {
   if (_logDir) return _logDir;
-  const root = process.env.OCTOPUS_ROOT ?? process.cwd();
-  _logDir = process.env.AUDIT_LOG_DIR ?? path.join(root, 'logs');
+  const config = getConfig();
+  const root = config.deploy.root ?? process.cwd();
+  _logDir = path.join(root, 'logs');
   return _logDir;
 }
 

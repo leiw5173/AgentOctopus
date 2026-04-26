@@ -34,7 +34,7 @@ AgentOctopus/
 │   └── web/           # Next.js web UI + REST API
 ├── packages/
 │   ├── agentoctopus/  # Umbrella package — re-exports everything
-│   ├── core/          # Router + Executor + Planner + LLM client
+│   ├── core/          # Router + Executor + Planner + LLM client + ConfigResolver
 │   ├── registry/      # Skill manifest loader + rating store
 │   ├── adapters/      # HTTP, MCP stdio, subprocess adapters
 │   └── gateway/       # IM bots + agent protocol + security

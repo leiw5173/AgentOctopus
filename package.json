@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Intelligent routing layer that connects user needs to Skills and MCPs without installation",
-  "packageManager": "pnpm@9.0.0",
+  "packageManager": "pnpm@10.33.2",
   "workspaces": [
     "packages/*",
     "apps/*"
