@@ -37,6 +37,7 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   }
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
+  registry.noCache = config.registry.noCache;
   await registry.load();
 
   const chatConfig: LLMConfig = {

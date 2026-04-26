@@ -167,6 +167,7 @@ async function bootstrap() {
     : config.registry.ratingsPath;
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
+  registry.noCache = config.registry.noCache;
   await registry.load();
 
   const chatConfig: LLMConfig = {
