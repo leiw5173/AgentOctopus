@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "@agentoctopus/core": "workspace:*",
     "@agentoctopus/registry": "workspace:*"
   },
   "devDependencies": {
