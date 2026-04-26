@@ -2,7 +2,6 @@ import * as cp from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { LoadedSkill } from '@agentoctopus/registry';
-import { getConfig } from '@agentoctopus/core';
 import type { Adapter, AdapterResult } from './adapter.js';
 
 /** Read the SKILL.md body (below the frontmatter) without adding a gray-matter dependency. */
@@ -89,6 +88,7 @@ function parseScriptReference(instructions: string, scriptsDir: string): { scrip
 
 /** Env vars always passed through to subprocess skills. */
 const SANDBOX_PASSTHROUGH_VARS = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM'];
+const SKILL_EXEC_TIMEOUT_MS = parseInt(process.env.SKILL_EXEC_TIMEOUT_MS ?? '30000', 10);
 
 export class SubprocessAdapter implements Adapter {
   async invoke(skill: LoadedSkill, input: Record<string, unknown>): Promise<AdapterResult> {
@@ -129,8 +129,8 @@ export class SubprocessAdapter implements Adapter {
 
       const killTimer = setTimeout(() => {
         child.kill('SIGTERM');
-        resolve({ success: false, error: `Skill timed out after ${getConfig().execution.timeoutMs}ms` });
-      }, getConfig().execution.timeoutMs);
+        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms` });
+      }, SKILL_EXEC_TIMEOUT_MS);
 
       let stdout = '';
       let stderr = '';
