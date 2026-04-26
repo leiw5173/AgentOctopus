@@ -90,7 +90,7 @@ export function loadConfig(): ResolvedConfig {
     configObj = migrateV1ToV2(raw) as unknown as Record<string, unknown>;
   }
 
-  const parsed = OctopusConfigV2Schema.parse(configObj) as Record<string, Record<string, unknown> | undefined>;
+  const parsed = OctopusConfigV2Schema.parse(configObj) as unknown as Record<string, Record<string, unknown> | undefined>;
 
   const resolved: ResolvedConfig = {
     llm: resolveAllEnvRefs(mergeSection(LLMConfigSchema, parsed.llm)),
