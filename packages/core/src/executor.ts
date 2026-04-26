@@ -5,10 +5,9 @@ import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapte
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
+import { getConfig } from './config-resolver.js';
 import fs from 'fs';
 import path from 'path';
-
-const SKILL_EXEC_TIMEOUT_MS = parseInt(process.env.SKILL_EXEC_TIMEOUT_MS ?? '30000', 10);
 
 const SANDBOX_PASSTHROUGH_VARS = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM'];
 
@@ -274,8 +273,8 @@ export class Executor {
 
       const killTimer = setTimeout(() => {
         child.kill('SIGTERM');
-        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms: ${trimmedCommand}` });
-      }, SKILL_EXEC_TIMEOUT_MS);
+        resolve({ success: false, error: `Skill timed out after ${getConfig().execution.timeoutMs}ms: ${trimmedCommand}` });
+      }, getConfig().execution.timeoutMs);
 
       let stdout = '';
       let stderr = '';
@@ -395,8 +394,8 @@ export class Executor {
 
       const killTimer = setTimeout(() => {
         child.kill('SIGTERM');
-        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms: ${trimmedCommand}` });
-      }, SKILL_EXEC_TIMEOUT_MS);
+        resolve({ success: false, error: `Skill timed out after ${getConfig().execution.timeoutMs}ms: ${trimmedCommand}` });
+      }, getConfig().execution.timeoutMs);
 
       let stdout = '';
       let stderr = '';
