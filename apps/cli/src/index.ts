@@ -3,8 +3,8 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
 import path from 'path';
+import os from 'os';
 import fs from 'fs';
-import dotenv from 'dotenv';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
@@ -12,17 +12,13 @@ import { Router, Executor, createChatClient, dbg, type LLMConfig, type Credentia
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
-import { loadOctopusConfig, saveOctopusConfig, defaultConfig, getConfigPath, getDefaultSkillsDir, getDefaultRatingsPath } from './config.js';
+import { loadConfig, getConfig, getEnvPath } from '@agentoctopus/core';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
 import { runSync } from './sync-skills.js';
 import { runRatingSync } from './rating-sync.js';
 import { fileURLToPath } from 'url';
-
-// Load env
-dotenv.config();
-dotenv.config({ path: path.join(process.cwd(), '.env') });
 
 // Read version from package.json dynamically
 const __cliDir = path.dirname(fileURLToPath(import.meta.url));
@@ -99,7 +95,7 @@ program
   .description('Interactive setup wizard — configure LLM, skills, and execution mode')
   .action(async () => {
     try {
-      const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
+      const rootDir = loadConfig().deploy.root || process.cwd();
       await runOnboarding(rootDir);
     } catch (err) {
       if ((err as Error).name === 'ExitPromptError') {
@@ -119,8 +115,9 @@ program
     const onboarded = await ensureOnboarded();
     if (!onboarded) return;
 
-    const rootDir = process.env.OCTOPUS_ROOT || process.cwd();
-    const port = Number(process.env.AGENT_GATEWAY_PORT ?? 3002);
+    const config = loadConfig();
+    const rootDir = config.deploy.root || process.cwd();
+    const port = config.gateway.port;
 
     console.log(chalk.bold('\n🐙 Starting AgentOctopus gateway\n'));
     console.log(chalk.gray(`  Agent gateway: http://localhost:${port}/agent/health`));
@@ -159,41 +156,29 @@ async function promptSelect(question: string, choices: { label: string; value: s
 }
 
 async function bootstrap() {
-  const octopusConfig = loadOctopusConfig();
+  const config = loadConfig();
 
-  // Canonical skill/rating paths: ~/.agentoctopus/skills and ~/.agentoctopus/ratings.json
-  // These are always used unless octopus.json explicitly overrides them.
-  const skillsDir = octopusConfig?.skillsDir || getDefaultSkillsDir();
-  const ratingsPath = octopusConfig?.ratingsPath || getDefaultRatingsPath();
-
-  // Merge stored credentials into process.env so scripts/invoke.js can read them.
-  // octopus.json credentials take priority over any .env file loaded from CWD,
-  // since the .env may belong to a different project (e.g. ~/.openclaw/.env).
-  if (octopusConfig?.credentials) {
-    for (const [key, value] of Object.entries(octopusConfig.credentials)) {
-      process.env[key] = value;
-    }
-  }
+  // Use registry paths from config, falling back to ~/.agentoctopus/ defaults
+  const skillsDir = config.registry.skillsDir === './registry/skills'
+    ? path.join(os.homedir(), '.agentoctopus', 'skills')
+    : config.registry.skillsDir;
+  const ratingsPath = config.registry.ratingsPath === './registry/ratings.json'
+    ? path.join(os.homedir(), '.agentoctopus', 'ratings.json')
+    : config.registry.ratingsPath;
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
   await registry.load();
 
-  const provider = (process.env.LLM_PROVIDER as 'openai' | 'gemini' | 'ollama') || 'openai';
   const chatConfig: LLMConfig = {
-    provider,
-    model: process.env.LLM_MODEL || 'gpt-4o',
-    apiKey: process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY,
-    baseUrl: provider === 'openai' ? process.env.OPENAI_BASE_URL : process.env.OLLAMA_BASE_URL,
+    provider: config.llm.provider,
+    model: config.llm.model,
+    apiKey: config.llm.apiKey || undefined,
+    baseUrl: config.llm.baseUrl,
   };
 
   const embedConfig: LLMConfig | undefined =
-    process.env.EMBED_PROVIDER && process.env.EMBED_API_KEY
-      ? {
-          provider: (process.env.EMBED_PROVIDER as 'openai' | 'gemini' | 'ollama'),
-          model: process.env.EMBED_MODEL || 'text-embedding-3-small',
-          apiKey: process.env.EMBED_API_KEY,
-          baseUrl: process.env.EMBED_BASE_URL || chatConfig.baseUrl,
-        }
+    config.embed.apiKey
+      ? { provider: config.embed.provider, model: config.embed.model, apiKey: config.embed.apiKey, baseUrl: config.embed.baseUrl || chatConfig.baseUrl }
       : undefined;
 
   const router = new Router(chatConfig, embedConfig);
@@ -266,7 +251,7 @@ program
       spinner.stop();
       if (options.debug) {
         dbg(true, `Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`);
-      } else if (process.env.OCTOPUS_TIMING) {
+      } else if (getConfig().execution.timing) {
         console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms`));
       }
       // No skill matched — fall back to a direct LLM answer
@@ -286,8 +271,7 @@ program
     }
 
     // Determine max retries from config
-    const config = loadOctopusConfig();
-    const maxRetries = config?.maxRetries ?? 3;
+    const maxRetries = getConfig().execution.maxRetries;
     const candidates = routes.slice(0, maxRetries);
     const input = { query, text: query };
 
@@ -314,7 +298,7 @@ program
 
         if (options.debug) {
           dbg(true, `Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`);
-        } else if (process.env.OCTOPUS_TIMING) {
+        } else if (getConfig().execution.timing) {
           console.log(chalk.gray(`  Timing: init=${t1 - t0}ms  route=${t2 - t1}ms  execute=${t3 - t2}ms  total=${t3 - t0}ms`));
         }
 
@@ -434,7 +418,7 @@ program
   .action(async (slug: string, options: { version?: string; force?: boolean; registry?: string }) => {
     const spinner = ora(`Fetching skill "${slug}" from ClaWHub...`).start();
     try {
-      const skillsDir = getDefaultSkillsDir();
+      const skillsDir = (loadConfig().registry.skillsDir);
 
       const meta = await fetchSkillMeta(slug, options.registry);
       spinner.text = `Downloading ${chalk.cyan(meta.name || slug)} v${options.version || meta.version}...`;
@@ -485,7 +469,7 @@ program
   .command('remove <name>')
   .description('Remove an installed skill from the local registry')
   .action(async (name: string) => {
-    const skillsDir = getDefaultSkillsDir();
+    const skillsDir = (loadConfig().registry.skillsDir);
     const skillDir = path.join(skillsDir, name);
 
     if (!fs.existsSync(skillDir)) {
@@ -640,7 +624,7 @@ program
     // If --check or other skill-specific flags passed, run skills sync directly
     const hasSkillFlags = options.check || options.cloudUrl || options.category || options.limit || options.registry;
     if (hasSkillFlags) {
-      const skillsDir = getDefaultSkillsDir();
+      const skillsDir = (loadConfig().registry.skillsDir);
       await runSync({
         skillsDir,
         check: options.check,
@@ -666,7 +650,7 @@ program
     );
 
     if (syncChoice === 'skills' || syncChoice === 'both') {
-      const skillsDir = getDefaultSkillsDir();
+      const skillsDir = (loadConfig().registry.skillsDir);
       await runSync({
         skillsDir,
         force: options.force,
@@ -787,42 +771,65 @@ const configCmd = program
 
 configCmd
   .command('set <key> <value>')
-  .description('Save a credential or config value (written to ~/.agentoctopus/octopus.json and exported into the current session)')
+  .description('Save a credential or config value (written to ~/.agentoctopus/.env)')
   .action((key: string, value: string) => {
-    const existing = loadOctopusConfig();
-    const config = existing ?? defaultConfig();
-    config.credentials = config.credentials ?? {};
-    config.credentials[key] = value;
-    saveOctopusConfig(config);
+    const envPath = getEnvPath();
+
+    // Read existing .env content
+    let envContent = '';
+    if (fs.existsSync(envPath)) {
+      envContent = fs.readFileSync(envPath, 'utf8');
+    }
+
+    // Replace existing line or append
+    const lines = envContent.split('\n');
+    let found = false;
+    const newLines = lines.map(line => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith(`${key}=`) || trimmed.startsWith(`# ${key}=`)) {
+        found = true;
+        return `${key}=${value}`;
+      }
+      return line;
+    });
+    if (!found) {
+      // Remove trailing empty strings before appending
+      while (newLines.length > 0 && newLines[newLines.length - 1] === '') {
+        newLines.pop();
+      }
+      newLines.push(`${key}=${value}`);
+      newLines.push('');
+    }
+
+    // write via saveEnvFile from core (ensures dir exists)
+    fs.writeFileSync(envPath, newLines.join('\n'), 'utf8');
     // Export into the current process so follow-up commands in the same session see it
     process.env[key] = value;
-    console.log(chalk.green(`  ✔ ${key} saved to ${getConfigPath()}`));
+    console.log(chalk.green(`  ✔ ${key} saved to ${envPath}`));
   });
 
 configCmd
   .command('list')
-  .description('List all stored credentials (values masked)')
+  .description('Show the resolved configuration')
   .action(() => {
-    const config = loadOctopusConfig();
-    const creds = config?.credentials ?? {};
-    const keys = Object.keys(creds);
+    const c = loadConfig();
 
-    console.log(chalk.bold('\n🐙 AgentOctopus — Stored Credentials\n'));
-
-    if (keys.length === 0) {
-      console.log(chalk.gray('  No credentials stored yet.'));
-      console.log(chalk.gray('  Use: octopus config set <KEY> <value>\n'));
-      return;
+    function mask(v: string | undefined | null): string {
+      if (!v) return chalk.gray('(not set)');
+      if (v.startsWith('${')) return chalk.gray(v);
+      return v.length > 4 ? chalk.gray('***' + v.slice(-4)) : chalk.gray('****');
     }
 
-    for (const k of keys) {
-      const raw = creds[k] ?? '';
-      const masked =
-        raw.length > 4
-          ? '***' + raw.slice(-4)
-          : '****';
-      console.log(`  ${chalk.cyan(k)} = ${chalk.gray(masked)}`);
-    }
+    console.log(chalk.bold('\n🐙 AgentOctopus — Configuration\n'));
+    console.log(`  ${chalk.cyan('LLM')}:        ${c.llm.provider} / ${c.llm.model}`);
+    console.log(`  ${chalk.cyan('LLM Key')}:    ${mask(c.llm.apiKey)}`);
+    console.log(`  ${chalk.cyan('Base URL')}:   ${c.llm.baseUrl || chalk.gray('(default)')}`);
+    console.log(`  ${chalk.cyan('Embed')}:     ${c.embed.provider} / ${c.embed.model}`);
+    console.log(`  ${chalk.cyan('Rerank')}:    ${c.rerank.model}`);
+    console.log(`  ${chalk.cyan('Deploy')}:    ${c.deploy.mode}${c.deploy.root ? ' @ ' + c.deploy.root : ''}`);
+    console.log(`  ${chalk.cyan('Gateway')}:   port ${c.gateway.port}`);
+    console.log(`  ${chalk.cyan('Registry')}:  ${c.registry.skillsDir}`);
+    console.log(`  ${chalk.cyan('Timing')}:    ${c.execution.timing ? 'on' : 'off'}`);
     console.log();
   });
 
