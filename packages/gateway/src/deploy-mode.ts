@@ -1,15 +1,9 @@
-/**
- * Deployment mode helpers.
- *
- * DEPLOY_MODE=cloud  → full gateway + web UI, exposes skill export
- * DEPLOY_MODE=local  → gateway only, can sync skills from cloud (default)
- */
+import { getConfig } from '@agentoctopus/core';
 
 export type DeployMode = 'cloud' | 'local';
 
 export function getDeployMode(): DeployMode {
-  const mode = process.env.DEPLOY_MODE?.toLowerCase();
-  return mode === 'cloud' ? 'cloud' : 'local';
+  return getConfig().deploy.mode;
 }
 
 export function isCloudMode(): boolean {
