@@ -5,7 +5,7 @@ import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, 
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
 import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
-import { type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
+import { getConfig, type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
@@ -47,7 +47,8 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
 
   // ── CORS ───────────────────────────────────────────────────────────────
   router.use((_req: Request, res: Response, next) => {
-    const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS?.split(',') ?? ['*'];
+    const config = getConfig();
+    const allowedOrigins = config.gateway.corsOrigins;
     const origin = _req.headers.origin;
 
     if (allowedOrigins.includes('*')) {
@@ -75,7 +76,7 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       status: 'ok',
       skills: engine.registry.getAll().length,
       version: '0.3.4',
-      auth: process.env.AUTH_ENABLED !== 'false',
+      auth: getConfig().auth.enabled,
     });
   });
 
@@ -392,7 +393,7 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
   /** POST /agent/sync — trigger skill sync from a cloud instance */
   router.post('/sync', async (req: Request, res: Response) => {
     const { cloudUrl, force } = req.body as { cloudUrl?: string; force?: boolean };
-    const url = cloudUrl ?? process.env.CLOUD_URL;
+    const url = cloudUrl ?? getConfig().gateway.cloudUrl;
 
     if (!url) {
       res.status(400).json({ success: false, error: 'cloudUrl is required (body or CLOUD_URL env)' });
@@ -400,7 +401,7 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     }
 
     try {
-      const skillsDir = process.env.REGISTRY_PATH ?? 'registry/skills';
+      const skillsDir = getConfig().registry.skillsDir;
       const result = await syncFromCloud(url, skillsDir, force);
       res.json({ success: true, ...result });
     } catch (err) {
@@ -432,8 +433,8 @@ export async function startAgentGateway(rootDir?: string, port = 3002): Promise<
   process.on('SIGTERM', shutdown);
 
   app.listen(port, () => {
-    const authStatus = process.env.AUTH_ENABLED !== 'false' ? '🔒 auth ON' : '🔓 auth OFF';
-    const rateStatus = process.env.RATE_LIMIT_ENABLED !== 'false' ? '⏱ rate-limit ON' : '⏱ rate-limit OFF';
+    const authStatus = getConfig().auth.enabled ? '🔒 auth ON' : '🔓 auth OFF';
+    const rateStatus = getConfig().auth.rateLimitEnabled ? '⏱ rate-limit ON' : '⏱ rate-limit OFF';
     console.log(`[Agent Gateway] Listening on port ${port} [${authStatus}] [${rateStatus}]`);
   });
 }
