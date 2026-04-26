@@ -1,7 +1,7 @@
 import path from 'path';
 import os from 'os';
 import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, type ChatClient, type LLMConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, type ChatClient, type LLMConfig, getConfig, loadConfig } from '@agentoctopus/core';
 
 export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
 
@@ -16,54 +16,48 @@ export interface OctopusEngine {
 
 let _engine: OctopusEngine | null = null;
 
-/**
- * Bootstrap (or return cached) OctopusEngine from environment variables.
- * Designed to be called once and reused across gateway adapters.
- */
 export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> {
   if (_engine) return _engine;
 
-  // Canonical paths: ~/.agentoctopus/skills and ~/.agentoctopus/ratings.json
+  const config = loadConfig();
+
   const skillsDir = path.join(DEFAULT_HOME, 'skills');
   const ratingsPath = path.join(DEFAULT_HOME, 'ratings.json');
 
-  // Sync skills from cloud before loading registry (local mode)
-  const cloudUrl = process.env.CLOUD_URL;
-  if (cloudUrl && process.env.SYNC_ON_STARTUP !== 'false') {
+  if (config.gateway.cloudUrl && config.gateway.syncOnStartup) {
     try {
-      const result = await syncFromCloud(cloudUrl, skillsDir);
+      const result = await syncFromCloud(config.gateway.cloudUrl, skillsDir);
       const total = result.added.length + result.updated.length;
       if (total > 0) {
-        console.log(`[Engine] Synced ${total} skill(s) from ${cloudUrl} (added: ${result.added.length}, updated: ${result.updated.length})`);
+        console.log(`[Engine] Synced ${total} skill(s) from ${config.gateway.cloudUrl} (added: ${result.added.length}, updated: ${result.updated.length})`);
       }
     } catch (err) {
-      console.warn(`[Engine] Startup sync from ${cloudUrl} failed: ${(err as Error).message}`);
+      console.warn(`[Engine] Startup sync from ${config.gateway.cloudUrl} failed: ${(err as Error).message}`);
     }
   }
 
   const registry = new SkillRegistry(skillsDir, ratingsPath);
   await registry.load();
 
-  const provider = (process.env.LLM_PROVIDER as LLMConfig['provider']) ?? 'openai';
   const chatConfig: LLMConfig = {
-    provider,
-    model: process.env.LLM_MODEL ?? 'gpt-4o',
-    apiKey: process.env.OPENAI_API_KEY ?? process.env.GEMINI_API_KEY,
-    baseUrl: provider === 'openai' ? process.env.OPENAI_BASE_URL : process.env.OLLAMA_BASE_URL,
+    provider: config.llm.provider,
+    model: config.llm.model,
+    apiKey: config.llm.apiKey || undefined,
+    baseUrl: config.llm.baseUrl,
   };
 
   const rerankConfig: LLMConfig = {
     ...chatConfig,
-    model: process.env.RERANK_MODEL ?? process.env.LLM_MODEL ?? 'gpt-4o-mini',
+    model: config.rerank.model,
   };
 
   const embedConfig: LLMConfig | undefined =
-    process.env.EMBED_PROVIDER && process.env.EMBED_API_KEY
+    config.embed.apiKey
       ? {
-          provider: (process.env.EMBED_PROVIDER as LLMConfig['provider']),
-          model: process.env.EMBED_MODEL ?? 'text-embedding-3-small',
-          apiKey: process.env.EMBED_API_KEY,
-          baseUrl: process.env.EMBED_BASE_URL ?? chatConfig.baseUrl,
+          provider: config.embed.provider,
+          model: config.embed.model,
+          apiKey: config.embed.apiKey,
+          baseUrl: config.embed.baseUrl || chatConfig.baseUrl,
         }
       : undefined;
 
@@ -77,7 +71,6 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   return _engine;
 }
 
-/** Reset the cached engine (useful in tests). */
 export function resetEngine(): void {
   _engine = null;
 }
