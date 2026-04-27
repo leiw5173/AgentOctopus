@@ -6,11 +6,13 @@ export { parseSkillFrontmatter } from "./frontmatter.js";
 export type { ParsedSkillEntry } from "./frontmatter.js";
 export { loadSkillsFromDir } from "./local-loader.js";
 export { resolveSkillConfig, shouldIncludeSkill, evaluateRuntimeEligibility, isBundledSkillAllowed } from "./config.js";
+export { applySkillEnvOverrides } from "./env-overrides.js";
 export { loadWorkspaceSkills, mergeByPriority } from "./workspace.js";
 export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
 export { resolveBundledSkillsDir } from "./bundled.js";
 export { installSkillDeps, sanitizeString } from "./install.js";
 export type { InstallPreferences } from "./install.js";
+export { buildWorkspaceSkillCommandSpecs } from "./command-specs.js";
 export {
   SKILLS_INDEX_URL,
   fetchSkillMeta,
