@@ -10,6 +10,7 @@ export { applySkillEnvOverrides } from "./env-overrides.js";
 export { loadWorkspaceSkills, mergeByPriority } from "./workspace.js";
 export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
 export { resolveBundledSkillsDir } from "./bundled.js";
+export { resolvePluginSkillDirs } from "./plugin-skills.js";
 export { installSkillDeps, sanitizeString } from "./install.js";
 export type { InstallPreferences } from "./install.js";
 export { buildWorkspaceSkillCommandSpecs } from "./command-specs.js";
