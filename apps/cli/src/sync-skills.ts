@@ -67,7 +67,7 @@ export async function checkSkillUpdates(
     dbg(debug, 'Fetching skills index from ClaWHub...');
     const t0 = Date.now();
     indexEntries = await downloadSkillsIndex();
-    dbg(debug, `Skills index: ${indexEntries.length} entries received (${Date.now() - t0}ms)`);
+    dbg(debug, `Skills index: ${indexEntries!.length} entries received (${Date.now() - t0}ms)`);
   } catch {
     dbg(debug, 'Skills index fetch failed — cannot check versions');
     return updates;
@@ -199,7 +199,7 @@ export async function installAwesomeSkills(
     dbg(debug, 'Fetching skills index from ClaWHub (index path)...');
     const t0 = Date.now();
     indexEntries = await downloadSkillsIndex();
-    dbg(debug, `Skills index: ${indexEntries.length} entries received (${Date.now() - t0}ms)`);
+    dbg(debug, `Skills index: ${indexEntries!.length} entries received (${Date.now() - t0}ms)`);
   } catch {
     dbg(debug, 'Skills index fetch failed — falling back to per-skill fetch');
   }
