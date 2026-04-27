@@ -79,6 +79,40 @@ Rules:
 - Keep it under 5 lines
 - Format as plain text, no markdown`;
 
+export function extractCredentialErrors(text: string): string[] {
+  const scan = text.slice(0, 2000);
+  const keyPattern = /[A-Z][A-Z0-9_]*(?:API_KEY|_KEY|_TOKEN|_SECRET|_URL)/g;
+
+  const triggers = [
+    /([A-Z][A-Z0-9_]*(?:API_KEY|_KEY|_TOKEN|_SECRET|_URL))\s+(?:environment\s+variable\s+)?is\s+not\s+set/gi,
+    /(?:requires?|needs?|missing)\s+([A-Z][A-Z0-9_]*(?:API_KEY|_KEY|_TOKEN|_SECRET|_URL))/gi,
+  ];
+
+  const found = new Set<string>();
+
+  for (const re of triggers) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(scan)) !== null) {
+      found.add(m[1]!);
+    }
+  }
+
+  // Handle comma-separated lists: "requires KEY1, KEY2, KEY3, or KEY4"
+  if (found.size > 0) {
+    const sentencePattern = /(?:requires?|needs?|missing)\s+[^.;\n]{0,300}/gi;
+    let sm: RegExpExecArray | null;
+    while ((sm = sentencePattern.exec(scan)) !== null) {
+      const sentence = sm[0];
+      let km: RegExpExecArray | null;
+      while ((km = keyPattern.exec(sentence)) !== null) {
+        found.add(km[0]);
+      }
+    }
+  }
+
+  return [...found];
+}
+
 export interface ExecutionResult {
   skill: LoadedSkill;
   adapterResult: AdapterResult;

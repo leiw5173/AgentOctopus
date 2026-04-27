@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Executor } from '../src/executor.js';
+import { Executor, extractCredentialErrors } from '../src/executor.js';
 import { SkillRegistry } from '@agentoctopus/registry';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 
@@ -277,5 +277,71 @@ describe('CredentialMissingResult type', () => {
     expect(result.type).toBe('credential_missing');
     expect(result.skillName).toBe('test-skill');
     expect(result.missing[0].key).toBe('TEST_KEY');
+  });
+});
+
+describe('extractCredentialErrors', () => {
+  it('extracts key from "KEY environment variable is not set"', () => {
+    const result = extractCredentialErrors('Error: XAI_API_KEY environment variable is not set.');
+    expect(result).toEqual(['XAI_API_KEY']);
+  });
+
+  it('extracts key from "KEY is not set"', () => {
+    const result = extractCredentialErrors('SERPER_API_KEY is not set');
+    expect(result).toEqual(['SERPER_API_KEY']);
+  });
+
+  it('extracts key from "requires KEY"', () => {
+    const result = extractCredentialErrors('--news requires SERPER_API_KEY');
+    expect(result).toEqual(['SERPER_API_KEY']);
+  });
+
+  it('extracts multiple keys from comma-separated list', () => {
+    const result = extractCredentialErrors(
+      '--news requires SERPER_API_KEY, TAVILY_API_KEY, SERPAPI_API_KEY, YOU_API_KEY, or SEARXNG_INSTANCE_URL'
+    );
+    expect(result).toEqual(['SERPER_API_KEY', 'TAVILY_API_KEY', 'SERPAPI_API_KEY', 'YOU_API_KEY', 'SEARXNG_INSTANCE_URL']);
+  });
+
+  it('extracts key from "missing KEY"', () => {
+    const result = extractCredentialErrors('Error: missing OPENAI_API_KEY');
+    expect(result).toEqual(['OPENAI_API_KEY']);
+  });
+
+  it('extracts key from "needs KEY"', () => {
+    const result = extractCredentialErrors('This skill needs GITHUB_TOKEN to work');
+    expect(result).toEqual(['GITHUB_TOKEN']);
+  });
+
+  it('extracts key with _URL suffix', () => {
+    const result = extractCredentialErrors('requires SEARXNG_INSTANCE_URL');
+    expect(result).toEqual(['SEARXNG_INSTANCE_URL']);
+  });
+
+  it('extracts key with _SECRET suffix', () => {
+    const result = extractCredentialErrors('AWS_SECRET_KEY is not set');
+    expect(result).toEqual(['AWS_SECRET_KEY']);
+  });
+
+  it('returns empty array when no credential pattern matches', () => {
+    const result = extractCredentialErrors('Connection timeout after 30s');
+    expect(result).toEqual([]);
+  });
+
+  it('deduplicates keys mentioned multiple times', () => {
+    const result = extractCredentialErrors('XAI_API_KEY is not set. Please set XAI_API_KEY.');
+    expect(result).toEqual(['XAI_API_KEY']);
+  });
+
+  it('extracts from JSON error output', () => {
+    const json = JSON.stringify({ report: 'Search failed: Error: XAI_API_KEY environment variable is not set.\n', status: 'error' });
+    const result = extractCredentialErrors(json);
+    expect(result).toEqual(['XAI_API_KEY']);
+  });
+
+  it('only scans first 2000 chars', () => {
+    const padding = 'x'.repeat(2100);
+    const result = extractCredentialErrors(padding + 'XAI_API_KEY is not set');
+    expect(result).toEqual([]);
   });
 });
