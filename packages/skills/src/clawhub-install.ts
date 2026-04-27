@@ -14,7 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import { inflateRawSync, gunzipSync } from 'zlib';
 
-const DEFAULT_REGISTRY = 'https://clawhub.ai';
+export const DEFAULT_REGISTRY = 'https://clawhub.ai';
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 2000;
 const AWESOME_README_URL =
