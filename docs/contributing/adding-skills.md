@@ -11,8 +11,8 @@ Adding a new skill is the primary contribution path. It requires no changes to t
 
 Every skill lives in `registry/skills/<name>/` and consists of:
 
-- **`SKILL.md`** — gray-matter YAML frontmatter followed by plain-English instructions for the LLM. The frontmatter is validated by the Zod schema in `packages/registry/src/manifest-schema.ts`.
-- **`scripts/invoke.js`** (optional) — required when `adapter: subprocess` is set. Receives `OCTOPUS_INPUT` as a JSON env variable and writes the result to stdout.
+- **`SKILL.md`** — gray-matter YAML frontmatter followed by plain-English instructions for the LLM. The frontmatter is validated by the Zod schema in `packages/skills/src/schema.ts`.
+- **`scripts/invoke.js`** (optional) — required for subprocess execution. Receives `OCTOPUS_INPUT` as a JSON env variable and writes the result to stdout.
 
 Required frontmatter fields:
 
@@ -20,11 +20,20 @@ Required frontmatter fields:
 ---
 name: <skill-name>
 description: <one-sentence description used for semantic routing>
-adapter: http | mcp | subprocess
 tags:
   - <tag1>
   - <tag2>
 ---
+```
+
+Optional eligibility fields (declared declaratively, no router code changes needed):
+
+```yaml
+os: [darwin, linux]
+requires:
+  bins: [curl]
+  anyBins: [python3, python]
+  env: [MY_API_KEY]
 ```
 
 ## Checklist
@@ -38,9 +47,9 @@ tags:
    git checkout -b skill/<name>
    ```
 
-3. Create `registry/skills/<name>/SKILL.md` with valid frontmatter (all four required fields: `name`, `description`, `adapter`, `tags`).
+3. Create `registry/skills/<name>/SKILL.md` with valid frontmatter (required fields: `name`, `description`).
 
-4. If using the subprocess adapter, add `scripts/invoke.js` and smoke-test it:
+4. If the skill needs scripts, add `scripts/invoke.js` (or `.py`/`.sh`) and smoke-test it:
 
    ```bash
    OCTOPUS_INPUT='{"query":"<example query>"}' node registry/skills/<name>/scripts/invoke.js
@@ -48,7 +57,7 @@ tags:
 
    Confirm the output is correct and that the script exits non-zero with a clear message when a required API key is missing.
 
-5. If the skill needs keyword pre-filtering, update `isSkillEligible()` in `packages/core/src/router.ts`.
+5. If the skill needs runtime eligibility gates, declare them in SKILL.md frontmatter (`os`, `requires.bins`, `requires.env`, etc.). No router code changes needed.
 
 6. Add a row to `TEST_INSTRUCTIONS.md` describing at least one manual test case.
 
