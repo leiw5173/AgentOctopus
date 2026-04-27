@@ -245,6 +245,9 @@ importers:
 
   packages/registry:
     dependencies:
+      '@agentoctopus/skills':
+        specifier: workspace:*
+        version: link:../skills
       glob:
         specifier: ^13.0.0
         version: 13.0.6

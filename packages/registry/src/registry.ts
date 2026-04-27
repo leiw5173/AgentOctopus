@@ -1,102 +1,58 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
-import matter from 'gray-matter';
 import { glob } from 'glob';
-import { SkillManifestSchema, type SkillManifest } from './manifest-schema.js';
+import { loadSkillsFromDir, type SkillEntry } from '@agentoctopus/skills';
+import { type SkillManifest, type SkillCredential } from './manifest-schema.js';
 import { RatingStore } from './rating.js';
 import type { TaskType } from './rating-dimensions.js';
 
 /**
- * Normalize frontmatter data from community skills so more of them pass
- * our Zod schema. Handles the most common incompatibilities:
- *
- * 1. Missing `name` → default to directory name
- * 2. Missing `description` → default to empty string
- * 3. `name` is a number → coerce to string
- * 4. `metadata` is a JSON string → parse to object
- * 5. `metadata.openclaw.env` is an object with {required,optional} arrays
- *    of {name,label} → convert to our array-of-strings format
+ * Transform a SkillEntry (from the skills package) into a LoadedSkill
+ * that preserves backward compatibility with the existing manifest-based
+ * types used by core, adapters, and CLI.
  */
-function normalizeSkillData(data: Record<string, unknown>, dirName: string, skillDir?: string): Record<string, unknown> {
-  // Default name from directory
-  if (!data.name || data.name == null) {
-    data.name = dirName;
-  }
-  // Coerce numeric name to string
-  if (typeof data.name === 'number') {
-    data.name = String(data.name);
-  }
-  // Default description
-  if (!data.description || data.description == null) {
-    data.description = '';
-  }
-  // Coerce metadata string to object
-  if (typeof data.metadata === 'string') {
-    try {
-      data.metadata = JSON.parse(data.metadata as string);
-    } catch {
-      data.metadata = {};
-    }
-  }
-  // Normalize metadata.openclaw.env from community object format
-  // { required: [{name, label}], optional: [{name, label}] } → ["NAME1", "NAME2"]
-  if (data.metadata && typeof data.metadata === 'object') {
-    const meta = data.metadata as Record<string, unknown>;
-    if (meta.openclaw && typeof meta.openclaw === 'object') {
-      const oc = meta.openclaw as Record<string, unknown>;
-      if (oc.env && typeof oc.env === 'object' && !Array.isArray(oc.env)) {
-        const envObj = oc.env as { required?: { name?: string }[]; optional?: { name?: string }[] };
-        const names: string[] = [];
-        for (const e of envObj.required ?? []) {
-          if (e.name && typeof e.name === 'string') names.push(e.name);
-        }
-        for (const e of envObj.optional ?? []) {
-          if (e.name && typeof e.name === 'string') names.push(e.name);
-        }
-        oc.env = names;
-      }
-    }
-  }
-  // Auto-detect adapter: if adapter is 'http' (the default) but the skill has
-  // a scripts/ directory with .js or .py files, it's actually a subprocess skill.
-  // Most community skills from ClaWHub don't set adapter in their frontmatter.
-  if (skillDir && (!data.adapter || data.adapter === 'http') && !data.endpoint) {
-    // Check for MCP metadata first (higher priority)
-    if (data.metadata && typeof data.metadata === 'object') {
-      const meta = data.metadata as Record<string, unknown>;
-      if (meta.mcp_url || meta.mcp_command || meta.mcpServer) {
-        data.adapter = 'mcp';
-        data.hosting = data.hosting ?? 'local';
-        return data;
-      }
-    }
+function skillEntryToLoadedSkill(
+  entry: SkillEntry,
+  ratingStore: RatingStore,
+): LoadedSkill {
+  const fm = entry.frontmatter;
+  const manifest: SkillManifest = {
+    name: entry.skill.name,
+    description: entry.skill.description,
+    tags: (fm.tags as string[]) ?? [],
+    version: entry.skill.version,
+    adapter: (fm.adapter as SkillManifest['adapter']) ?? 'http',
+    hosting: (fm.hosting as SkillManifest['hosting']) ?? 'cloud',
+    auth: (fm.auth as SkillManifest['auth']) ?? 'none',
+    endpoint: fm.endpoint as string | undefined,
+    input_schema: fm.input_schema as Record<string, string> | undefined,
+    output_schema: fm.output_schema as Record<string, string> | undefined,
+    rating: (fm.rating as number) ?? 3.0,
+    invocations: (fm.invocations as number) ?? 0,
+    enabled: (fm.enabled as boolean) ?? true,
+    taskType: (fm.taskType as 'one-shot' | 'long-running' | 'agent-collab' | undefined) ?? 'one-shot',
+    latencyTarget: fm.latencyTarget as number | undefined,
+    tokenCostTarget: fm.tokenCostTarget as number | undefined,
+    llm_powered: (fm.llm_powered as boolean) ?? false,
+    credentials: fm.credentials as SkillCredential[] | undefined,
+    metadata: fm.metadata as SkillManifest['metadata'],
+  };
 
-    // Check for MCP references in instructions
-    const instructions = typeof data.instructions === 'string' ? data.instructions : '';
-    if (instructions.includes('mcp-remote') || instructions.includes('MCP_SERVER') || instructions.includes('mcp_server')) {
-      data.adapter = 'mcp';
-      data.hosting = data.hosting ?? 'local';
-      return data;
-    }
-
-    // Check for scripts/ directory (subprocess)
-    const scriptsDir = path.join(skillDir, 'scripts');
-    if (fs.existsSync(scriptsDir)) {
-      try {
-        const scriptFiles = fs.readdirSync(scriptsDir);
-        const hasScript = scriptFiles.some(f => f.endsWith('.js') || f.endsWith('.py'));
-        if (hasScript) {
-          data.adapter = 'subprocess';
-          data.hosting = data.hosting ?? 'local';
-        }
-      } catch {
-        // scripts dir not readable, skip
-      }
-    }
+  // Merge persisted rating and invocation count over manifest defaults
+  const persistedEntry = ratingStore.getAll()[manifest.name];
+  if (persistedEntry !== undefined) {
+    manifest.rating = persistedEntry.dimensions.quality;
+    manifest.invocations = persistedEntry.invocations;
   }
 
-  return data;
+  return {
+    manifest,
+    dirPath: entry.skill.dirPath,
+    rating: manifest.rating,
+    routingScore: ratingStore.getRoutingScore(manifest.name, manifest.taskType),
+    negativeFeedbackCount: ratingStore.getOrCreate(manifest.name).recentFeedback.filter(f => !f.positive).length,
+  };
 }
 
 export interface LoadedSkill {
@@ -124,33 +80,11 @@ export class SkillRegistry {
    * Skills from `extraDir` take priority — they overwrite any same-named skill already loaded.
    */
   async loadFrom(extraDir: string): Promise<void> {
-    const pattern = extraDir.replace(/\\/g, '/') + '/**/SKILL.md';
-    const files = await glob(pattern);
+    const entries = await loadSkillsFromDir(extraDir, 'user');
 
-    for (const file of files) {
-      try {
-        const raw = fs.readFileSync(file, 'utf-8');
-        const { data } = matter(raw);
-        const dirName = path.basename(path.dirname(file));
-        const skillDir = path.dirname(file);
-        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName, skillDir));
-
-        const persistedEntry = this.ratingStore.getAll()[manifest.name];
-        if (persistedEntry !== undefined) {
-          manifest.rating = persistedEntry.dimensions.quality;
-          manifest.invocations = persistedEntry.invocations;
-        }
-
-        this.skills.set(manifest.name, {
-          manifest,
-          dirPath: path.dirname(file),
-          rating: manifest.rating,
-          routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
-          negativeFeedbackCount: this.ratingStore.getOrCreate(manifest.name).recentFeedback.filter(f => !f.positive).length,
-        });
-      } catch {
-        // silently skip incompatible skills from extra dir
-      }
+    for (const entry of entries) {
+      const loaded = skillEntryToLoadedSkill(entry, this.ratingStore);
+      this.skills.set(loaded.manifest.name, loaded);
     }
   }
 
@@ -182,7 +116,9 @@ export class SkillRegistry {
           let restored = 0;
           for (const s of cache.skills) {
             try {
-              const manifest = SkillManifestSchema.parse(s.manifest);
+              // Validate the cached manifest still has required fields
+              if (!s.manifest?.name || !s.manifest?.description || !s.dirPath) continue;
+              const manifest = s.manifest as SkillManifest;
               const persistedEntry = this.ratingStore.getAll()[manifest.name];
               if (persistedEntry !== undefined) {
                 manifest.rating = persistedEntry.dimensions.quality;
@@ -202,36 +138,20 @@ export class SkillRegistry {
       } catch { /* cache miss or corrupt — proceed with full load */ }
     }
 
+    // Delegate SKILL.md discovery and parsing to the @agentoctopus/skills package
+    const entries = await loadSkillsFromDir(this.skillsDir, 'clawhub');
     let failCount = 0;
-    for (const file of files) {
+    for (const entry of entries) {
       try {
-        const raw = fs.readFileSync(file, 'utf-8');
-        const { data } = matter(raw);
-        const dirName = path.basename(path.dirname(file));
-        const skillDir = path.dirname(file);
-        const manifest = SkillManifestSchema.parse(normalizeSkillData(data, dirName, skillDir));
-
-        // Merge persisted rating and invocation count over manifest defaults
-        const persistedEntry = this.ratingStore.getAll()[manifest.name];
-        if (persistedEntry !== undefined) {
-          manifest.rating = persistedEntry.dimensions.quality;
-          manifest.invocations = persistedEntry.invocations;
-        }
-
-        this.skills.set(manifest.name, {
-          manifest,
-          dirPath: path.dirname(file),
-          rating: manifest.rating,
-          routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
-          negativeFeedbackCount: this.ratingStore.getOrCreate(manifest.name).recentFeedback.filter(f => !f.positive).length,
-        });
+        const loaded = skillEntryToLoadedSkill(entry, this.ratingStore);
+        this.skills.set(loaded.manifest.name, loaded);
       } catch {
         failCount++;
       }
     }
 
     if (failCount > 0) {
-      const total = files.length;
+      const total = entries.length;
       process.stderr.write(
         `[Registry] Loaded ${total - failCount}/${total} skills (${failCount} skipped — incompatible format)\n`
       );
@@ -263,8 +183,8 @@ export class SkillRegistry {
   readInstructions(skill: LoadedSkill): string {
     const skillMdPath = path.join(skill.dirPath, 'SKILL.md');
     const raw = fs.readFileSync(skillMdPath, 'utf-8');
-    const { content } = matter(raw);
-    return content.trim();
+    const match = raw.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
+    return (match ? match[1] : raw).trim();
   }
 
   search(query: string): LoadedSkill[] {
@@ -344,6 +264,7 @@ export class SkillRegistry {
     return { skillMd, scripts };
   }
 
+  /** Expose the underlying RatingStore for direct access (used by gateway feedback endpoints). */
   getRatingStore(): RatingStore {
     return this.ratingStore;
   }
