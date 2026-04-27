@@ -159,9 +159,7 @@ async function bootstrap() {
   const config = loadConfig();
 
   // Use registry paths from config, falling back to ~/.agentoctopus/ defaults
-  const skillsDir = config.registry.skillsDir === './registry/skills'
-    ? path.join(os.homedir(), '.agentoctopus', 'skills')
-    : config.registry.skillsDir;
+  const skillsDir = resolveSkillsDir(config.registry.skillsDir);
   const ratingsPath = config.registry.ratingsPath === './registry/ratings.json'
     ? path.join(os.homedir(), '.agentoctopus', 'ratings.json')
     : config.registry.ratingsPath;
@@ -187,6 +185,13 @@ async function bootstrap() {
   const executor = new Executor(registry, chatClient);
 
   return { registry, router, executor };
+}
+
+function resolveSkillsDir(configValue: string): string {
+  if (configValue === './registry/skills') {
+    return path.join(os.homedir(), '.agentoctopus', 'skills');
+  }
+  return configValue;
 }
 
 program
@@ -625,7 +630,7 @@ program
     // If --check or other skill-specific flags passed, run skills sync directly
     const hasSkillFlags = options.check || options.cloudUrl || options.category || options.limit || options.registry;
     if (hasSkillFlags) {
-      const skillsDir = (loadConfig().registry.skillsDir);
+      const skillsDir = resolveSkillsDir(loadConfig().registry.skillsDir);
       await runSync({
         skillsDir,
         check: options.check,
@@ -651,7 +656,7 @@ program
     );
 
     if (syncChoice === 'skills' || syncChoice === 'both') {
-      const skillsDir = (loadConfig().registry.skillsDir);
+      const skillsDir = resolveSkillsDir(loadConfig().registry.skillsDir);
       await runSync({
         skillsDir,
         force: options.force,
