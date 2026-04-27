@@ -67,6 +67,30 @@ export const SlackConfigSchema = z.object({
 });
 export type SlackConfigSection = z.infer<typeof SlackConfigSchema>;
 
+export const SkillPerConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  apiKey: z.string().optional(),
+  env: z.record(z.string()).optional(),
+  config: z.record(z.unknown()).optional(),
+});
+
+export const SkillsConfigSchema = z.object({
+  allowBundled: z.array(z.string()).optional(),
+  entries: z.record(SkillPerConfigSchema).optional(),
+  load: z.object({
+    extraDirs: z.array(z.string()).optional(),
+    watch: z.boolean().optional(),
+    watchDebounceMs: z.number().int().optional(),
+  }).optional(),
+  limits: z.object({
+    maxSkillsInPrompt: z.number().int().optional(),
+    maxSkillsPromptChars: z.number().int().optional(),
+    maxSkillFileBytes: z.number().int().optional(),
+  }).optional(),
+  packs: z.array(z.string()).optional(),
+});
+export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
+
 export const OctopusConfigV2Schema = z.object({
   version: z.literal(2),
   llm: LLMConfigSchema.partial().default({}),
@@ -79,6 +103,7 @@ export const OctopusConfigV2Schema = z.object({
   auth: AuthConfigSchema.partial().default({}),
   rating: RatingConfigSchema.partial().default({}),
   slack: SlackConfigSchema.partial().default({}),
+  skills: SkillsConfigSchema.partial().default({}),
 });
 
 export type OctopusConfigV2 = z.input<typeof OctopusConfigV2Schema>;
@@ -94,4 +119,5 @@ export interface ResolvedConfig {
   auth: AuthConfigSection;
   rating: RatingConfigSection;
   slack: SlackConfigSection;
+  skills: SkillsConfigSection;
 }

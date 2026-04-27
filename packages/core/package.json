@@ -19,6 +19,7 @@
   "dependencies": {
     "@agentoctopus/adapters": "workspace:*",
     "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/skills": "workspace:*",
     "@google/generative-ai": "^0.15.0",
     "dotenv": "^16.4.0",
     "ollama": "^0.5.0",

@@ -6,7 +6,7 @@ import {
   OctopusConfigV2Schema, LLMConfigSchema, EmbedConfigSchema,
   RerankConfigSchema, GatewayConfigSchema, RegistryConfigSchema,
   ExecutionConfigSchema, DeployConfigSchema, AuthConfigSchema,
-  RatingConfigSchema, SlackConfigSchema,
+  RatingConfigSchema, SlackConfigSchema, SkillsConfigSchema,
   type ResolvedConfig, type OctopusConfigV2,
 } from './config-types.js';
 
@@ -103,6 +103,7 @@ export function loadConfig(): ResolvedConfig {
     auth: resolveAllEnvRefs(mergeSection(AuthConfigSchema, parsed.auth)),
     rating: resolveAllEnvRefs(mergeSection(RatingConfigSchema, parsed.rating)),
     slack: resolveAllEnvRefs(mergeSection(SlackConfigSchema, parsed.slack)),
+    skills: resolveAllEnvRefs(mergeSection(SkillsConfigSchema, parsed.skills)),
   };
 
   if (raw && raw.version !== 2) {

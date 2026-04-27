@@ -2,6 +2,7 @@ import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/r
 import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
+import { applySkillEnvOverrides } from '@agentoctopus/skills';
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
@@ -20,6 +21,25 @@ function buildSandboxedEnv(skill: LoadedSkill): NodeJS.ProcessEnv {
     if (process.env[v.key] !== undefined) safe[v.key] = process.env[v.key];
   }
   return safe;
+}
+
+/**
+ * Build a lightweight adapter from LoadedSkill to a shape compatible with
+ * applySkillEnvOverrides from @agentoctopus/skills.
+ */
+function loadedSkillToEnvEntry(skill: LoadedSkill) {
+  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
+  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
+  return {
+    skill: { name: skill.manifest.name },
+    metadata: {
+      skillKey: (openclaw.skillKey as string) ?? undefined,
+      primaryEnv: (rawMeta.primaryEnv as string) ?? (openclaw.primaryEnv as string) ?? undefined,
+      always: (rawMeta.always as boolean) ?? undefined,
+      os: (rawMeta.os as string[]) ?? undefined,
+      requires: (rawMeta.requires as any) ?? undefined,
+    },
+  };
 }
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
@@ -87,6 +107,17 @@ export class Executor {
 
   async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
     const { debug = false } = opts;
+
+    // Apply env overrides from skills config before credential check.
+    // Overrides set configured apiKey/env vars into process.env so that
+    // skills with credentials in octopus.json can pass the check below.
+    const skillsConfig = getConfig().skills;
+    const revertEnv = applySkillEnvOverrides(
+      [loadedSkillToEnvEntry(skill) as any],
+      skillsConfig as any,
+    );
+
+    try {
     // Check required credentials before invoking
     const required = getRequiredEnvVars(skill.manifest);
     const missing = required.filter(v => !process.env[v.key]);
@@ -182,6 +213,9 @@ export class Executor {
     const authGuidance = await this.diagnoseAuthError(adapterResult, skill, instructions);
 
     return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
+    } finally {
+      revertEnv();
+    }
   }
 
   /**
@@ -353,6 +387,24 @@ export class Executor {
         success: false,
         error: `Skill "${skillName}" uses local scripts that aren\'t installed on this machine. Install it with:\n  octopus add ${skillName} --force`,
       };
+    }
+
+    // Second pre-flight: if the skill has no scripts and no endpoint, verify the
+    // instructions actually describe an HTTP API before trying LLM-guided curl.
+    // Skills that only reference agent tools (web_fetch, web_search, etc.) and
+    // have documentation URLs (github.com) are not HTTP API skills.
+    if (!hasLocalScripts && !hasScriptFiles && !skill.manifest.endpoint) {
+      const apiUrlPattern = /https?:\/\/[^\s/]*api[^\s/]*|curl\s+-X|https?:\/\/[^\s/?]+\/[^\s]*\?[^\s]+=[^\s]+/i;
+      const isDocUrl = (url: string) => /github\.com|gitlab\.com|bitbucket\.org|raw\.githubusercontent\.com/i.test(url);
+      const urls = instructions.match(/https?:\/\/[^\s]+/g) ?? [];
+      const apiUrls = urls.filter(u => !isDocUrl(u) && apiUrlPattern.test(u));
+      if (apiUrls.length === 0 && !apiUrlPattern.test(instructions)) {
+        const skillName = skill.manifest.name;
+        return {
+          success: false,
+          error: `Skill "${skillName}" does not expose an HTTP API. Its instructions describe agent-level tools rather than API endpoints.`,
+        };
+      }
     }
 
     const query = (input.query ?? input.text ?? '') as string;
