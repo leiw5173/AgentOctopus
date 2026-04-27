@@ -379,7 +379,61 @@ CLI integration:
 - `sync-skills.ts` uses new workspace loader
 - Command registration uses `buildWorkspaceSkillCommandSpecs`
 
-## 14. Out of Scope
+## 14. Rating System Integration
+
+The rating system is an AgentOctopus feature beyond OpenClaw — OpenClaw only does binary eligibility, while AgentOctopus uses historical quality metrics to prefer better-performing skills.
+
+### Architecture
+
+- `RatingStore` stays in `packages/registry` (dimensions, invocations, metrics, feedback)
+- The workspace loader in `packages/skills` calls `RatingStore.getRoutingScore()` for each loaded skill and attaches the result to `SkillEntry`
+- `SkillEntry` gains a `routingScore: number` field (0-1)
+- The router in `packages/core` uses `routingScore` as a multiplier on cosine similarity
+
+### Routing Score Computation
+
+```
+compositeScore = cosineSimilarity × routingScore
+                 - negativeFeedbackPenalty (0.50 × negativeFeedbackCount)
+                 - credentialPenalty (0.25 × missingCredentialClasses)
+                 - binaryPenalty (0.25 × missingBins)
+                 - catchAllPenalty (2.0 embedding path / 0.1 keyword path)
+```
+
+### Rating Dimensions (unchanged from current system)
+
+| Dimension | Range | Type | Description |
+|-----------|-------|------|-------------|
+| `completion` | 0-1 | Objective | Success rate from auto-collected metrics |
+| `quality` | 0-5 | Subjective | EMA of user feedback (thumbs up/down) |
+| `reliability` | 0-1 | Objective | 1 - error rate from auto-collected metrics |
+| `latency` | 0-1 | Objective | Normalized speed from auto-collected metrics |
+| `tokenCost` | 0-1 | Objective | Cost efficiency from auto-collected metrics |
+
+### Task-Type-Aware Weights
+
+| Task Type | completion | quality | reliability | latency | tokenCost |
+|-----------|-----------|---------|-------------|---------|-----------|
+| one-shot | 0.30 | 0.25 | 0.20 | 0.15 | 0.10 |
+| long-running | 0.25 | 0.20 | 0.30 | 0.10 | 0.15 |
+| agent-collab | 0.20 | 0.30 | 0.25 | 0.10 | 0.15 |
+
+### Feedback Collection
+
+Survives unchanged: CLI thumbs up/down, web thumbs up/down, agent platform NLP sentiment detection. Each feedback event triggers an EMA update to the quality dimension and writes through to `ratings.json`.
+
+### In the Routing Flow
+
+```
+1. workspace.ts loads skills → merges rating data → SkillEntry.routingScore populated
+2. router.ts filters via shouldIncludeSkill (binary eligibility — ratings NOT involved)
+3. router.ts ranks eligible skills via compositeScore (ratings ARE the multiplier)
+4. LLM reranker receives top-K with scores → picks best or "none"
+5. executor runs skill → auto-collects metrics → RatingStore.recordInvocationMetrics()
+6. user gives feedback → RatingStore.recordFeedback() → routingScore updates for next time
+```
+
+This ensures higher-rated skills are naturally preferred by the router, while skills with a history of failures or negative feedback are deprioritized.
 
 - Plugin system implementation (only directory resolution is built)
 - Remote eligibility (wired in types but returns empty for now)

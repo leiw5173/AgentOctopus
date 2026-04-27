@@ -35,6 +35,9 @@ importers:
       '@agentoctopus/registry':
         specifier: workspace:*
         version: link:../../packages/registry
+      '@agentoctopus/skills':
+        specifier: workspace:*
+        version: link:../../packages/skills
       '@inquirer/prompts':
         specifier: ^8.3.2
         version: 8.3.2(@types/node@20.19.37)
