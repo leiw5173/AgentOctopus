@@ -9,3 +9,5 @@ export { resolveSkillConfig, shouldIncludeSkill, evaluateRuntimeEligibility, isB
 export { loadWorkspaceSkills, mergeByPriority } from "./workspace.js";
 export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
 export { resolveBundledSkillsDir } from "./bundled.js";
+export { installSkillDeps, sanitizeString } from "./install.js";
+export type { InstallPreferences } from "./install.js";
