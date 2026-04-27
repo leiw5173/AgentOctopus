@@ -429,8 +429,14 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
       const decisionConfidence = chosenEntry ? normalizeConfidence(chosenEntry.score) : 0;
       dbg(debug, `Reranker decision: ${bestSkillName} (confidence=${decisionConfidence.toFixed(2)})`);
     } catch (err) {
-      console.warn(`[Router] LLM re-rank failed, returning no skill: ${(err as Error).message || err}`);
-      bestSkillName = 'none';
+      const msg = (err as Error).message || String(err);
+      console.warn(`[Router] LLM re-rank failed, falling back to embedding scores: ${msg.slice(0, 100)}`);
+      // LLM is unavailable — fall back to top embedding/cosine match
+      const ranked = candidates.slice().sort((a, b) => b.score - a.score);
+      if (ranked.length === 0) return [];
+      const top = ranked[0];
+      dbg(debug, `Reranker fallback: ${top.skill.manifest.name} (score=${top.score.toFixed(3)})`);
+      return [{ skill: top.skill, score: top.score, confidence: normalizeConfidence(top.score), reason: 'embedding fallback (LLM unavailable)' }];
     }
 
     if (bestSkillName === 'none') return [];
