@@ -5,4 +5,4 @@ export type { SkillFrontmatter } from "./schema.js";
 export { parseSkillFrontmatter } from "./frontmatter.js";
 export type { ParsedSkillEntry } from "./frontmatter.js";
 export { loadSkillsFromDir } from "./local-loader.js";
-export { resolveSkillConfig } from "./config.js";
+export { resolveSkillConfig, shouldIncludeSkill, evaluateRuntimeEligibility, isBundledSkillAllowed } from "./config.js";
