@@ -98,7 +98,7 @@ openclaw:
 
 ### Design Decisions
 
-- **Flat fields + `openclaw` block**: community skills use the `openclaw:` YAML key; either format is accepted. Flat fields take precedence.
+- **Flat fields + `openclaw` block**: community skills use the `openclaw:` YAML key; either format is accepted. Resolution is per-field: for each field (`os`, `requires`, `install`, etc.), the flat (top-level) value wins if present; the `openclaw` block value is the fallback. This means a skill can declare `os` at top level and `requires` inside `openclaw` — they merge, not replace.
 - **`install` vs `requires`**: `install` describes what the machine needs (package manager specs); `requires` describes runtime eligibility checks.
 - **Permissive Zod schema**: `passthrough()` so community fields don't break parsing.
 - **No old fields**: `adapter`, `endpoint`, `hosting`, `auth` are removed. Execution strategy is derived from directory contents (scripts/, MCP metadata), not declared.
@@ -297,7 +297,7 @@ All string normalization functions reject: leading `-` (flag injection), `\\` an
 
 | Priority | Source | Origin | Path |
 |----------|--------|--------|------|
-| 1 (highest) | Personal home | `"user"` | `~/.agentoctopus/skills/` |
+| 1 (highest) | Personal home | `"user"` | `~/.agents/skills/` |
 | 2 | Workspace | `"project"` | `<cwd>/.agents/skills/` |
 | 3 | Managed (ClaWHub) | `"clawhub"` | `~/.agentoctopus/skills/` |
 | 4 | Plugin dirs | `"plugin"` | from plugin manifests |
