@@ -13,6 +13,8 @@ export { resolveBundledSkillsDir } from "./bundled.js";
 export { installSkillDeps, sanitizeString } from "./install.js";
 export type { InstallPreferences } from "./install.js";
 export { buildWorkspaceSkillCommandSpecs } from "./command-specs.js";
+export { buildWorkspaceSkillSnapshot } from "./snapshot.js";
+export type { SnapshotLimits } from "./snapshot.js";
 export {
   SKILLS_INDEX_URL,
   fetchSkillMeta,
