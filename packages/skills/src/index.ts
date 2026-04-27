@@ -16,6 +16,7 @@ export type { InstallPreferences } from "./install.js";
 export { buildWorkspaceSkillCommandSpecs } from "./command-specs.js";
 export { buildWorkspaceSkillSnapshot } from "./snapshot.js";
 export type { SnapshotLimits } from "./snapshot.js";
+export { registerSkillsChangeListener, bumpSnapshotVersion, watchSkillsDir } from "./refresh.js";
 export {
   SKILLS_INDEX_URL,
   fetchSkillMeta,
