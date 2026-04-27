@@ -8,3 +8,4 @@ export { loadSkillsFromDir } from "./local-loader.js";
 export { resolveSkillConfig, shouldIncludeSkill, evaluateRuntimeEligibility, isBundledSkillAllowed } from "./config.js";
 export { loadWorkspaceSkills, mergeByPriority } from "./workspace.js";
 export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
+export { resolveBundledSkillsDir } from "./bundled.js";
