@@ -6,23 +6,10 @@ description: >
   lookups, transformations, research, weather, translation, geolocation, and
   other tool-backed tasks where a dedicated downstream skill exists.
 tags: [router, orchestrator, tool-selection, gateway, routing, skills, ai]
-version: 1.3.0
-adapter: http
-hosting: local
-input_schema:
-  query: string
-output_schema:
-  result: string
-auth: none
-taskType: agent-collab
-metadata:
-  openclaw:
-    emoji: "🐙"
-    requires:
-      bins: [octopus]
-    setup: |
-      Install from ClaWHub: clawhub install agentoctopus
-      Then run: octopus connect openclaw
+version: "1.3.0"
+requires:
+  bins: [octopus]
+emoji: "🐙"
 ---
 
 ## What this skill does

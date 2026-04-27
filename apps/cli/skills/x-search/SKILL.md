@@ -3,20 +3,10 @@ name: x-search
 description: >
   Search X (Twitter) posts using the xAI Grok API with real-time access to X content.
 tags: [x, twitter, social, search]
-version: 1.0.0
-adapter: subprocess
-hosting: local
-input_schema:
-  query: string
-output_schema:
-  report: string
-auth: api_key
-rating: 3.0
-invocations: 0
-credentials:
-  - key: XAI_API_KEY
-    label: "xAI API Key (get one at console.x.ai)"
-    required: true
+version: "1.0.0"
+requires:
+  bins: [curl, python3]
+  env: [XAI_API_KEY]
 ---
 
 ## Instructions
