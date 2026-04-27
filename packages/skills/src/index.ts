@@ -6,3 +6,5 @@ export { parseSkillFrontmatter } from "./frontmatter.js";
 export type { ParsedSkillEntry } from "./frontmatter.js";
 export { loadSkillsFromDir } from "./local-loader.js";
 export { resolveSkillConfig, shouldIncludeSkill, evaluateRuntimeEligibility, isBundledSkillAllowed } from "./config.js";
+export { loadWorkspaceSkills, mergeByPriority } from "./workspace.js";
+export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
