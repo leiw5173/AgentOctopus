@@ -11,3 +11,19 @@ export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
 export { resolveBundledSkillsDir } from "./bundled.js";
 export { installSkillDeps, sanitizeString } from "./install.js";
 export type { InstallPreferences } from "./install.js";
+export {
+  SKILLS_INDEX_URL,
+  fetchSkillMeta,
+  searchSkills,
+  installSkill,
+  parseZipEntries,
+  fetchAwesomeSlugs,
+  downloadSkillsIndex,
+  installFromIndex,
+} from "./clawhub-install.js";
+export type {
+  SkillIndexEntry,
+  ClaWHubSkillMeta,
+  ClaWHubSearchResult,
+  ZipEntry,
+} from "./clawhub-install.js";
