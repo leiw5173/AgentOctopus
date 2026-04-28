@@ -767,6 +767,43 @@ node apps/cli/dist/index.js sync --debug
 
 **Expected:** `[debug]` lines show version comparison table (installed vs available) and HTTP fetch timing alongside the normal sync output.
 
+### 9.8 Credential guidance — pre-execution (missing declared key)
+
+```bash
+# Ensure XAI_API_KEY is NOT set, then ask a query that routes to x-search
+unset XAI_API_KEY
+node apps/cli/dist/index.js ask "search X for latest AI news"
+```
+
+**Expected:**
+- Spinner shows "Generating setup guide..."
+- Output includes the key name (e.g. `XAI_API_KEY`), a provider description, and `octopus config set XAI_API_KEY <your-key>`
+- Does NOT show raw "Missing credentials" with bare bullet points
+
+### 9.9 Credential guidance — runtime error (key not in SKILL.md requires)
+
+```bash
+# Ask a query that routes to a skill whose script fails due to missing env var
+node apps/cli/dist/index.js ask "search the latest AI news"
+```
+
+**Expected:**
+- If the skill's output contains `"status": "error"` with a key pattern, shows "failed: missing API key" (NOT "Execution successful")
+- Shows LLM-generated setup guide with provider info and `octopus config set` command
+
+### 9.10 Credential guidance — LLM fallback
+
+```bash
+# Temporarily break LLM config to test fallback
+# (e.g. set an invalid API key for the LLM provider)
+node apps/cli/dist/index.js ask "search X for AI news"
+```
+
+**Expected:**
+- When LLM guide generation fails, falls back to simple template:
+  `KEY_NAME is required but not configured.`
+  `Run: octopus config set KEY_NAME <your-key>`
+
 ---
 
 ## Pass / Fail Checklist (Phase 9 — Update & Sync)
@@ -780,3 +817,6 @@ node apps/cli/dist/index.js sync --debug
 | 9.5 | `octopus sync --cloud-url` produces three-phase output | ☐ |
 | 9.6 | `octopus ask --debug` shows `[debug]` routing internals inline | ☐ |
 | 9.7 | `octopus sync --debug` shows `[debug]` version table and HTTP timing | ☐ |
+| 9.8 | Credential guidance shows LLM-generated setup tutorial (pre-execution) | ☐ |
+| 9.9 | Runtime credential error detected and shown with setup guide | ☐ |
+| 9.10 | Credential guidance falls back to template when LLM unavailable | ☐ |
