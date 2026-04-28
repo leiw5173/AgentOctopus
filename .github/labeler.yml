@@ -1,0 +1,50 @@
+# Auto-label rules for PRs based on changed file paths
+
+"documentation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "*.md"
+          - "CLAUDE.md"
+          - "TEST_INSTRUCTIONS.md"
+
+"ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - ".changeset/**"
+
+"core":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/core/**"
+
+"registry":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/registry/**"
+
+"skills":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/skills/**"
+
+"adapters":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/adapters/**"
+
+"gateway":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/gateway/**"
+
+"cli":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "apps/cli/**"
+
+"web":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "apps/web/**"
