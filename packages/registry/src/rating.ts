@@ -123,14 +123,15 @@ export class RatingStore {
         const raw = fs.readFileSync(this.ratingsPath, 'utf-8');
         const parsed = JSON.parse(raw);
         // Migrate any old-format entries
+        let migrated = false;
         for (const key of Object.keys(parsed)) {
           if (isOldFormat(parsed[key])) {
             parsed[key] = migrateOldEntry(parsed[key]);
+            migrated = true;
           }
         }
         this.store = parsed;
-        // Save migrated version immediately
-        if (Object.values(parsed).some((e: unknown) => isOldFormat(e))) {
+        if (migrated) {
           this.save();
         }
       } catch {
@@ -144,7 +145,9 @@ export class RatingStore {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(this.ratingsPath, JSON.stringify(this.store, null, 2), 'utf-8');
+    const tmp = `${this.ratingsPath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.store, null, 2), 'utf-8');
+    fs.renameSync(tmp, this.ratingsPath);
   }
 
   getOrCreate(skillName: string, initialQuality = 3.0): RatingEntry {
@@ -273,8 +276,10 @@ export class RatingStore {
     const m = entry.metrics;
     const totalRuns = m.totalSuccess + m.totalErrors;
 
-    // Reliability: success rate
     if (totalRuns > 0) {
+      // Completion: success rate (task produced a useful result)
+      entry.dimensions.completion = m.totalSuccess / totalRuns;
+      // Reliability: success rate (system didn't crash/error)
       entry.dimensions.reliability = m.totalSuccess / totalRuns;
     }
 

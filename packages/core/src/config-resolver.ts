@@ -56,6 +56,7 @@ function migrateV1ToV2(raw: Record<string, unknown>): OctopusConfigV2 {
   if (typeof raw.ratingsPath === 'string') v2.registry = { ...v2.registry, ratingsPath: raw.ratingsPath };
   if (typeof raw.gistId === 'string') v2.rating = { ...v2.rating, gistId: raw.gistId };
   if (typeof raw.feedbackSharing === 'boolean') v2.rating = { ...v2.rating, feedbackSharing: raw.feedbackSharing };
+  if (typeof raw.deviceId === 'string') v2.rating = { ...v2.rating, deviceId: raw.deviceId };
   if (typeof raw.maxRetries === 'number') v2.execution = { ...v2.execution, maxRetries: raw.maxRetries };
 
   if (envLines.length > 1) {

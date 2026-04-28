@@ -59,6 +59,7 @@ export type AuthConfigSection = z.infer<typeof AuthConfigSchema>;
 export const RatingConfigSchema = z.object({
   feedbackSharing: z.boolean().default(true),
   gistId: z.string().nullable().default(null),
+  deviceId: z.string().nullable().default(null),
 });
 export type RatingConfigSection = z.infer<typeof RatingConfigSchema>;
 

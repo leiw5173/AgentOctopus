@@ -39,6 +39,9 @@ describe('rating-sync', () => {
       expect(result.metrics.totalSuccess).toBe(26);
       expect(result.metrics.totalErrors).toBe(4);
       expect(result.invocations).toBe(30);
+      // Completion: 26/30 ≈ 0.867, Reliability: same
+      expect(result.dimensions.completion).toBeCloseTo(26 / 30);
+      expect(result.dimensions.reliability).toBeCloseTo(1 - 4 / 30);
     });
 
     it('merges quality by weighted average', () => {
