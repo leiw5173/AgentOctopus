@@ -20,8 +20,23 @@ jobs:
 
       - name: Check for changeset files
         run: |
+          # Skip dependabot PRs
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+            echo "Dependabot PR — skipping changeset requirement."
+            exit 0
+          fi
+
+          # Skip PRs with skip-changeset or dependencies label
+          LABELS=$(echo '${{ toJson(github.event.pull_request.labels.*.name) }}' | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'))" 2>/dev/null || echo "")
+          if echo "$LABELS" | grep -qE "skip-changeset|dependencies"; then
+            echo "PR has skip-changeset or dependencies label — skipping."
+            exit 0
+          fi
+
           CHANGED=$(git diff --name-only origin/master...HEAD)
 
+          # Skip if only docs/config files changed
           SKIP_PATTERNS="docs/ .github/ .changeset/ README.md CLAUDE.md TEST_INSTRUCTIONS.md"
           ONLY_DOCS=true
           for file in $CHANGED; do
@@ -43,18 +58,6 @@ jobs:
             exit 0
           fi
 
-          # Skip dependabot PRs
-          if [ "${{ github.actor }}" = "dependabot[bot]" ]; then
-            echo "Dependabot PR — skipping changeset requirement."
-            exit 0
-          fi
-
-          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels --jq '.labels[].name' 2>/dev/null || echo "")
-          if echo "$LABELS" | grep -qE "skip-changeset|dependencies"; then
-            echo "PR has skip-changeset or dependencies label — skipping."
-            exit 0
-          fi
-
           HAS_CHANGESET=$(echo "$CHANGED" | grep -c "^\.changeset/.*\.md$" || true)
           if [ "$HAS_CHANGESET" -eq 0 ]; then
             echo "ERROR: No changeset file found in this PR."
@@ -67,5 +70,3 @@ jobs:
           fi
 
           echo "OK: Found $HAS_CHANGESET changeset file(s)."
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
