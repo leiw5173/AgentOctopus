@@ -8,7 +8,7 @@ import fs from 'fs';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
@@ -282,7 +282,7 @@ program
     const input = { query, text: query };
 
     let succeeded = false;
-    const failedResults: Array<{ authGuidance?: string }> = [];
+    const failedResults: Array<{ authGuidance?: string; credentialError?: boolean }> = [];
     for (let i = 0; i < candidates.length; i++) {
       const { skill, score, reason } = candidates[i]!;
       const attemptLabel = candidates.length > 1 ? ` (attempt ${i + 1}/${candidates.length})` : '';
@@ -309,14 +309,21 @@ program
         }
 
         if ('type' in result && result.type === 'credential_missing') {
-          const lines = result.missing
-            .map((v: { key: string; label?: string }) => v.label ? `  • ${v.key} — ${v.label}` : `  • ${v.key}`)
-            .join('\n');
           spinner.fail(`${result.skillName} requires unconfigured API keys`);
-          console.error(chalk.red(`\nMissing credentials:\n${lines}\n`));
-          console.error(chalk.yellow(`  To configure: octopus config set ${result.missing[0]?.key} <your-key>`));
+          const guideSpinner = ora('Generating setup guide...').start();
+          const missingKeys = result.missing.map(v => v.key);
+          const guide = await engine.executor.generateCredentialGuide(
+            result.skillName,
+            skill.manifest.description,
+            missingKeys,
+          );
+          guideSpinner.stop();
+          console.log();
+          console.log(chalk.yellow(guide.split('\n').map(l => `  ${l}`).join('\n')));
+          console.log();
+          failedResults.push({ authGuidance: undefined, credentialError: true });
           if (i < candidates.length - 1) {
-            console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+            console.log(chalk.yellow(`↻ Trying next skill...\n`));
           }
           continue;
         }
@@ -335,6 +342,41 @@ program
         const execResult = result as import('@agentoctopus/core').ExecutionResult;
 
         if (execResult.adapterResult.success) {
+          // Check if "successful" output actually contains a credential error
+          const outputText = execResult.formattedOutput + '\n' + (execResult.adapterResult.rawText ?? '');
+          let runtimeCredKeys = extractCredentialErrors(outputText);
+
+          // Also check for JSON with "status": "error" containing credential errors
+          if (runtimeCredKeys.length === 0 && execResult.adapterResult.rawText) {
+            try {
+              const parsed = JSON.parse(execResult.adapterResult.rawText.trim());
+              if (parsed.status === 'error') {
+                const errorText = String(parsed.report ?? parsed.error ?? parsed.message ?? '');
+                runtimeCredKeys = extractCredentialErrors(errorText);
+              }
+            } catch {
+              // not JSON, already scanned above
+            }
+          }
+
+          if (runtimeCredKeys.length > 0) {
+            spinner.fail(`${skill.manifest.name} failed: missing API key\n`);
+            const guideSpinner = ora('Generating setup guide...').start();
+            const guide = await engine.executor.generateCredentialGuide(
+              skill.manifest.name,
+              skill.manifest.description,
+              runtimeCredKeys,
+            );
+            guideSpinner.stop();
+            console.log(chalk.yellow(guide.split('\n').map(l => `  ${l}`).join('\n')));
+            console.log();
+            failedResults.push({ authGuidance: undefined, credentialError: true });
+            if (i < candidates.length - 1) {
+              console.log(chalk.yellow(`↻ Trying next skill...\n`));
+            }
+            continue;
+          }
+
           succeeded = true;
           const totalSec = ((t3 - t0) / 1000).toFixed(1);
           spinner.succeed(`Execution successful (${totalSec}s)\n`);
@@ -379,7 +421,7 @@ program
             console.error(chalk.gray(errMsg.split('\n').slice(1).join('\n')));
           }
         }
-        failedResults.push({ authGuidance: execResult.authGuidance });
+        failedResults.push({ authGuidance: execResult.authGuidance, credentialError: false });
         if (i < candidates.length - 1) {
           console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
         }
@@ -398,8 +440,11 @@ program
       if (authGuidance) {
         console.log('\n' + authGuidance);
       }
-      // All skill retries failed — fall back to a direct LLM answer
-      console.log(chalk.yellow(`\nAll ${candidates.length} skill(s) failed. Answering directly...\n`));
+      const allCredential = failedResults.length > 0 && failedResults.every(r => r.credentialError);
+      const msg = allCredential
+        ? `All ${candidates.length} skill(s) failed due to missing API keys. Answering directly...`
+        : `All ${candidates.length} skill(s) failed. Answering directly...`;
+      console.log(chalk.yellow(`\n${msg}\n`));
       const fallbackSpinner = ora('Thinking...').start();
       try {
         const answer = await (engine.executor as any).chatClient?.chat(
