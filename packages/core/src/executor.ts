@@ -252,6 +252,39 @@ export class Executor {
     }
   }
 
+  async generateCredentialGuide(
+    skillName: string,
+    skillDescription: string,
+    missingKeys: string[],
+  ): Promise<string> {
+    const keyList = missingKeys.join(', ');
+    const fallback = missingKeys
+      .map(k => `${k} is required but not configured.\n  Run: octopus config set ${k} <your-key>`)
+      .join('\n\n');
+
+    if (!this.chatClient) return fallback;
+
+    const prompt = `The CLI tool "octopus" tried to run the skill "${skillName}" (${skillDescription}) but it failed because the following API key(s) are not configured: ${keyList}.
+
+For each missing key, provide a SHORT setup guide with:
+1. What provider/service the key is for (one line)
+2. The sign-up or API key page URL
+3. The command: octopus config set KEY_NAME <your-key>
+
+Keep it concise — 3 lines per key max. No markdown headers.
+If you're not confident about the URL, say "Visit the provider's website" instead.`;
+
+    try {
+      const guide = await Promise.race([
+        this.chatClient.chat('You are a helpful assistant that provides concise API key setup instructions.', prompt),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 10_000)),
+      ]);
+      return guide.trim() || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
   /**
    * LLM-guided subprocess execution:
    * 1. If the skill has invoke.js, use the standard subprocess adapter

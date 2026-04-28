@@ -345,3 +345,54 @@ describe('extractCredentialErrors', () => {
     expect(result).toEqual([]);
   });
 });
+
+describe('Executor.generateCredentialGuide()', () => {
+  it('returns LLM-generated guide when chatClient is available', async () => {
+    const mockChat = vi.fn().mockResolvedValue(
+      'XAI_API_KEY — xAI Grok API key\n1. Sign up at https://console.x.ai/\n2. Create an API key\n3. Run: octopus config set XAI_API_KEY <your-key>'
+    );
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry, { chat: mockChat } as any);
+
+    const guide = await executor.generateCredentialGuide('x-search', 'Search X posts', ['XAI_API_KEY']);
+
+    expect(guide).toContain('XAI_API_KEY');
+    expect(guide).toContain('octopus config set');
+    expect(mockChat).toHaveBeenCalledOnce();
+    expect(mockChat.mock.calls[0][1]).toContain('x-search');
+    expect(mockChat.mock.calls[0][1]).toContain('XAI_API_KEY');
+  });
+
+  it('returns fallback template when chatClient is not available', async () => {
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry); // no chatClient
+
+    const guide = await executor.generateCredentialGuide('x-search', 'Search X posts', ['XAI_API_KEY']);
+
+    expect(guide).toContain('XAI_API_KEY');
+    expect(guide).toContain('octopus config set XAI_API_KEY');
+  });
+
+  it('returns fallback template when LLM call throws', async () => {
+    const mockChat = vi.fn().mockRejectedValue(new Error('network error'));
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry, { chat: mockChat } as any);
+
+    const guide = await executor.generateCredentialGuide('x-search', 'Search X posts', ['XAI_API_KEY']);
+
+    expect(guide).toContain('XAI_API_KEY');
+    expect(guide).toContain('octopus config set XAI_API_KEY');
+  });
+
+  it('handles multiple missing keys in fallback', async () => {
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry);
+
+    const guide = await executor.generateCredentialGuide('web-search-pro', 'Web search', ['SERPER_API_KEY', 'TAVILY_API_KEY']);
+
+    expect(guide).toContain('SERPER_API_KEY');
+    expect(guide).toContain('TAVILY_API_KEY');
+    expect(guide).toContain('octopus config set SERPER_API_KEY');
+    expect(guide).toContain('octopus config set TAVILY_API_KEY');
+  });
+});
