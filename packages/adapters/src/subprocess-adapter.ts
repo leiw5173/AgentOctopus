@@ -50,6 +50,9 @@ function findEntryScript(skill: LoadedSkill): { scriptPath: string; runtime: str
 
     const firstPy = files.find(f => f.endsWith('.py'));
     if (firstPy) return { scriptPath: path.join(scriptsDir, firstPy), runtime: 'python3' };
+
+    const firstSh = files.find(f => f.endsWith('.sh'));
+    if (firstSh) return { scriptPath: path.join(scriptsDir, firstSh), runtime: 'bash' };
   } catch {
     // not readable
   }

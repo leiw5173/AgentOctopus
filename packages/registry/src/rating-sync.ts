@@ -55,8 +55,11 @@ export function mergeRatings(
   }
 
   // Recalculate objective dimensions from merged metrics
+  // Use success+errors as denominator (consistent with recalculateObjectiveDimensions)
+  // to handle legacy data where invocations may not equal success+errors
+  const mergedRuns = mergedMetrics.totalSuccess + mergedMetrics.totalErrors;
+  const n = mergedRuns || 1;
   const totalInvocations = local.invocations + cloud.invocations;
-  const n = totalInvocations || 1;
   const LATENCY_TARGET_MS = 2000;
   const TOKEN_COST_TARGET = 500;
 
@@ -105,24 +108,47 @@ function weightedAvg(a: number, aWeight: number, b: number, bWeight: number): nu
   return (a * aWeight + b * bWeight) / total;
 }
 
+// ── Retry helper ──────────────────────────────────────────────────────────
+
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  retries = 3,
+  baseDelayMs = 500,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const res = await fetch(url, options);
+    if (res.ok) return res;
+    if (attempt === retries) {
+      throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
+    }
+    // Only retry on server errors or rate limits, not client errors
+    if (res.status < 500 && res.status !== 429) {
+      throw new Error(`GitHub API error: ${res.status} ${res.statusText}`);
+    }
+    const delay = baseDelayMs * Math.pow(2, attempt);
+    await new Promise(r => setTimeout(r, delay));
+  }
+  throw new Error('Unreachable');
+}
+
 // ── GitHub Gist API ──────────────────────────────────────────────────────
 
 export async function findOrCreateGist(
   githubToken: string,
 ): Promise<string> {
-  const res = await fetch('https://api.github.com/gists?per_page=100', {
+  const res = await fetchWithRetry('https://api.github.com/gists?per_page=100', {
     headers: {
       Authorization: `token ${githubToken}`,
       Accept: 'application/vnd.github.v3+json',
     },
   });
-  if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
 
   const gists = await res.json() as Array<{ id: string; description: string }>;
   const existing = gists.find(g => g.description === 'AgentOctopus Ratings Sync');
   if (existing) return existing.id;
 
-  const createRes = await fetch('https://api.github.com/gists', {
+  const createRes = await fetchWithRetry('https://api.github.com/gists', {
     method: 'POST',
     headers: {
       Authorization: `token ${githubToken}`,
@@ -148,13 +174,12 @@ export async function pullFromGist(
   gistId: string,
   githubToken: string,
 ): Promise<GistContent> {
-  const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+  const res = await fetchWithRetry(`https://api.github.com/gists/${gistId}`, {
     headers: {
       Authorization: `token ${githubToken}`,
       Accept: 'application/vnd.github.v3+json',
     },
   });
-  if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
 
   const gist = await res.json() as {
     files: Record<string, { content: string }>;
@@ -172,7 +197,7 @@ export async function pushToGist(
   githubToken: string,
   content: GistContent,
 ): Promise<void> {
-  const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+  await fetchWithRetry(`https://api.github.com/gists/${gistId}`, {
     method: 'PATCH',
     headers: {
       Authorization: `token ${githubToken}`,
@@ -187,5 +212,4 @@ export async function pushToGist(
       },
     }),
   });
-  if (!res.ok) throw new Error(`GitHub API error pushing gist: ${res.status}`);
 }

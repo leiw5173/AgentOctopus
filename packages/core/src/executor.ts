@@ -2,6 +2,7 @@ import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/r
 import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
+import { applySkillEnvOverrides } from '@agentoctopus/skills';
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
@@ -20,6 +21,25 @@ function buildSandboxedEnv(skill: LoadedSkill): NodeJS.ProcessEnv {
     if (process.env[v.key] !== undefined) safe[v.key] = process.env[v.key];
   }
   return safe;
+}
+
+/**
+ * Build a lightweight adapter from LoadedSkill to a shape compatible with
+ * applySkillEnvOverrides from @agentoctopus/skills.
+ */
+function loadedSkillToEnvEntry(skill: LoadedSkill) {
+  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
+  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
+  return {
+    skill: { name: skill.manifest.name },
+    metadata: {
+      skillKey: (openclaw.skillKey as string) ?? undefined,
+      primaryEnv: (rawMeta.primaryEnv as string) ?? (openclaw.primaryEnv as string) ?? undefined,
+      always: (rawMeta.always as boolean) ?? undefined,
+      os: (rawMeta.os as string[]) ?? undefined,
+      requires: (rawMeta.requires as any) ?? undefined,
+    },
+  };
 }
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
@@ -59,6 +79,40 @@ Rules:
 - Keep it under 5 lines
 - Format as plain text, no markdown`;
 
+export function extractCredentialErrors(text: string): string[] {
+  const scan = text.slice(0, 2000);
+  const keyPattern = /[A-Z][A-Z0-9_]*(?:API_KEY|_KEY|_TOKEN|_SECRET|_URL)/g;
+
+  const triggers = [
+    /([A-Z][A-Z0-9_]*(?:API_KEY|_KEY|_TOKEN|_SECRET|_URL))\s+(?:environment\s+variable\s+)?is\s+not\s+set/gi,
+    /(?:requires?|needs?|missing)\s+([A-Z][A-Z0-9_]*(?:API_KEY|_KEY|_TOKEN|_SECRET|_URL))/gi,
+  ];
+
+  const found = new Set<string>();
+
+  for (const re of triggers) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(scan)) !== null) {
+      found.add(m[1]!);
+    }
+  }
+
+  // Handle comma-separated lists: "requires KEY1, KEY2, KEY3, or KEY4"
+  if (found.size > 0) {
+    const sentencePattern = /(?:requires?|needs?|missing)\s+[^.;\n]{0,300}/gi;
+    let sm: RegExpExecArray | null;
+    while ((sm = sentencePattern.exec(scan)) !== null) {
+      const sentence = sm[0];
+      let km: RegExpExecArray | null;
+      while ((km = keyPattern.exec(sentence)) !== null) {
+        found.add(km[0]);
+      }
+    }
+  }
+
+  return [...found];
+}
+
 export interface ExecutionResult {
   skill: LoadedSkill;
   adapterResult: AdapterResult;
@@ -87,6 +141,17 @@ export class Executor {
 
   async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
     const { debug = false } = opts;
+
+    // Apply env overrides from skills config before credential check.
+    // Overrides set configured apiKey/env vars into process.env so that
+    // skills with credentials in octopus.json can pass the check below.
+    const skillsConfig = getConfig().skills;
+    const revertEnv = applySkillEnvOverrides(
+      [loadedSkillToEnvEntry(skill) as any],
+      skillsConfig as any,
+    );
+
+    try {
     // Check required credentials before invoking
     const required = getRequiredEnvVars(skill.manifest);
     const missing = required.filter(v => !process.env[v.key]);
@@ -106,8 +171,25 @@ export class Executor {
       return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
     }
 
-    const adapter = this.pickAdapter(skill);
-    dbg(debug, `Adapter: ${skill.manifest.adapter}`);
+    let adapter = this.pickAdapter(skill);
+
+    // Infer subprocess adapter for skills that have scripts but no endpoint declared.
+    // Many community skills omit the adapter field (defaulting to http) but ship
+    // scripts/ that should be invoked as subprocess, not LLM-guided curl.
+    if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && skill.dirPath) {
+      const scriptsDir = path.join(skill.dirPath, 'scripts');
+      try {
+        const hasScripts = fs.existsSync(scriptsDir) && fs.readdirSync(scriptsDir).length > 0;
+        if (hasScripts) {
+          adapter = this.subprocess;
+        }
+      } catch {
+        // scripts/ not readable — stay with http adapter
+      }
+    }
+
+    const effectiveAdapterName = adapter === this.subprocess ? 'subprocess' : adapter === this.mcp ? 'mcp' : 'http';
+    dbg(debug, `Adapter: ${effectiveAdapterName}${effectiveAdapterName !== skill.manifest.adapter ? ` (manifest: ${skill.manifest.adapter})` : ''}`);
     dbg(debug, `Input payload: ${JSON.stringify(input).slice(0, 200)}`);
     const startTime = Date.now();
     // Lazily load SKILL.md body from disk — only for the selected skill, not at startup
@@ -115,7 +197,7 @@ export class Executor {
     let adapterResult: AdapterResult;
     try {
       // For subprocess skills, check if we should use LLM-guided execution
-      if (skill.manifest.adapter === 'subprocess' && this.chatClient) {
+      if (adapter === this.subprocess && this.chatClient) {
         adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter, instructions);
       } else if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && this.chatClient) {
         // HTTP skill with no endpoint — use LLM-guided curl execution
@@ -165,6 +247,42 @@ export class Executor {
     const authGuidance = await this.diagnoseAuthError(adapterResult, skill, instructions);
 
     return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
+    } finally {
+      revertEnv();
+    }
+  }
+
+  async generateCredentialGuide(
+    skillName: string,
+    skillDescription: string,
+    missingKeys: string[],
+  ): Promise<string> {
+    const keyList = missingKeys.join(', ');
+    const fallback = missingKeys
+      .map(k => `${k} is required but not configured.\n  Run: octopus config set ${k} <your-key>`)
+      .join('\n\n');
+
+    if (!this.chatClient) return fallback;
+
+    const prompt = `The CLI tool "octopus" tried to run the skill "${skillName}" (${skillDescription}) but it failed because the following API key(s) are not configured: ${keyList}.
+
+For each missing key, provide a SHORT setup guide with:
+1. What provider/service the key is for (one line)
+2. The sign-up or API key page URL
+3. The command: octopus config set KEY_NAME <your-key>
+
+Keep it concise — 3 lines per key max. No markdown headers.
+If you're not confident about the URL, say "Visit the provider's website" instead.`;
+
+    try {
+      const guide = await Promise.race([
+        this.chatClient.chat('You are a helpful assistant that provides concise API key setup instructions.', prompt),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 10_000)),
+      ]);
+      return guide.trim() || fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   /**
@@ -318,7 +436,19 @@ export class Executor {
     // the LLM-guided curl path will always fail. Return immediately with a helpful error.
     const hasHttpUrl = /https?:\/\//.test(instructions);
     const hasLocalScripts = /scripts\/[\w.-]+\.(?:py|js|sh|ts)/.test(instructions);
-    if (hasLocalScripts && !hasHttpUrl) {
+
+    // Also check for actual script files on disk — some skills have scripts/
+    // but don't reference them explicitly in SKILL.md.
+    let hasScriptFiles = false;
+    try {
+      const scriptsDir = path.join(skill.dirPath, 'scripts');
+      hasScriptFiles = fs.existsSync(scriptsDir)
+        && fs.readdirSync(scriptsDir).some(f => /\.(?:py|js|sh|ts)$/.test(f));
+    } catch {
+      // not readable
+    }
+
+    if ((hasLocalScripts || hasScriptFiles) && !hasHttpUrl) {
       const skillName = skill.manifest.name;
       return {
         success: false,
@@ -326,10 +456,27 @@ export class Executor {
       };
     }
 
+    // Second pre-flight: if the skill has no scripts and no endpoint, verify the
+    // instructions actually describe an HTTP API before trying LLM-guided curl.
+    // Skills that only reference agent tools (web_fetch, web_search, etc.) and
+    // have documentation URLs (github.com) are not HTTP API skills.
+    if (!hasLocalScripts && !hasScriptFiles && !skill.manifest.endpoint) {
+      const apiUrlPattern = /https?:\/\/[^\s/]*api[^\s/]*|curl\s+-X|https?:\/\/[^\s/?]+\/[^\s]*\?[^\s]+=[^\s]+/i;
+      const isDocUrl = (url: string) => /github\.com|gitlab\.com|bitbucket\.org|raw\.githubusercontent\.com/i.test(url);
+      const urls = instructions.match(/https?:\/\/[^\s]+/g) ?? [];
+      const apiUrls = urls.filter(u => !isDocUrl(u) && apiUrlPattern.test(u));
+      if (apiUrls.length === 0 && !apiUrlPattern.test(instructions)) {
+        const skillName = skill.manifest.name;
+        return {
+          success: false,
+          error: `Skill "${skillName}" does not expose an HTTP API. Its instructions describe agent-level tools rather than API endpoints.`,
+        };
+      }
+    }
+
     const query = (input.query ?? input.text ?? '') as string;
 
     // Rewrite OpenClaw workspace paths in instructions (same as subprocess path)
-    const fs = await import('fs');
     const homeDir = process.env.HOME || process.env.USERPROFILE || '';
     const openclawPathPattern = /~\/\.openclaw\/workspace\/skills\/[^/\s]+/g;
     const rewrittenInstructions = instructions.replace(openclawPathPattern, (match) => {

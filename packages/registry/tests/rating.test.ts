@@ -82,7 +82,8 @@ describe('RatingStore', () => {
     expect(entry.metrics.avgTokenCost).toBe(100);
     expect(entry.lastInvoked).not.toBe('');
 
-    // Reliability should remain 1.0 with 100% success
+    // Reliability and completion should remain 1.0 with 100% success
+    expect(entry.dimensions.completion).toBe(1.0);
     expect(entry.dimensions.reliability).toBe(1.0);
     // Latency: 1 - 500/2000 = 0.75
     expect(entry.dimensions.latency).toBeCloseTo(0.75);
@@ -98,8 +99,25 @@ describe('RatingStore', () => {
     const entry = store.getOrCreate('error-skill');
     expect(entry.metrics.totalSuccess).toBe(1);
     expect(entry.metrics.totalErrors).toBe(1);
-    // Reliability: 1/2 = 0.5
+    // Reliability and completion: 1/2 = 0.5
+    expect(entry.dimensions.completion).toBeCloseTo(0.5);
     expect(entry.dimensions.reliability).toBeCloseTo(0.5);
+  });
+
+  it('completion dimension tracks success rate across mixed invocations', () => {
+    const store = new RatingStore('/mock/path.json');
+    // 3 successes, 1 failure → completion = 0.75
+    store.recordInvocationMetrics('completion-skill', { success: true, latencyMs: 100, tokenUsage: 50 });
+    store.recordInvocationMetrics('completion-skill', { success: true, latencyMs: 200, tokenUsage: 60 });
+    store.recordInvocationMetrics('completion-skill', { success: false, latencyMs: 150, tokenUsage: 0 });
+    store.recordInvocationMetrics('completion-skill', { success: true, latencyMs: 300, tokenUsage: 40 });
+
+    const entry = store.getOrCreate('completion-skill');
+    // 3 successes out of 4 → 0.75
+    expect(entry.dimensions.completion).toBeCloseTo(0.75);
+    expect(entry.dimensions.reliability).toBeCloseTo(0.75);
+    expect(entry.metrics.totalSuccess).toBe(3);
+    expect(entry.metrics.totalErrors).toBe(1);
   });
 
   it('recordFeedback with source updates quality via EMA and stores source', () => {

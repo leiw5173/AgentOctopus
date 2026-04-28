@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs';
@@ -18,6 +19,17 @@ export interface RatingSyncOptions {
   dryRun?: boolean;
   setupGist?: boolean;
   noFeedbackSharing?: boolean;
+}
+
+function getOrCreateDeviceId(): string {
+  const config = loadConfig();
+  if (config.rating.deviceId) return config.rating.deviceId;
+
+  const raw = JSON.parse(fs.readFileSync(getConfigPath(), 'utf-8'));
+  const deviceId = crypto.randomBytes(8).toString('hex');
+  raw.rating = { ...(raw.rating || {}), deviceId };
+  saveConfigFile(raw);
+  return deviceId;
 }
 
 export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
@@ -123,19 +135,28 @@ export async function runRatingSync(options: RatingSyncOptions): Promise<void> {
         }
       }
 
+      // Pull current syncMeta to increment version
+      let version = 1;
+      try {
+        const current = await pullFromGist(config.rating.gistId, githubToken);
+        version = (current.syncMeta.version || 1) + 1;
+      } catch {
+        // If pull fails, start at version 1
+      }
+
       const content: GistContent = {
         ratings: currentRatings,
         feedbackLog,
         syncMeta: {
           lastSyncTimestamp: new Date().toISOString(),
-          version: 1,
-          userId: '',
+          version,
+          userId: getOrCreateDeviceId(),
         },
       };
 
       if (!options.dryRun) {
         await pushToGist(config.rating.gistId, githubToken, content);
-        spinner.succeed('Pushed ratings to GitHub Gist');
+        spinner.succeed(`Pushed ratings to GitHub Gist (v${version})`);
       } else {
         spinner.info('Dry run: would push ratings to GitHub Gist');
       }

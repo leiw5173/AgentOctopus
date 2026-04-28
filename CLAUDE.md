@@ -57,11 +57,12 @@ Stage only relevant files — never use `git add -A` blindly. Do not commit `dis
 
 When adding a new skill or changing how an existing skill routes:
 
-1. Update `isSkillEligible()` in `packages/core/src/router.ts` if the skill needs hard pre-filtering.
-2. Smoke-test the `scripts/invoke.js` directly: `OCTOPUS_INPUT='{"query":"..."}' node registry/skills/<name>/scripts/invoke.js`
-3. Reset `registry/ratings.json` entries for removed skills so stale data doesn't persist.
-4. The web server caches the skill index at startup — restart it after adding/changing skills.
-5. Add a test row to `TEST_INSTRUCTIONS.md`.
+1. Write `SKILL.md` with the new frontmatter format (no `adapter`, `endpoint`, `hosting`, or `auth` fields). Execution strategy is derived from directory contents (scripts/, MCP metadata). Use `requires.bins`, `requires.env`, `os`, and `always` for eligibility gating.
+2. The Zod schema lives in `packages/skills/src/schema.ts`. Run `pnpm --filter @agentoctopus/skills test` to validate.
+3. Smoke-test the `scripts/invoke.js` directly: `OCTOPUS_INPUT='{"query":"..."}' node registry/skills/<name>/scripts/invoke.js`
+4. Reset `registry/ratings.json` entries for removed skills so stale data doesn't persist.
+5. The web server caches the skill index at startup — restart it after adding/changing skills.
+6. Add a test row to `TEST_INSTRUCTIONS.md`.
 
 ### 5. Phased development tracking
 
@@ -77,8 +78,8 @@ When adding a new skill or changing how an existing skill routes:
 
 ```bash
 pnpm install          # install all workspace dependencies
-pnpm build            # build all packages (order: registry → adapters → core → gateway → apps)
-pnpm test             # run all 35+ tests across all workspaces
+pnpm build            # build all packages (order: skills → registry → adapters → core → gateway → apps)
+pnpm test             # run all 235+ tests across all workspaces
 pnpm dev              # watch mode for all packages in parallel
 
 # Scoped commands
@@ -124,9 +125,10 @@ Published to npm under the `@agentoctopus/` scope, plus an `agentoctopus` umbrel
 User query
   → Gateway (CLI / REST API / IM bot / agent-protocol)
   → Router   — embeds query, cosine-scores against skill index,
-               pre-filters with isSkillEligible(), LLM re-ranks,
-               returns [] if no skill fits (→ direct LLM answer)
-  → Executor — picks adapter (http / mcp / subprocess), invokes skill
+               pre-filters with shouldIncludeSkill() from @agentoctopus/skills,
+               LLM re-ranks, returns [] if no skill fits (→ direct LLM answer)
+  → Executor — applies env overrides via @agentoctopus/skills,
+               picks adapter (inferred from directory contents),
                on failure: tries next candidate (up to maxRetries, default 3)
                all failed → falls back to direct LLM answer
   → Result   — formatted, returned to caller; feedback updates ratings.json
@@ -137,18 +139,19 @@ User query
 | Package | Key files | Role |
 |---|---|---|
 | `packages/agentoctopus` | `index.ts` | Umbrella re-export of all sub-packages |
-| `packages/registry` | `registry.ts`, `rating.ts`, `manifest-schema.ts` | Loads `SKILL.md` files via gray-matter + Zod, persists ratings/invocations to `registry/ratings.json` |
-| `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution |
+| `packages/skills` | `types.ts`, `schema.ts`, `frontmatter.ts`, `config.ts`, `local-loader.ts`, `workspace.ts`, `snapshot.ts`, `install.ts`, `clawhub-install.ts`, `command-specs.ts`, `env-overrides.ts` | SKILL.md loading/parsing, eligibility pipeline, install system, env overrides, prompt snapshot building |
+| `packages/registry` | `registry.ts`, `rating.ts`, `rating-dimensions.ts` | Delegates SKILL.md loading to `@agentoctopus/skills`, persists ratings/invocations to `registry/ratings.json` |
+| `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution — uses `@agentoctopus/skills` for eligibility and env overrides |
 | `packages/adapters` | `http-adapter.ts`, `mcp-adapter.ts`, `subprocess-adapter.ts` | Three execution strategies — HTTP POST, MCP stdio, Node subprocess |
 | `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API |
 | `apps/web` | `src/app/api/ask/route.ts`, `src/app/page.tsx` | Next.js REST API + chat demo UI |
-| `apps/cli` | `src/index.ts`, `src/update.ts`, `src/sync-skills.ts` | Commander CLI (`list`, `ask`, `update`, `sync`, `onboard`, `skill`) |
+| `apps/cli` | `src/index.ts`, `src/update.ts`, `src/sync-skills.ts`, `src/clawhub.ts` | Commander CLI (`list`, `ask`, `update`, `sync`, `onboard`, `skill`) — ClawHub re-exports from `@agentoctopus/skills` |
 
 ### Routing logic (critical to understand)
 
 `router.ts` has two layers of filtering before a skill is chosen:
 
-1. **`isSkillEligible(skill, query)`** — hard keyword/regex pre-filter per skill name. `ip-lookup` only passes through if the query contains an IPv4 address or domain pattern. `weather` requires weather keywords. `translation` requires translate keywords. All other skills pass through unconditionally.
+1. **`shouldIncludeSkill()`** from `@agentoctopus/skills` — per-skill eligibility based on SKILL.md frontmatter: OS compatibility, required binaries, required env vars, required config paths, and bundled skill allowlists. Skills declare their own requirements declaratively. `always: true` bypasses all gates.
 
 2. **LLM re-rank** — sends top-K candidates to the chat LLM with a prompt that includes `"none"` as a valid answer. `parseRerankDecision()` handles fuzzy LLM output. If `"none"` is returned or the re-rank fails, `route()` returns `[]`.
 
@@ -172,7 +175,7 @@ Feedback is collected from CLI (thumbs up/down), web (thumbs up/down), and agent
 
 ### Skills
 
-Skills live in `registry/skills/<name>/SKILL.md` (gray-matter YAML frontmatter + markdown instructions) with an optional `scripts/invoke.js` for subprocess adapter. The Zod schema is in `packages/registry/src/manifest-schema.ts`.
+Skills live in `registry/skills/<name>/SKILL.md` (gray-matter YAML frontmatter + markdown instructions) with an optional `scripts/invoke.js` for subprocess adapter. The Zod schema is in `packages/skills/src/schema.ts`. Execution strategy is derived from directory contents (scripts/, MCP metadata), not declared in frontmatter.
 
 Current real skills (all free APIs, no keys):
 - **weather** — wttr.in
@@ -189,6 +192,7 @@ Key config sections:
 - `rerank` — model
 - `deploy` — mode ("local" | "cloud"), root
 - `gateway` — port, corsOrigins, cloudUrl, syncOnStartup
+- `skills` — allowBundled, entries (per-skill apiKey/env/config), load (extraDirs, watch), limits
 
 Embedding and re-ranking can use a different provider/endpoint than the main LLM. The web `initOctopus()` in `apps/web/src/app/api/ask/route.ts` is a singleton — restart the server after changing skills or config.
 
@@ -204,5 +208,5 @@ All packages are published to npm under the `@agentoctopus/` scope. The umbrella
 
 1. Bump version in each `package.json`
 2. Build: `pnpm build`
-3. Publish in dependency order: registry → adapters → core → gateway → cli → agentoctopus
+3. Publish in dependency order: skills → registry → adapters → core → gateway → cli → agentoctopus
 4. Use `pnpm --filter <pkg> publish --no-git-checks`

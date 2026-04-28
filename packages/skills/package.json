@@ -1,0 +1,32 @@
+{
+  "name": "@agentoctopus/skills",
+  "version": "0.1.0",
+  "description": "AgentOctopus skill invocation pipeline — loading, eligibility, install, snapshots",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["README.md", "dist"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "glob": "^11.0.0",
+    "gray-matter": "^4.0.3",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  },
+  "publishConfig": {"access": "public"},
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leiw5173/AgentOctopus"
+  }
+}

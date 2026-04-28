@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Executor } from '../src/executor.js';
+import { Executor, extractCredentialErrors } from '../src/executor.js';
 import { SkillRegistry } from '@agentoctopus/registry';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 
@@ -277,5 +277,122 @@ describe('CredentialMissingResult type', () => {
     expect(result.type).toBe('credential_missing');
     expect(result.skillName).toBe('test-skill');
     expect(result.missing[0].key).toBe('TEST_KEY');
+  });
+});
+
+describe('extractCredentialErrors', () => {
+  it('extracts key from "KEY environment variable is not set"', () => {
+    const result = extractCredentialErrors('Error: XAI_API_KEY environment variable is not set.');
+    expect(result).toEqual(['XAI_API_KEY']);
+  });
+
+  it('extracts key from "KEY is not set"', () => {
+    const result = extractCredentialErrors('SERPER_API_KEY is not set');
+    expect(result).toEqual(['SERPER_API_KEY']);
+  });
+
+  it('extracts key from "requires KEY"', () => {
+    const result = extractCredentialErrors('--news requires SERPER_API_KEY');
+    expect(result).toEqual(['SERPER_API_KEY']);
+  });
+
+  it('extracts multiple keys from comma-separated list', () => {
+    const result = extractCredentialErrors(
+      '--news requires SERPER_API_KEY, TAVILY_API_KEY, SERPAPI_API_KEY, YOU_API_KEY, or SEARXNG_INSTANCE_URL'
+    );
+    expect(result).toEqual(['SERPER_API_KEY', 'TAVILY_API_KEY', 'SERPAPI_API_KEY', 'YOU_API_KEY', 'SEARXNG_INSTANCE_URL']);
+  });
+
+  it('extracts key from "missing KEY"', () => {
+    const result = extractCredentialErrors('Error: missing OPENAI_API_KEY');
+    expect(result).toEqual(['OPENAI_API_KEY']);
+  });
+
+  it('extracts key from "needs KEY"', () => {
+    const result = extractCredentialErrors('This skill needs GITHUB_TOKEN to work');
+    expect(result).toEqual(['GITHUB_TOKEN']);
+  });
+
+  it('extracts key with _URL suffix', () => {
+    const result = extractCredentialErrors('requires SEARXNG_INSTANCE_URL');
+    expect(result).toEqual(['SEARXNG_INSTANCE_URL']);
+  });
+
+  it('extracts key with _SECRET suffix', () => {
+    const result = extractCredentialErrors('AWS_SECRET_KEY is not set');
+    expect(result).toEqual(['AWS_SECRET_KEY']);
+  });
+
+  it('returns empty array when no credential pattern matches', () => {
+    const result = extractCredentialErrors('Connection timeout after 30s');
+    expect(result).toEqual([]);
+  });
+
+  it('deduplicates keys mentioned multiple times', () => {
+    const result = extractCredentialErrors('XAI_API_KEY is not set. Please set XAI_API_KEY.');
+    expect(result).toEqual(['XAI_API_KEY']);
+  });
+
+  it('extracts from JSON error output', () => {
+    const json = JSON.stringify({ report: 'Search failed: Error: XAI_API_KEY environment variable is not set.\n', status: 'error' });
+    const result = extractCredentialErrors(json);
+    expect(result).toEqual(['XAI_API_KEY']);
+  });
+
+  it('only scans first 2000 chars', () => {
+    const padding = 'x'.repeat(2100);
+    const result = extractCredentialErrors(padding + 'XAI_API_KEY is not set');
+    expect(result).toEqual([]);
+  });
+});
+
+describe('Executor.generateCredentialGuide()', () => {
+  it('returns LLM-generated guide when chatClient is available', async () => {
+    const mockChat = vi.fn().mockResolvedValue(
+      'XAI_API_KEY — xAI Grok API key\n1. Sign up at https://console.x.ai/\n2. Create an API key\n3. Run: octopus config set XAI_API_KEY <your-key>'
+    );
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry, { chat: mockChat } as any);
+
+    const guide = await executor.generateCredentialGuide('x-search', 'Search X posts', ['XAI_API_KEY']);
+
+    expect(guide).toContain('XAI_API_KEY');
+    expect(guide).toContain('octopus config set');
+    expect(mockChat).toHaveBeenCalledOnce();
+    expect(mockChat.mock.calls[0][1]).toContain('x-search');
+    expect(mockChat.mock.calls[0][1]).toContain('XAI_API_KEY');
+  });
+
+  it('returns fallback template when chatClient is not available', async () => {
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry); // no chatClient
+
+    const guide = await executor.generateCredentialGuide('x-search', 'Search X posts', ['XAI_API_KEY']);
+
+    expect(guide).toContain('XAI_API_KEY');
+    expect(guide).toContain('octopus config set XAI_API_KEY');
+  });
+
+  it('returns fallback template when LLM call throws', async () => {
+    const mockChat = vi.fn().mockRejectedValue(new Error('network error'));
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry, { chat: mockChat } as any);
+
+    const guide = await executor.generateCredentialGuide('x-search', 'Search X posts', ['XAI_API_KEY']);
+
+    expect(guide).toContain('XAI_API_KEY');
+    expect(guide).toContain('octopus config set XAI_API_KEY');
+  });
+
+  it('handles multiple missing keys in fallback', async () => {
+    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
+    const executor = new Executor(registry);
+
+    const guide = await executor.generateCredentialGuide('web-search-pro', 'Web search', ['SERPER_API_KEY', 'TAVILY_API_KEY']);
+
+    expect(guide).toContain('SERPER_API_KEY');
+    expect(guide).toContain('TAVILY_API_KEY');
+    expect(guide).toContain('octopus config set SERPER_API_KEY');
+    expect(guide).toContain('octopus config set TAVILY_API_KEY');
   });
 });

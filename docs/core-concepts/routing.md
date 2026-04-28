@@ -18,14 +18,18 @@ The LLM distills the query to a short intent phrase (e.g., "shorten a URL", "get
 
 ### 3. Eligibility filtering
 
-`isSkillEligible()` applies hard keyword/regex filters per skill:
+`shouldIncludeSkill()` from `@agentoctopus/skills` checks each skill against its declared requirements from SKILL.md frontmatter:
 
-| Skill | Filter rule |
+| Gate | Condition |
 |---|---|
-| `ip-lookup` | Query must contain an IPv4 address or domain name |
-| `weather` | Query must contain weather keywords (weather, temperature, forecast, rain, etc.) |
-| `translation` | Query must contain translate keywords or language names |
-| All others | Pass through unconditionally |
+| Config enabled | Skill not explicitly disabled in `octopus.json` |
+| Bundled allowlist | Bundled skills must be in `skills.allowBundled` (if configured) |
+| `always: true` | Bypasses all other gates |
+| OS match | `os: [darwin, linux]` — current platform must be in the list |
+| Required binaries | `requires.bins: [curl, jq]` — ALL must exist on PATH |
+| Any-bin | `requires.anyBins: [python3, python]` — AT LEAST ONE must exist |
+| Required env vars | `requires.env: [API_KEY]` — ALL must be set |
+| Required config | `requires.config: [browser.enabled]` — ALL must be truthy |
 
 ### 4. Embedding + cosine similarity
 

@@ -48,6 +48,7 @@ Thumbs.db
 registry/ratings.json
 registry/ratings.bak.json
 registry/marketplace/
+registry/skills/
 credentials.enc
 .octopus/
 

@@ -5,16 +5,9 @@ description: >
   Use when the user asks about weather, temperature, rain, forecast,
   or conditions in a place — e.g. "What's the weather in Tokyo?".
 tags: [weather, forecast, temperature, climate]
-version: 1.0.0
-adapter: subprocess
-hosting: local
-input_schema:
-  query: string
-output_schema:
-  report: string
-auth: none
-rating: 4.8
-invocations: 0
+version: "1.0.0"
+requires:
+  bins: [curl]
 ---
 
 ## Instructions

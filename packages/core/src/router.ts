@@ -1,7 +1,9 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
 import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
+import { shouldIncludeSkill, type SkillEligibilityContext } from '@agentoctopus/skills';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
+import { getConfig } from './config-resolver.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -20,10 +22,6 @@ const FAILURE_PENALTY = 0.50; // per negative feedback — must overcome keyword
 const CATCHALL_PENALTY = 2.0;  // penalty for skills with overly broad "catch-all" descriptions
 const LLM_RERANK_CAP = 10;    // max candidates sent to LLM reranker
 const RELIABILITY_FLOOR = 0.1; // minimum routingScore multiplier — even broken skills get a small chance
-const IP_ADDRESS_PATTERN = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/;
-const DOMAIN_PATTERN = /\b(?=.{1,253}\b)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b/i;
-const WEATHER_KEYWORDS = /\b(weather|temperature|forecast|rain|snow|wind|humidity|sunny|cloudy|storm|climate)\b/i;
-const TRANSLATION_KEYWORDS = /\b(translate|translation|in\s+(french|spanish|japanese|chinese|english|german|italian|portuguese|korean|arabic|russian)|to\s+(french|spanish|japanese|chinese|english|german|italian|portuguese|korean|arabic|russian))\b/i;
 
 // Skills with catch-all descriptions that match everything should be penalized.
 const CATCHALL_PATTERN = /\b(any time the user|whenever the user|any request|use this skill for any|regardless of|even if.*not.*mention|but is not limited to|any.*question|any.*task|any.*query)\b/i;
@@ -111,39 +109,33 @@ interface EmbedCacheFile {
   skills: Record<string, { hash: string; embedding: number[] }>;
 }
 
-export function isSkillEligible(skill: LoadedSkill, query: string): boolean {
-  const normalizedQuery = query.trim();
-  const skillName = skill.manifest.name.toLowerCase();
+/**
+ * Build a lightweight adapter from LoadedSkill to a shape compatible with
+ * shouldIncludeSkill from @agentoctopus/skills. Only populates fields that
+ * shouldIncludeSkill (and its callees) actually access.
+ */
+function loadedSkillToEligibilityEntry(skill: LoadedSkill) {
+  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
+  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
 
-  if (skillName === 'ip-lookup') {
-    return IP_ADDRESS_PATTERN.test(normalizedQuery) || DOMAIN_PATTERN.test(normalizedQuery);
-  }
-  if (skillName === 'weather') {
-    return WEATHER_KEYWORDS.test(normalizedQuery);
-  }
-  if (skillName === 'translation') {
-    return TRANSLATION_KEYWORDS.test(normalizedQuery);
-  }
-
-  // Filter out http/no-endpoint skills that have zero keyword relevance to the query.
-  // These skills can only be executed via LLM-guided curl, and if they have no keyword
-  // overlap with the query they are almost certainly irrelevant noise.
-  if (
-    skill.manifest.adapter === 'http' &&
-    !skill.manifest.endpoint &&
-    !skill.manifest.llm_powered
-  ) {
-    const words = normalizedQuery.toLowerCase().split(/\W+/).filter(w => w.length > 2);
-    const haystack = (
-      skill.manifest.name + ' ' +
-      skill.manifest.description + ' ' +
-      skill.manifest.tags.join(' ')
-    ).toLowerCase();
-    const hasAnyMatch = words.some(w => haystack.includes(w));
-    if (!hasAnyMatch) return false;
-  }
-
-  return true;
+  return {
+    skill: {
+      name: skill.manifest.name,
+      source: (rawMeta.source as string) ??
+        (rawMeta.openclaw ? 'clawhub' : 'user'),
+    },
+    metadata: {
+      skillKey: (openclaw.skillKey as string) ?? undefined,
+      always: (rawMeta.always as boolean) ?? undefined,
+      os: (rawMeta.os as string[]) ?? undefined,
+      requires: (rawMeta.requires as {
+        bins?: string[];
+        anyBins?: string[];
+        env?: string[];
+        config?: string[];
+      }) ?? undefined,
+    },
+  };
 }
 
 function parseRerankDecision(response: string, candidates: RoutingResultCandidate[]): string | 'none' {
@@ -323,10 +315,24 @@ export class Router {
       }
     }
 
+    // Build eligibility context once for all skills
+    const skillsConfig = getConfig().skills;
+    const eligibility: SkillEligibilityContext = {
+      hasBin: (bin: string) => isBinAvailable(bin),
+      hasAnyBin: (bins: string[]) => bins.some(b => isBinAvailable(b)),
+      hasEnv: (key: string) => !!process.env[key],
+      isConfigPathTruthy: (_path: string) => true, // config path check not applicable at routing time
+      os: process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
+    };
+
     const eligible: VectorEntry[] = [];
     for (const entry of this.index) {
-      const pass = isSkillEligible(entry.skill, routingQuery);
-      dbg(debug, `isSkillEligible: ${entry.skill.manifest.name} → ${pass ? 'PASS' : 'SKIP'}`);
+      const pass = shouldIncludeSkill({
+        entry: loadedSkillToEligibilityEntry(entry.skill) as any,
+        config: skillsConfig as any,
+        eligibility,
+      });
+      dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → ${pass ? 'PASS' : 'SKIP'}`);
       if (pass) eligible.push(entry);
     }
     if (eligible.length === 0) return [];
@@ -423,8 +429,14 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
       const decisionConfidence = chosenEntry ? normalizeConfidence(chosenEntry.score) : 0;
       dbg(debug, `Reranker decision: ${bestSkillName} (confidence=${decisionConfidence.toFixed(2)})`);
     } catch (err) {
-      console.warn(`[Router] LLM re-rank failed, returning no skill: ${(err as Error).message || err}`);
-      bestSkillName = 'none';
+      const msg = (err as Error).message || String(err);
+      console.warn(`[Router] LLM re-rank failed, falling back to embedding scores: ${msg.slice(0, 100)}`);
+      // LLM is unavailable — fall back to top embedding/cosine match
+      const ranked = candidates.slice().sort((a, b) => b.score - a.score);
+      if (ranked.length === 0) return [];
+      const top = ranked[0];
+      dbg(debug, `Reranker fallback: ${top.skill.manifest.name} (score=${top.score.toFixed(3)})`);
+      return [{ skill: top.skill, score: top.score, confidence: normalizeConfidence(top.score), reason: 'embedding fallback (LLM unavailable)' }];
     }
 
     if (bestSkillName === 'none') return [];

@@ -6,8 +6,8 @@ Skills are the building blocks of AgentOctopus. Each skill is a self-contained c
 
 Every skill lives in `registry/skills/<name>/` and consists of:
 
-- **`SKILL.md`** — gray-matter YAML frontmatter + markdown instructions for the LLM
-- **`scripts/invoke.js`** (optional) — required when `adapter: subprocess`
+- **`SKILL.md`** — gray-matter YAML frontmatter + markdown instructions for the LLM. The frontmatter is validated by the Zod schema in `packages/skills/src/schema.ts`.
+- **`scripts/invoke.js`** (optional) — required for subprocess execution. Receives `OCTOPUS_INPUT` as a JSON env variable and writes the result to stdout.
 
 ### SKILL.md frontmatter
 
@@ -16,17 +16,34 @@ Every skill lives in `registry/skills/<name>/` and consists of:
 name: my-skill
 description: What this skill does and when to use it.
 tags: [tag1, tag2]
-version: 1.0.0
-adapter: http | mcp | subprocess
-endpoint: https://api.example.com/invoke  # for http adapter
+version: "1.0.0"
+os: [darwin, linux]
+primaryEnv: MY_API_KEY
+requires:
+  bins: [curl]
+  anyBins: [python3, python]
+  env: [MY_API_KEY]
+  config: [browser.enabled]
+always: false
+user-invocable: true
+disable-model-invocation: false
 ---
 ```
 
-Required fields: `name`, `description`, `adapter`, `tags`.
+Execution strategy is derived from directory contents (scripts/, MCP metadata), not declared in frontmatter.
 
-### Environment variable requirements
+Required fields: `name`, `description`.
 
-Skills that need API keys declare them in frontmatter:
+### Eligibility gating
+
+Skills declare their runtime requirements in the frontmatter. The skills package evaluates eligibility automatically — no code changes needed in the router:
+
+- `os` — restrict to specific platforms
+- `requires.bins` — ALL must exist on PATH
+- `requires.anyBins` — AT LEAST ONE must exist
+- `requires.env` — ALL env vars must be set
+- `requires.config` — ALL config paths must be truthy
+- `always: true` — bypass all gates
 
 ```yaml
 metadata:
