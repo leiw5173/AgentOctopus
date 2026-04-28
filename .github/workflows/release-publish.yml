@@ -58,6 +58,7 @@ jobs:
       actions: read
 
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-env
         with:
           registry-url: "https://registry.npmjs.org"

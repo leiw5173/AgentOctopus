@@ -14,6 +14,7 @@ jobs:
     name: 🔍 Validate Version
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-env
       - name: Check version not already published
         run: |
@@ -30,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate-version
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-env
       - name: Lint all workspaces
         run: pnpm -r lint
@@ -45,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: audit
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node-env
       - name: Build all packages
         run: pnpm -r --workspace-concurrency=1 build
