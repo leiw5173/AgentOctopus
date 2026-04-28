@@ -9,25 +9,16 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
+      - uses: ./.github/actions/setup-node-env
       - name: Install tools
         run: npm install -g markdownlint-cli markdown-link-check
-
       - name: Lint markdown
         run: markdownlint docs/ --ignore docs/superpowers/ --config docs/.markdownlint.json
-
       - name: Check links
         run: |
           find docs -name '*.md' -not -path 'docs/superpowers/*' | while read f; do
             markdown-link-check "$f" --config .markdownlinkcheck.json 2>&1 || true
           done
-
       - name: Verify SUMMARY.md entries
         run: |
           while IFS= read -r line; do
