@@ -1,1 +1,18 @@
-{"ignorePatterns": [{"pattern": "^http://localhost"}, {"pattern": "^https://your-"}, {"pattern": "^https://cloud:"}], "timeout": "10s", "retryOn429": true, "retryCount": 2}
+{
+  "ignorePatterns": [
+    {
+      "pattern": "^https://github.com/"
+    },
+    {
+      "pattern": "^https://www.npmjs.com/"
+    },
+    {
+      "pattern": "^http://localhost"
+    }
+  ],
+  "timeout": "20s",
+  "retryOn429": true,
+  "retryCount": 2,
+  "fallbackRetryDelay": "30s",
+  "aliveStatusCodes": [200, 201, 202, 203, 204, 206, 301, 302, 303, 307, 308]
+}
