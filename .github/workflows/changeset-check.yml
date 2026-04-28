@@ -1,0 +1,65 @@
+name: Changeset Check
+
+on:
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: changeset-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 📝 Require Changeset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for changeset files
+        run: |
+          CHANGED=$(git diff --name-only origin/master...HEAD)
+
+          SKIP_PATTERNS="docs/ .github/ .changeset/ README.md CLAUDE.md TEST_INSTRUCTIONS.md"
+          ONLY_DOCS=true
+          for file in $CHANGED; do
+            skip=false
+            for pattern in $SKIP_PATTERNS; do
+              if echo "$file" | grep -q "^$pattern"; then
+                skip=true
+                break
+              fi
+            done
+            if [ "$skip" = false ]; then
+              ONLY_DOCS=false
+              break
+            fi
+          done
+
+          if [ "$ONLY_DOCS" = true ]; then
+            echo "Only docs/config files changed — skipping changeset requirement."
+            exit 0
+          fi
+
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels --jq '.labels[].name' 2>/dev/null || echo "")
+          if echo "$LABELS" | grep -q "skip-changeset"; then
+            echo "PR has skip-changeset label — skipping."
+            exit 0
+          fi
+
+          HAS_CHANGESET=$(echo "$CHANGED" | grep -c "^\.changeset/.*\.md$" || true)
+          if [ "$HAS_CHANGESET" -eq 0 ]; then
+            echo "ERROR: No changeset file found in this PR."
+            echo ""
+            echo "Please add a changeset by running:"
+            echo "  pnpm changeset"
+            echo ""
+            echo "Or add the 'skip-changeset' label if this PR does not need a version bump."
+            exit 1
+          fi
+
+          echo "OK: Found $HAS_CHANGESET changeset file(s)."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
