@@ -43,9 +43,15 @@ jobs:
             exit 0
           fi
 
+          # Skip dependabot PRs
+          if [ "${{ github.actor }}" = "dependabot[bot]" ]; then
+            echo "Dependabot PR — skipping changeset requirement."
+            exit 0
+          fi
+
           LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels --jq '.labels[].name' 2>/dev/null || echo "")
-          if echo "$LABELS" | grep -q "skip-changeset"; then
-            echo "PR has skip-changeset label — skipping."
+          if echo "$LABELS" | grep -qE "skip-changeset|dependencies"; then
+            echo "PR has skip-changeset or dependencies label — skipping."
             exit 0
           fi
 
