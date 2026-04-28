@@ -151,8 +151,8 @@ jobs:
         run: |
           VERSION=$(cat /tmp/preflight/release-version.txt)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          if [ -f CHANGELOG.md ]; then
-            CHANGELOG_ENTRY=$(awk "/^## $VERSION/{flag=1; next} /^## [0-9]/{flag=0} flag" CHANGELOG.md)
+          if [ -f packages/agentoctopus/CHANGELOG.md ]; then
+            CHANGELOG_ENTRY=$(awk "/^## $VERSION/{flag=1; next} /^## [0-9]/{flag=0} flag" packages/agentoctopus/CHANGELOG.md)
             echo "entry<<EOF" >> $GITHUB_OUTPUT
             echo "$CHANGELOG_ENTRY" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
