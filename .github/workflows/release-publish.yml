@@ -1,0 +1,187 @@
+name: Release Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      preflight_run_id:
+        description: "Run ID of the release-preflight workflow"
+        required: true
+        type: string
+      npm_dist_tag:
+        description: "npm dist-tag"
+        required: true
+        default: "latest"
+        type: choice
+        options:
+          - "latest"
+          - "beta"
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate-gate:
+    name: 🔐 Validate Publish Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert on master branch
+        if: github.ref != 'refs/heads/master'
+        run: |
+          echo "ERROR: Publish must be triggered from master branch."
+          exit 1
+      - name: Validate preflight run ID exists
+        run: |
+          gh run view ${{ inputs.preflight_run_id }} --json name,status,conclusion > /tmp/preflight-check.json
+          NAME=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/preflight-check.json','utf8')).name")
+          CONCLUSION=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/preflight-check.json','utf8')).conclusion")
+          if [ "$NAME" != "Release Preflight" ]; then
+            echo "ERROR: Run ${{ inputs.preflight_run_id }} is not a Release Preflight run."
+            exit 1
+          fi
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "ERROR: Preflight run ${{ inputs.preflight_run_id }} did not succeed (conclusion: $CONCLUSION)."
+            exit 1
+          fi
+          echo "OK: Preflight run ${{ inputs.preflight_run_id }} is valid."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    name: 🚀 Publish to npm
+    runs-on: ubuntu-latest
+    needs: validate-gate
+    environment: npm-release
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+
+    steps:
+      - uses: ./.github/actions/setup-node-env
+        with:
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download preflight artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: preflight-${{ github.sha }}
+          path: /tmp/preflight
+          run-id: ${{ inputs.preflight_run_id }}
+
+      - name: Verify provenance
+        run: |
+          CURRENT_SHA=$(git rev-parse HEAD)
+          ARTIFACT_SHA=$(cat /tmp/preflight/release-sha.txt)
+          ARTIFACT_TAG=$(cat /tmp/preflight/release-tag.txt)
+          ARTIFACT_VERSION=$(cat /tmp/preflight/release-version.txt)
+
+          echo "Current SHA:  $CURRENT_SHA"
+          echo "Artifact SHA: $ARTIFACT_SHA"
+          echo "Artifact tag: $ARTIFACT_TAG"
+          echo "Artifact version: $ARTIFACT_VERSION"
+
+          if [ "$CURRENT_SHA" != "$ARTIFACT_SHA" ]; then
+            echo "ERROR: SHA mismatch between preflight artifact and current HEAD."
+            exit 1
+          fi
+          echo "OK: Provenance verified."
+
+      - name: Publish @agentoctopus/skills
+        run: |
+          for i in 1 2 3; do
+            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-skills-*.tgz && break
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+
+      - name: Publish @agentoctopus/registry
+        run: |
+          for i in 1 2 3; do
+            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-registry-*.tgz && break
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+
+      - name: Publish @agentoctopus/adapters
+        run: |
+          for i in 1 2 3; do
+            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-adapters-*.tgz && break
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+
+      - name: Publish @agentoctopus/core
+        run: |
+          for i in 1 2 3; do
+            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-core-*.tgz && break
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+
+      - name: Publish @agentoctopus/gateway
+        run: |
+          for i in 1 2 3; do
+            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-gateway-*.tgz && break
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+
+      - name: Publish @agentoctopus/cli
+        run: |
+          for i in 1 2 3; do
+            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-cli-*.tgz && break
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+
+      - name: Publish agentoctopus (umbrella)
+        run: |
+          # Use [0-9] glob pattern to only match agentoctopus-X.Y.Z.tgz
+          # and NOT the scoped packages (agentoctopus-skills-X.Y.Z.tgz etc.)
+          for i in 1 2 3; do
+            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-[0-9]*.tgz && break
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+
+      - name: Extract changelog entry
+        id: changelog
+        run: |
+          VERSION=$(cat /tmp/preflight/release-version.txt)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if [ -f CHANGELOG.md ]; then
+            CHANGELOG_ENTRY=$(awk "/^## $VERSION/{flag=1; next} /^## [0-9]/{flag=0} flag" CHANGELOG.md)
+            echo "entry<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGELOG_ENTRY" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "entry<<EOF" >> $GITHUB_OUTPUT
+            echo "Release v$VERSION" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.changelog.outputs.version }}
+          name: v${{ steps.changelog.outputs.version }}
+          body: ${{ steps.changelog.outputs.entry }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          VERSION=$(cat /tmp/preflight/release-version.txt)
+          echo "## ✅ Published v$VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | Version | Tag |" >> $GITHUB_STEP_SUMMARY
+          echo "| ------- | ------- | --- |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/skills\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/registry\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/adapters\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/core\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/gateway\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/cli\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`agentoctopus\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
