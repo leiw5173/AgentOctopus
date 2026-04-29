@@ -25,7 +25,7 @@ jobs:
     name: 🔐 Validate Publish Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Assert on master branch
         if: github.ref != 'refs/heads/master'
         run: |
@@ -59,7 +59,7 @@ jobs:
       actions: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-node-env
         with:
           registry-url: "https://registry.npmjs.org"
