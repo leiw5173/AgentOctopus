@@ -18,7 +18,7 @@ jobs:
       - uses: ./.github/actions/setup-node-env
       - name: Check version not already published
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION=$(node -p "require('./packages/agentoctopus/package.json').version")
           echo "Package version: $VERSION"
           if npm view agentoctopus@$VERSION version > /dev/null 2>&1; then
             echo "ERROR: agentoctopus@$VERSION already exists on npm. Bump the version."
@@ -54,7 +54,7 @@ jobs:
       - name: Pack and write metadata
         run: |
           SHA=$(git rev-parse HEAD)
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION=$(node -p "require('./packages/agentoctopus/package.json').version")
           echo "sha=$SHA" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
@@ -78,6 +78,6 @@ jobs:
       - name: Upload preflight artifact
         uses: actions/upload-artifact@v4
         with:
-          name: preflight-${{ github.sha }}
+          name: preflight-${{ github.run_id }}
           path: /tmp/preflight/
           retention-days: 7

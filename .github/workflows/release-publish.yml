@@ -25,6 +25,7 @@ jobs:
     name: 🔐 Validate Publish Gate
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Assert on master branch
         if: github.ref != 'refs/heads/master'
         run: |
@@ -66,7 +67,7 @@ jobs:
       - name: Download preflight artifact
         uses: actions/download-artifact@v4
         with:
-          name: preflight-${{ github.sha }}
+          name: preflight-${{ inputs.preflight_run_id }}
           path: /tmp/preflight
           run-id: ${{ inputs.preflight_run_id }}
 
@@ -151,8 +152,8 @@ jobs:
         run: |
           VERSION=$(cat /tmp/preflight/release-version.txt)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          if [ -f CHANGELOG.md ]; then
-            CHANGELOG_ENTRY=$(awk "/^## $VERSION/{flag=1; next} /^## [0-9]/{flag=0} flag" CHANGELOG.md)
+          if [ -f packages/agentoctopus/CHANGELOG.md ]; then
+            CHANGELOG_ENTRY=$(awk "/^## $VERSION/{flag=1; next} /^## [0-9]/{flag=0} flag" packages/agentoctopus/CHANGELOG.md)
             echo "entry<<EOF" >> $GITHUB_OUTPUT
             echo "$CHANGELOG_ENTRY" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
