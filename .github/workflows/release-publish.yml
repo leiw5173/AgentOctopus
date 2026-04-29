@@ -70,6 +70,7 @@ jobs:
           name: preflight-${{ inputs.preflight_run_id }}
           path: /tmp/preflight
           run-id: ${{ inputs.preflight_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify provenance
         run: |
