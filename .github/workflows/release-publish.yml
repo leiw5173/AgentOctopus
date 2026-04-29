@@ -95,7 +95,7 @@ jobs:
       - name: Publish @agentoctopus/skills
         run: |
           for i in 1 2 3; do
-            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-skills-*.tgz && break
+            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-skills-*.tgz && break
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
@@ -103,7 +103,7 @@ jobs:
       - name: Publish @agentoctopus/registry
         run: |
           for i in 1 2 3; do
-            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-registry-*.tgz && break
+            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-registry-*.tgz && break
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
@@ -111,7 +111,7 @@ jobs:
       - name: Publish @agentoctopus/adapters
         run: |
           for i in 1 2 3; do
-            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-adapters-*.tgz && break
+            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-adapters-*.tgz && break
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
@@ -119,7 +119,7 @@ jobs:
       - name: Publish @agentoctopus/core
         run: |
           for i in 1 2 3; do
-            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-core-*.tgz && break
+            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-core-*.tgz && break
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
@@ -127,7 +127,7 @@ jobs:
       - name: Publish @agentoctopus/gateway
         run: |
           for i in 1 2 3; do
-            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-gateway-*.tgz && break
+            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-gateway-*.tgz && break
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
@@ -135,7 +135,7 @@ jobs:
       - name: Publish @agentoctopus/cli
         run: |
           for i in 1 2 3; do
-            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-cli-*.tgz && break
+            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-cli-*.tgz && break
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
@@ -145,7 +145,7 @@ jobs:
           # Use [0-9] glob pattern to only match agentoctopus-X.Y.Z.tgz
           # and NOT the scoped packages (agentoctopus-skills-X.Y.Z.tgz etc.)
           for i in 1 2 3; do
-            npm publish --provenance --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-[0-9]*.tgz && break
+            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-[0-9]*.tgz && break
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
