@@ -67,7 +67,7 @@ jobs:
       - name: Download preflight artifact
         uses: actions/download-artifact@v4
         with:
-          name: preflight-${{ github.sha }}
+          name: preflight-${{ inputs.preflight_run_id }}
           path: /tmp/preflight
           run-id: ${{ inputs.preflight_run_id }}
 
