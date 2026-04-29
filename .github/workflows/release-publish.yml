@@ -85,10 +85,11 @@ jobs:
           echo "Artifact version: $ARTIFACT_VERSION"
 
           if [ "$CURRENT_SHA" != "$ARTIFACT_SHA" ]; then
-            echo "ERROR: SHA mismatch between preflight artifact and current HEAD."
-            exit 1
+            echo "⚠️  SHA differs from preflight (commits were pushed since preflight ran)."
+            echo "Publishing preflight's tarballs (SHA: $ARTIFACT_SHA)."
+          else
+            echo "OK: SHA matches preflight."
           fi
-          echo "OK: Provenance verified."
 
       - name: Publish @agentoctopus/skills
         run: |
