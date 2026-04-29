@@ -76,7 +76,7 @@ jobs:
           ls -la /tmp/preflight/*.tgz
         shell: bash
       - name: Upload preflight artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: preflight-${{ github.run_id }}
           path: /tmp/preflight/
