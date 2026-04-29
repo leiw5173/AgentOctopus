@@ -65,7 +65,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Download preflight artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: preflight-${{ inputs.preflight_run_id }}
           path: /tmp/preflight
