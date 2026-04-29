@@ -66,9 +66,9 @@ jobs:
           PACKAGES="skills registry adapters core gateway cli agentoctopus"
           for pkg in $PACKAGES; do
             case "$pkg" in
-              cli)       cd apps/cli && npm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
-              agentoctopus) cd packages/agentoctopus && npm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
-              *)         cd packages/$pkg && npm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
+              cli)       cd apps/cli && pnpm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
+              agentoctopus) cd packages/agentoctopus && pnpm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
+              *)         cd packages/$pkg && pnpm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
             esac
           done
 
