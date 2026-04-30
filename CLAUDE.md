@@ -6,11 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 These rules apply to every code change, no exceptions.
 
-### 1. Build & test before committing
+### 1. Changeset, build & test before committing
 
-After any code change, always run the affected package's build and tests before committing:
+After any code change, always:
 
 ```bash
+# 1. Create a changeset (skip for docs/CI-only changes)
+pnpm changeset
+
+# 2. Build and test the affected packages
 pnpm --filter <package> build
 pnpm --filter <package> test
 # For changes that touch multiple packages:
@@ -202,11 +206,13 @@ Embedding and re-ranking can use a different provider/endpoint than the main LLM
 - `@agentoctopus/adapters` must stay in `serverExternalPackages`, not `transpilePackages` — it uses Node-native APIs incompatible with the Turbopack bundler.
 - `apps/web/AGENTS.md` warns that this Next.js version (16.x) has breaking API changes — read `node_modules/next/dist/docs/` before touching framework-level code.
 
-### npm publishing
+### Versioning & Publishing
 
-All packages are published to npm under the `@agentoctopus/` scope. The umbrella `agentoctopus` package re-exports everything. To publish a new version:
+All 7 packages share a single version managed by [changesets](https://github.com/changesets/changesets) with fixed versioning (`.changeset/config.json`). The umbrella `agentoctopus` package re-exports everything. To release:
 
-1. Bump version in each `package.json`
-2. Build: `pnpm build`
-3. Publish in dependency order: skills → registry → adapters → core → gateway → cli → agentoctopus
-4. Use `pnpm --filter <pkg> publish --no-git-checks`
+1. **PR must include a changeset** — run `pnpm changeset` to create a `.changeset/*.md` file describing the change. CI enforces this via `changeset-check.yml` (skipped for docs/CI-only changes, dependabot PRs, or `skip-changeset` label).
+2. **Merge PR to master** — triggers `release-preflight.yml` automatically: validates version is not already on npm, runs full lint+build+test, packs all 7 tarballs, uploads as preflight artifact.
+3. **Manual dispatch** — maintainer triggers `release-publish.yml` via Actions UI, providing the preflight run ID. Downloads the artifact, verifies provenance, publishes in dependency order (skills → registry → adapters → core → gateway → cli → agentoctopus) with 3x retry, creates GitHub Release from changelog.
+4. **npm dist-tags** — choose `latest` or `beta` when dispatching. Use `beta` for pre-releases.
+
+The `agentoctopus` umbrella package tarball uses `agentoctopus-[0-9]*.tgz` glob to avoid matching scoped packages (e.g., `agentoctopus-skills-X.Y.Z.tgz`).

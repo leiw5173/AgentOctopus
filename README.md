@@ -48,12 +48,18 @@ octopus ask "translate hello to French"
 octopus list       # show installed skills
 ```
 
+[![CI](https://github.com/leiw5173/AgentOctopus/actions/workflows/ci.yml/badge.svg)](https://github.com/leiw5173/AgentOctopus/actions/workflows/ci.yml)
+
 From source:
 
 ```bash
 pnpm install && pnpm build
-pnpm test          # 40+ tests across 6 packages
+pnpm test          # 235+ tests across 8 packages
 ```
+
+### Publishing
+
+Releases use [changesets](https://github.com/changesets/changesets) with unified fixed versioning across all packages. See [CLAUDE.md — Versioning & Publishing](CLAUDE.md#versioning--publishing) for the full process.
 
 ## License
 

@@ -92,14 +92,15 @@ cat registry/ratings.json
 pnpm test
 ```
 
-**Expected:** All 35 tests pass across 6 packages with no failures:
+**Expected:** All 235+ tests pass across 8 packages with no failures. Key packages:
 ```
+packages/skills    — 13 tests ✅
 packages/registry  — 9 tests  ✅
 packages/adapters  — 3 tests  ✅
-packages/core      — 6 tests  ✅
-apps/cli           — 1 test   ✅
+packages/core      — 19 tests ✅
+apps/cli           — 3 tests  ✅
 apps/web           — 6 tests  ✅
-packages/gateway   — 10 tests ✅
+packages/gateway   — 11 tests ✅
 ```
 
 ---

@@ -77,7 +77,7 @@ requires:
 - `scripts/invoke.js` runs and produces sensible output
 - The script exits gracefully with a clear error when a required credential is absent
 - A row is present in `TEST_INSTRUCTIONS.md`
-- All CI jobs are green
+- All CI jobs are green (changeset check, lint, build, test)
 
 ## AI-assisted creation
 
