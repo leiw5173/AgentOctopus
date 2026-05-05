@@ -1,0 +1,11 @@
+--- a/lib/util/version.js
++++ b/lib/util/version.js
+@@ -28,7 +28,7 @@
+ 
+ function resolveBasedir(contextOrFilename) {
+   if (contextOrFilename) {
+-    const filename = typeof contextOrFilename === 'string' ? contextOrFilename : contextOrFilename.getFilename();
++    const filename = typeof contextOrFilename === 'string' ? contextOrFilename : (contextOrFilename.filename ?? contextOrFilename.getFilename());
+     const dirname = path.dirname(filename);
+     try {
+       if (fs.statSync(filename).isFile()) {
