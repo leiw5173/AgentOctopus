@@ -20,7 +20,7 @@ function skillEntryToLoadedSkill(
   const manifest: SkillManifest = {
     name: entry.skill.name,
     description: entry.skill.description,
-    tags: (fm.tags as string[]) ?? [],
+    tags: Array.isArray(fm.tags) ? (fm.tags as string[]) : [],
     version: entry.skill.version,
     adapter: (fm.adapter as SkillManifest['adapter']) ?? 'http',
     hosting: (fm.hosting as SkillManifest['hosting']) ?? 'cloud',

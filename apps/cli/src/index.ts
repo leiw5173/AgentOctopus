@@ -525,8 +525,9 @@ program
       const desc = skill.manifest.description.length > 80
         ? skill.manifest.description.slice(0, 80) + '…'
         : skill.manifest.description;
-      const tags = skill.manifest.tags.length > 0
-        ? chalk.gray(`[${skill.manifest.tags.join(', ')}]`)
+      const skillTags = Array.isArray(skill.manifest.tags) ? skill.manifest.tags : [];
+      const tags = skillTags.length > 0
+        ? chalk.gray(`[${skillTags.join(', ')}]`)
         : '';
       console.log(`  ${chalk.cyan.bold(`${i + 1}.`)} ${chalk.cyan.bold(skill.manifest.name)} ${chalk.yellow(stars)} ${chalk.gray(`(${skill.manifest.invocations} uses)`)}`);
       console.log(`     ${desc} ${tags}`);

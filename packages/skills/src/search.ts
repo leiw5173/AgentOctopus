@@ -32,7 +32,7 @@ export interface SearchableSkill {
 export function scoreKeywordMatch(tokens: string[], skill: SearchableSkill): number {
   const name = skill.name.toLowerCase();
   const desc = skill.description.toLowerCase();
-  const tags = skill.tags.join(' ').toLowerCase();
+  const tags = (Array.isArray(skill.tags) ? skill.tags.join(' ') : '').toLowerCase();
 
   let score = 0;
   for (const token of tokens) {
