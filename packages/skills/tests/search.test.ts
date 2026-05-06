@@ -14,8 +14,8 @@ describe('extractQueryTokens', () => {
 
   it('extracts CJK characters', () => {
     const tokens = extractQueryTokens('天気 予報');
-    expect(tokens).toContain('天');
-    expect(tokens).toContain('気');
+    expect(tokens).toEqual(expect.arrayContaining(['天', '気', '予', '報']));
+    expect(tokens).toHaveLength(4);
   });
 
   it('deduplicates tokens', () => {
