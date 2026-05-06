@@ -10,9 +10,10 @@
 
 ---
 
-### Task 1: Create shared scoring utility in `@agentoctopus/skills`
+## Task 1: Create shared scoring utility in `@agentoctopus/skills`
 
 **Files:**
+
 - Create: `packages/skills/src/search.ts`
 - Modify: `packages/skills/src/index.ts`
 
@@ -97,9 +98,10 @@ git commit -m "feat(skills): add shared search scoring utility (extractQueryToke
 
 ---
 
-### Task 2: Write tests for the scoring utility
+## Task 2: Write tests for the scoring utility
 
 **Files:**
+
 - Create: `packages/skills/tests/search.test.ts`
 
 - [ ] **Step 1: Write the test file**
@@ -211,9 +213,10 @@ git commit -m "test(skills): add tests for search scoring utility"
 
 ---
 
-### Task 3: Enhance `registry.search()` with scored matching
+## Task 3: Enhance `registry.search()` with scored matching
 
 **Files:**
+
 - Modify: `packages/registry/src/registry.ts:190-198`
 
 - [ ] **Step 1: Update the import and replace the search method**
@@ -275,9 +278,10 @@ git commit -m "feat(registry): upgrade search() to use scored token matching"
 
 ---
 
-### Task 4: Deduplicate router.ts — import from skills instead of local copies
+## Task 4: Deduplicate router.ts — import from skills instead of local copies
 
 **Files:**
+
 - Modify: `packages/core/src/router.ts:40-90`
 
 - [ ] **Step 1: Add import from skills, remove local copies**
@@ -298,10 +302,13 @@ Remove the local definitions (lines 40-90: `CJK_RANGE` constant, `extractQueryTo
 Note: `scoreKeywordMatch` previously took `LoadedSkill` — now it takes `SearchableSkill`. Update the call sites:
 
 In `keywordFallback()` (line 483), the call:
+
 ```typescript
 const keywordHits = scoreKeywordMatch(tokens, skill);
 ```
+
 `skill` is `LoadedSkill` which has `manifest.name`, `manifest.description`, `manifest.tags` — wrap it:
+
 ```typescript
 const keywordHits = scoreKeywordMatch(tokens, {
   name: skill.manifest.name,
@@ -311,6 +318,7 @@ const keywordHits = scoreKeywordMatch(tokens, {
 ```
 
 Same for line 492:
+
 ```typescript
 const withHits = scored.filter(s => scoreKeywordMatch(tokens, {
   name: s.skill.manifest.name,
@@ -320,12 +328,14 @@ const withHits = scored.filter(s => scoreKeywordMatch(tokens, {
 ```
 
 And line 377-383 (the cosine similarity keyword boost for non-embedded candidates):
+
 ```typescript
 // Old:
 const tokens = extractQueryTokens(routingQuery);
 // ... later in the loop:
 if (CJK_RANGE.test(t)) return name.includes(t);
 ```
+
 This section at line 376-385 already uses `extractQueryTokens` and `CJK_RANGE` — these now come from the import.
 
 - [ ] **Step 2: Build and run core tests**
@@ -344,18 +354,22 @@ git commit -m "refactor(core): use shared search utilities from @agentoctopus/sk
 
 ---
 
-### Task 5: Replace CLI `search` command with local search
+## Task 5: Replace CLI `search` command with local search
 
 **Files:**
+
 - Modify: `apps/cli/src/index.ts:493-517`
 
 - [ ] **Step 1: Replace the search command**
 
 Remove the `searchSkills` import from line 13 (it came from `./clawhub.js`). The import line changes from:
+
 ```typescript
 import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
 ```
+
 To:
+
 ```typescript
 import { installSkill, fetchSkillMeta } from './clawhub.js';
 ```
@@ -504,9 +518,10 @@ git commit -m "feat(cli): replace remote search with local scored skill search +
 
 ---
 
-### Task 6: Update `octopus skill search` alias
+## Task 6: Update `octopus skill search` alias
 
 **Files:**
+
 - Modify: `apps/cli/src/index.ts:781-789`
 
 - [ ] **Step 1: Update the skill search subcommand**
@@ -559,9 +574,10 @@ git commit -m "fix(cli): update skill search alias for local search with --run s
 
 ---
 
-### Task 7: Update documentation
+## Task 7: Update documentation
 
 **Files:**
+
 - Modify: `README.md`
 - Modify: `CLAUDE.md`
 - Modify: `TEST_INSTRUCTIONS.md`
@@ -589,6 +605,7 @@ Change from referencing ClawHub remote search to local scored search, and add `-
 - [ ] **Step 3: Update TEST_INSTRUCTIONS.md**
 
 Add test cases:
+
 ```markdown
 | `octopus search "weather"` | Lists skills matching "weather" with names, ratings, descriptions | |
 | `octopus search "nonexistent"` | Shows "No skills found" with hint to use `octopus list` | |
@@ -613,6 +630,7 @@ Add a note to `GET /api/marketplace?q=` entry: "Note: The CLI `octopus search` c
 - [ ] **Step 7: Update docs/getting-started/quick-start.md**
 
 Add an example after `octopus list`:
+
 ```bash
 # Search for specific skills
 octopus search "weather"
@@ -632,7 +650,7 @@ git commit -m "docs: update documentation for local skill search feature"
 
 ---
 
-### Task 8: Changeset, final build, and full test run
+## Task 8: Changeset, final build, and full test run
 
 - [ ] **Step 1: Create a changeset**
 

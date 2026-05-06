@@ -56,12 +56,14 @@ search(query: string): LoadedSkill[]
 Replace the current remote ClawHub `search` command.
 
 **`octopus search <query>` (default — display only)**
+
 1. Bootstrap registry, call `registry.search(query)`
 2. Print scored results: name, rating stars, description (truncated to 80 chars), tags, invocation count
 3. Show hint: `Use --run to pick a skill and run a query`
 4. No results: suggest `octopus list`
 
 **`octopus search <query> --run` (interactive)**
+
 1. Same search + display
 2. Prompt: `Pick a skill (1-N, or Enter to cancel):`
 3. Validate input, re-prompt on invalid
@@ -70,6 +72,7 @@ Replace the current remote ClawHub `search` command.
 6. Post-execution feedback prompt (same as `octopus ask`)
 
 **`octopus search` (no query)**
+
 - Error: `Provide a search query, e.g. "octopus search weather"`
 
 **`octopus skill search <query>`** — alias, same behavior.
