@@ -46,6 +46,8 @@ npm install -g agentoctopus
 octopus onboard    # interactive setup wizard
 octopus ask "translate hello to French"
 octopus list       # show installed skills
+octopus search "weather"    # search local skills by name, description, and tags
+octopus search "weather" --run  # search and interactively pick a skill to run
 ```
 
 [![CI](https://github.com/leiw5173/AgentOctopus/actions/workflows/ci.yml/badge.svg)](https://github.com/leiw5173/AgentOctopus/actions/workflows/ci.yml)

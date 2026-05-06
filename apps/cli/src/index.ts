@@ -10,7 +10,7 @@ import readline from 'readline';
 import { SkillRegistry } from '@agentoctopus/registry';
 import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
 import { startService } from './service.js';
-import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
+import { installSkill, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
 import { loadConfig, getConfig, getEnvPath } from '@agentoctopus/core';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
@@ -491,28 +491,133 @@ program
   });
 
 program
-  .command('search <query>')
-  .description('Search for skills on ClaWHub')
-  .option('--registry <url>', 'Custom ClaWHub registry URL')
-  .action(async (query: string, options: { registry?: string }) => {
-    const spinner = ora(`Searching ClaWHub for "${query}"...`).start();
-    try {
-      const results = await searchSkills(query, options.registry);
-      spinner.stop();
+  .command('search [query]')
+  .description('Search local skills')
+  .option('--run', 'Interactively pick a skill and run a query against it')
+  .action(async (query: string | undefined, options: { run?: boolean }) => {
+    if (!query) {
+      console.log(chalk.red('Provide a search query, e.g. "octopus search weather"'));
+      return;
+    }
 
-      if (results.length === 0) {
-        console.log(chalk.yellow(`\n  No skills found for "${query}".`));
+    const spinner = ora('Searching local skills...').start();
+    let registry, router, executor;
+    try {
+      ({ registry, router, executor } = await bootstrap());
+    } catch (err) {
+      spinner.fail(`Failed to initialize: ${(err as Error).message}`);
+      return;
+    }
+    const results = registry.search(query);
+    spinner.stop();
+
+    if (results.length === 0) {
+      console.log(chalk.yellow(`\nNo skills found for "${query}".`));
+      console.log(chalk.gray('Try "octopus list" to see all available skills.'));
+      return;
+    }
+
+    // Display results
+    console.log(chalk.bold(`\n🐙 Search Results for "${query}"\n`));
+    results.forEach((skill, i) => {
+      const rating = skill.rating;
+      const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
+      const desc = skill.manifest.description.length > 80
+        ? skill.manifest.description.slice(0, 80) + '…'
+        : skill.manifest.description;
+      const skillTags = Array.isArray(skill.manifest.tags) ? skill.manifest.tags : [];
+      const tags = skillTags.length > 0
+        ? chalk.gray(`[${skillTags.join(', ')}]`)
+        : '';
+      console.log(`  ${chalk.cyan.bold(`${i + 1}.`)} ${chalk.cyan.bold(skill.manifest.name)} ${chalk.yellow(stars)} ${chalk.gray(`(${skill.manifest.invocations} uses)`)}`);
+      console.log(`     ${desc} ${tags}`);
+      console.log();
+    });
+
+    // --run: interactive pick-and-run
+    if (options.run) {
+      await router.buildIndex(registry.getAll());
+
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+      const pickSkill = (): Promise<{ skill: typeof results[0]; query: string } | null> => {
+        return new Promise((resolve) => {
+          rl.question(chalk.yellow(`Pick a skill (1-${results.length}, or Enter to cancel): `), (answer) => {
+            const trimmed = answer.trim();
+            if (trimmed === '') {
+              resolve(null);
+              return;
+            }
+            const idx = parseInt(trimmed, 10);
+            if (isNaN(idx) || idx < 1 || idx > results.length) {
+              console.log(chalk.red(`Invalid choice. Pick 1-${results.length} or press Enter to cancel.`));
+              resolve(pickSkill());
+              return;
+            }
+            const skill = results[idx - 1]!;
+            rl.question(chalk.yellow(`Query for ${chalk.cyan(skill.manifest.name)} (or Enter to cancel): `), (query) => {
+              if (query.trim() === '') {
+                resolve(null);
+              } else {
+                resolve({ skill, query: query.trim() });
+              }
+            });
+          });
+        });
+      };
+
+      const pick = await pickSkill();
+      if (!pick) {
+        console.log(chalk.gray('Cancelled.'));
+        rl.close();
         return;
       }
 
-      console.log(chalk.bold(`\n🐙 ClaWHub — Search Results for "${query}"\n`));
-      for (const r of results) {
-        console.log(`  ${chalk.cyan.bold(r.slug)} ${chalk.gray(`v${r.version}`)} ${chalk.yellow(`⭐ ${r.stars || 0}`)}`);
-        console.log(`  ${chalk.gray(r.description || 'No description')}`);
-        console.log(`  ${chalk.gray(`by ${r.author}`)}  →  ${chalk.green(`octopus add ${r.slug}`)}\n`);
+      console.log();
+      const input = { query: pick.query, text: pick.query };
+      const execSpinner = ora(`Executing ${pick.skill.manifest.name}...`).start();
+      try {
+        const result = await executor.execute(pick.skill, input);
+        execSpinner.stop();
+
+        if ('type' in result && result.type === 'credential_missing') {
+          console.log(chalk.red(`\n${pick.skill.manifest.name} requires unconfigured API keys.`));
+          const missingKeys = result.missing.map((v: { key: string }) => v.key);
+          const guide = await executor.generateCredentialGuide(
+            pick.skill.manifest.name,
+            pick.skill.manifest.description,
+            missingKeys,
+          );
+          console.log(chalk.yellow(guide.split('\n').map((l: string) => `  ${l}`).join('\n')));
+        } else if ('type' in result && result.type === 'binary_missing') {
+          const tools = (result.missing as string[]).map((b: string) => `  • ${b}`).join('\n');
+          console.log(chalk.red(`\n${pick.skill.manifest.name} requires missing tools:`));
+          console.log(tools);
+        } else {
+          const execResult = result as import('@agentoctopus/core').ExecutionResult;
+          if (execResult.adapterResult.success) {
+            console.log(chalk.green('\nResult:'));
+            console.log(execResult.formattedOutput);
+          } else {
+            console.log(chalk.red(`\nExecution failed: ${execResult.adapterResult.error ?? 'Unknown error'}`));
+          }
+        }
+      } catch (err) {
+        execSpinner.fail(`Execution failed: ${(err as Error).message}`);
       }
-    } catch (err) {
-      spinner.fail(`Search failed: ${(err as Error).message}`);
+
+      // Feedback prompt
+      rl.question(chalk.yellow('\nWas this helpful? (y/n): '), (answer) => {
+        const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+        rl.question(chalk.yellow('Any comments? (press Enter to skip): '), (comment) => {
+          const trimmedComment = comment.trim() || undefined;
+          registry.recordFeedback(pick.skill.manifest.name, isPositive, trimmedComment, 'cli');
+          console.log(chalk.gray('Thank you for your feedback!'));
+          rl.close();
+        });
+      });
+    } else {
+      console.log(chalk.gray('Use --run to pick a skill and run a query.'));
     }
   });
 
@@ -779,12 +884,12 @@ skillCmd
   });
 
 skillCmd
-  .command('search <query>')
-  .description('Search for skills on ClaWHub')
-  .option('--registry <url>', 'Custom ClaWHub registry URL')
-  .action(async (query: string, options: { registry?: string }) => {
-    const args = ['', '', 'search', query];
-    if (options.registry) args.push('--registry', options.registry);
+  .command('search [query]')
+  .description('Search local skills')
+  .option('--run', 'Interactively pick a skill and run a query against it')
+  .action(async (query: string | undefined, options: { run?: boolean }) => {
+    const args = ['', '', 'search', ...(query ? [query] : [])];
+    if (options.run) args.push('--run');
     await program.parseAsync(args, { from: 'user' });
   });
 

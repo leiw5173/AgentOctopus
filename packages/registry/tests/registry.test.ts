@@ -5,9 +5,13 @@ import { glob } from 'glob';
 
 vi.mock('fs');
 vi.mock('glob');
-vi.mock('@agentoctopus/skills', () => ({
-  loadSkillsFromDir: vi.fn(),
-}));
+vi.mock('@agentoctopus/skills', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agentoctopus/skills')>();
+  return {
+    ...actual,
+    loadSkillsFromDir: vi.fn(),
+  };
+});
 
 describe('SkillRegistry', () => {
   beforeEach(() => {

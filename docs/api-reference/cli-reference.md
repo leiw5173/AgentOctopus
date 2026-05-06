@@ -49,7 +49,11 @@ Remove an installed skill by name.
 
 ### `octopus search <query>`
 
-Search the skill marketplace.
+Search local skills by name, description, and tags. Results are scored and ranked by relevance.
+
+**Options:**
+
+- `--run` — interactively pick a skill from the results and run a query against it
 
 ### `octopus publish [dir]`
 
@@ -77,7 +81,7 @@ Remove a skill (same as `octopus remove`).
 
 ### `octopus skill search <query>`
 
-Search skills (same as `octopus search`).
+Search local skills (same as `octopus search`).
 
 ### `octopus skill publish [dir]`
 
