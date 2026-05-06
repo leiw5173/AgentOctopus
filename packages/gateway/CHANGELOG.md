@@ -1,5 +1,14 @@
 # @agentoctopus/gateway
 
+## 0.6.0
+
+### Patch Changes
+
+- Updated dependencies [2b4a5da]
+  - @agentoctopus/registry@0.6.0
+  - @agentoctopus/core@0.6.0
+  - @agentoctopus/adapters@0.6.0
+
 ## 0.5.19
 
 ### Patch Changes

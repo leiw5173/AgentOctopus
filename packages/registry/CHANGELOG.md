@@ -1,5 +1,16 @@
 # @agentoctopus/registry
 
+## 0.6.0
+
+### Minor Changes
+
+- 2b4a5da: Add local scored skill search — octopus search now searches installed skills with relevance scoring. Add --run flag for interactive pick-and-run execution.
+
+### Patch Changes
+
+- Updated dependencies [2b4a5da]
+  - @agentoctopus/skills@0.6.0
+
 ## 0.5.19
 
 ### Patch Changes
