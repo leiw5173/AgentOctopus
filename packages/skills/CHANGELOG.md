@@ -1,5 +1,11 @@
 # @agentoctopus/skills
 
+## 0.5.19
+
+### Patch Changes
+
+- Bump dependencies: vectra 0.6.0→0.14.0, @google/generative-ai 0.15.0→0.24.1, @modelcontextprotocol/sdk 1.27.1→1.29.0, @types/node 20.19.37→25.6.0, eslint 9.39.4→10.3.0.
+
 ## 0.5.17
 
 ### Patch Changes
