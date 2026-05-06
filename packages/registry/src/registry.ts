@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { glob } from 'glob';
-import { loadSkillsFromDir, type SkillEntry } from '@agentoctopus/skills';
+import { loadSkillsFromDir, type SkillEntry, extractQueryTokens, scoreKeywordMatch } from '@agentoctopus/skills';
 import { type SkillManifest, type SkillCredential } from './manifest-schema.js';
 import { RatingStore } from './rating.js';
 import type { TaskType } from './rating-dimensions.js';
@@ -188,13 +188,20 @@ export class SkillRegistry {
   }
 
   search(query: string): LoadedSkill[] {
-    const q = query.toLowerCase();
-    return this.getAll().filter(
-      (s) =>
-        s.manifest.name.includes(q) ||
-        s.manifest.description.toLowerCase().includes(q) ||
-        s.manifest.tags.some((t) => t.toLowerCase().includes(q)),
-    );
+    const tokens = extractQueryTokens(query);
+    if (tokens.length === 0) return [];
+    return this.getAll()
+      .map((s) => ({
+        skill: s,
+        score: scoreKeywordMatch(tokens, {
+          name: s.manifest.name,
+          description: s.manifest.description,
+          tags: s.manifest.tags,
+        }),
+      }))
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map(({ skill }) => skill);
   }
 
   recordInvocation(skillName: string): void {
