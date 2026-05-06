@@ -883,12 +883,12 @@ skillCmd
   });
 
 skillCmd
-  .command('search <query>')
-  .description('Search for skills on ClaWHub')
-  .option('--registry <url>', 'Custom ClaWHub registry URL')
-  .action(async (query: string, options: { registry?: string }) => {
-    const args = ['', '', 'search', query];
-    if (options.registry) args.push('--registry', options.registry);
+  .command('search [query]')
+  .description('Search local skills')
+  .option('--run', 'Interactively pick a skill and run a query against it')
+  .action(async (query: string | undefined, options: { run?: boolean }) => {
+    const args = ['', '', 'search', ...(query ? [query] : [])];
+    if (options.run) args.push('--run');
     await program.parseAsync(args, { from: 'user' });
   });
 
