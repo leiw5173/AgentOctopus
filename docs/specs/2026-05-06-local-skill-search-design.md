@@ -99,6 +99,10 @@ Replace the current remote ClawHub `search` command.
 
 | Doc | Change |
 |-----|--------|
+| `README.md` | Add `octopus search` to CLI commands section |
+| `CLAUDE.md` | Update `octopus search` description in Commands section |
+| `TEST_INSTRUCTIONS.md` | Add test cases for `octopus search` and `octopus search --run` |
+| `implementation_plan.md` | Mark relevant phase items |
 | `docs/api-reference/cli-reference.md` | Update `octopus search` description + `--run` flag |
 | `docs/api-reference/rest-api.md` | Note CLI `search` is now local; marketplace search is API-only |
 | `docs/getting-started/quick-start.md` | Add `octopus search "weather"` example |
