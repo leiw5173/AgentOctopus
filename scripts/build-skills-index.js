@@ -18,6 +18,8 @@ const AWESOME_README_URL =
   'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/README.md';
 const AWESOME_CATEGORY_BASE =
   'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/categories/';
+const AWESOME_AGENT_README_URL =
+  'https://raw.githubusercontent.com/VoltAgent/awesome-agent-skills/main/README.md';
 
 /** Number of skills processed in parallel. Keep low enough to avoid 429s. */
 const CONCURRENCY = 8;
@@ -174,6 +176,27 @@ async function fetchAwesomeSlugs() {
   return Array.from(slugSet);
 }
 
+async function fetchAwesomeAgentSlugs() {
+  const slugSet = new Set();
+  // officialskills.sh URLs include the owner: https://officialskills.sh/{owner}/skills/{slug}
+  const SKILL_URL_RE = /https:\/\/officialskills\.sh\/([\w.-]+)\/skills\/([\w.%-]+)/g;
+
+  const res = await fetchWithRetry(AWESOME_AGENT_README_URL);
+  if (!res.ok) {
+    console.error(`Failed to fetch awesome-agent-skills README (${res.status}), skipping.`);
+    return [];
+  }
+  const text = await res.text();
+
+  SKILL_URL_RE.lastIndex = 0;
+  let m;
+  while ((m = SKILL_URL_RE.exec(text)) !== null) {
+    slugSet.add(`${m[1]}/${m[2]}`);
+  }
+
+  return Array.from(slugSet);
+}
+
 // ── Per-skill fetch (resolve + meta + zip in one worker pass) ──────────────
 
 /**
@@ -257,8 +280,17 @@ async function pLimit(tasks, limit) {
 
 async function main() {
   console.log('Fetching slug list from awesome-openclaw-skills...');
-  const ownerSlugs = await fetchAwesomeSlugs();
-  console.log(`Found ${ownerSlugs.length} slugs. Processing with ${CONCURRENCY} workers...`);
+  const openclawSlugs = await fetchAwesomeSlugs();
+  console.log(`  ${openclawSlugs.length} slugs from awesome-openclaw-skills`);
+
+  console.log('Fetching slug list from awesome-agent-skills...');
+  const agentSlugs = await fetchAwesomeAgentSlugs();
+  console.log(`  ${agentSlugs.length} slugs from awesome-agent-skills`);
+
+  // Merge and deduplicate (agent slugs already include owner prefix like "anthropics/docx")
+  const slugSet = new Set([...openclawSlugs, ...agentSlugs]);
+  const ownerSlugs = Array.from(slugSet);
+  console.log(`Total unique slugs: ${ownerSlugs.length}. Processing with ${CONCURRENCY} workers...`);
 
   let done = 0;
   const total = ownerSlugs.length;
