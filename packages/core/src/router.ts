@@ -1,6 +1,6 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
 import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
-import { shouldIncludeSkill, type SkillEligibilityContext } from '@agentoctopus/skills';
+import { shouldIncludeSkill, extractQueryTokens, scoreKeywordMatch, CJK_RANGE, type SkillEligibilityContext } from '@agentoctopus/skills';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { getConfig } from './config-resolver.js';
@@ -37,56 +37,11 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }
 
-// CJK character range detection (Chinese, Japanese, Korean)
-const CJK_RANGE = /[\u3000-\u9fff\uac00-\ud7af\uf900-\ufaff]/;
-
-/**
- * Extract meaningful query tokens. For Latin text, splits on word boundaries
- * and filters short words. For CJK text, keeps individual characters.
- */
-function extractQueryTokens(query: string): string[] {
-  const lower = query.toLowerCase();
-  const tokens: string[] = [];
-  const latinWords = lower.match(/[a-z]{3,}/g) ?? [];
-  tokens.push(...latinWords);
-  const cjkChars = lower.match(/[\u3000-\u9fff\uac00-\ud7af\uf900-\ufaff]/g) ?? [];
-  tokens.push(...cjkChars);
-  return [...new Set(tokens)];
-}
-
 /**
  * Detect if a query contains non-Latin characters (CJK, Cyrillic, Arabic, etc.)
  */
 function hasNonLatinChars(query: string): boolean {
   return /[^\x00-\x7F]/.test(query.replace(/\s/g, ''));
-}
-
-/**
- * Score how well a skill matches query tokens. Uses word-boundary-start
- * prefix matching for Latin words — token must start at a word boundary but
- * can be a prefix of a longer word. This allows "short" to match "shorten",
- * "shortlink", "shortener" while still preventing "link" from matching
- * "blinker". For CJK characters, checks direct inclusion.
- */
-function scoreKeywordMatch(tokens: string[], skill: LoadedSkill): number {
-  const name = skill.manifest.name.toLowerCase();
-  const desc = skill.manifest.description.toLowerCase();
-  const tags = skill.manifest.tags.join(' ').toLowerCase();
-
-  let score = 0;
-  for (const token of tokens) {
-    if (CJK_RANGE.test(token)) {
-      if (name.includes(token)) score += 2;
-      else if (desc.includes(token)) score += 1;
-      else if (tags.includes(token)) score += 1;
-    } else {
-      const pattern = new RegExp(`\\b${token}`, 'i');
-      if (pattern.test(name)) score += 2;
-      else if (pattern.test(desc)) score += 1;
-      else if (pattern.test(tags)) score += 1;
-    }
-  }
-  return score;
 }
 
 /**
@@ -480,7 +435,11 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
   private keywordFallback(eligible: VectorEntry[], routingQuery: string): RoutingResultCandidate[] {
     const tokens = extractQueryTokens(routingQuery);
     const scored = eligible.map(({ skill }) => {
-      const keywordHits = scoreKeywordMatch(tokens, skill);
+      const keywordHits = scoreKeywordMatch(tokens, {
+        name: skill.manifest.name,
+        description: skill.manifest.description,
+        tags: skill.manifest.tags,
+      });
       const routingScore = skill.routingScore ?? (skill.rating / 5);
       const ratingBoost = routingScore * RATING_WEIGHT;
       const negCount = skill.negativeFeedbackCount ?? 0;
@@ -489,7 +448,11 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
       return { skill, score: keywordHits + ratingBoost - penalty - catchAllPenalty };
     });
     scored.sort((a, b) => b.score - a.score);
-    const withHits = scored.filter(s => scoreKeywordMatch(tokens, s.skill) > 0);
+    const withHits = scored.filter(s => scoreKeywordMatch(tokens, {
+      name: s.skill.manifest.name,
+      description: s.skill.manifest.description,
+      tags: s.skill.manifest.tags,
+    }) > 0);
     return (withHits.length > 0 ? withHits : scored).slice(0, LLM_RERANK_CAP);
   }
 }
