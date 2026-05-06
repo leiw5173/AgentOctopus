@@ -501,7 +501,13 @@ program
     }
 
     const spinner = ora('Searching local skills...').start();
-    const { registry, router, executor } = await bootstrap();
+    let registry, router, executor;
+    try {
+      ({ registry, router, executor } = await bootstrap());
+    } catch (err) {
+      spinner.fail(`Failed to initialize: ${(err as Error).message}`);
+      return;
+    }
     const results = registry.search(query);
     spinner.stop();
 
