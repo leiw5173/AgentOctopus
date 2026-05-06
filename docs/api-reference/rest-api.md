@@ -39,6 +39,8 @@ curl http://localhost:3000/api/marketplace?q=weather
 # → { "skills": [...], "total": 1 }
 ```
 
+Note: The CLI `octopus search` command now searches local skills rather than the marketplace. Marketplace search remains available via this API endpoint and `octopus sync`.
+
 ### Publish a skill
 
 ```bash

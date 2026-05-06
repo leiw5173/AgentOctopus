@@ -21,7 +21,35 @@ cat .env | grep -E "EMBED_API_KEY|EMBED_BASE_URL|RERANK_MODEL"
 
 ## Phase 1 — CLI MVP
 
-### 1.1 List available skills
+### 1.1 Search local skills
+
+```bash
+node apps/cli/dist/index.js search "weather"
+```
+
+**Expected:** Lists skills matching "weather" with names, star ratings, descriptions, and tags.
+
+```bash
+node apps/cli/dist/index.js search "nonexistent"
+```
+
+**Expected:** Shows "No skills found" with hint to use `octopus list`.
+
+```bash
+node apps/cli/dist/index.js search
+```
+
+**Expected:** Shows error asking for a search query.
+
+```bash
+node apps/cli/dist/index.js search "weather" --run
+```
+
+**Expected:** Interactive pick-and-run flow after search results — prompts for skill number then query text.
+
+---
+
+### 1.2 List available skills
 
 ```bash
 cd /root/AgentOctopus
@@ -35,7 +63,7 @@ node apps/cli/dist/index.js list
 
 ---
 
-### 1.2 Weather query
+### 1.3 Weather query
 
 ```bash
 node apps/cli/dist/index.js ask "What's the weather in London?"
@@ -49,7 +77,7 @@ node apps/cli/dist/index.js ask "What's the weather in London?"
 
 ---
 
-### 1.3 Translation query
+### 1.4 Translation query
 
 ```bash
 node apps/cli/dist/index.js ask "Translate good morning to Japanese"
@@ -62,7 +90,7 @@ node apps/cli/dist/index.js ask "Translate good morning to Japanese"
 
 ---
 
-### 1.4 IP lookup query
+### 1.5 IP lookup query
 
 ```bash
 node apps/cli/dist/index.js ask "Lookup IP 1.1.1.1"
@@ -75,7 +103,7 @@ node apps/cli/dist/index.js ask "Lookup IP 1.1.1.1"
 
 ---
 
-### 1.5 Rating persistence check
+### 1.6 Rating persistence check
 
 ```bash
 # After giving feedback above, verify ratings.json was updated
@@ -86,7 +114,7 @@ cat registry/ratings.json
 
 ---
 
-### 1.6 Automated test suite
+### 1.7 Automated test suite
 
 ```bash
 pnpm test
@@ -399,14 +427,18 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 
 | # | Test | Pass |
 |---|---|---|
-| 1.1 | CLI `list` shows 3 skills | ☐ |
-| 1.2 | CLI weather query returns real data | ☐ |
-| 1.3 | CLI translation returns real translation | ☐ |
-| 1.4 | CLI IP lookup returns geolocation | ☐ |
-| 1.5 | `ratings.json` updated after feedback | ☐ |
-| 1.6 | `pnpm test` — 35 tests all green | ☐ |
-| 1.7 | `octopus start` (global install, outside repo) starts gateway on :3002 without error | ☐ |
-| 1.8 | `curl http://localhost:3002/agent/health` returns JSON with skill count after `octopus start` | ☐ |
+| 1.1a | `octopus search "weather"` lists matching skills | ☐ |
+| 1.1b | `octopus search "nonexistent"` shows "No skills found" | ☐ |
+| 1.1c | `octopus search` (no query) shows error | ☐ |
+| 1.1d | `octopus search "weather" --run` shows interactive pick-and-run | ☐ |
+| 1.2 | CLI `list` shows 3 skills | ☐ |
+| 1.3 | CLI weather query returns real data | ☐ |
+| 1.4 | CLI translation returns real translation | ☐ |
+| 1.5 | CLI IP lookup returns geolocation | ☐ |
+| 1.6 | `ratings.json` updated after feedback | ☐ |
+| 1.7 | `pnpm test` — 235+ tests all green | ☐ |
+| 1.8 | `octopus start` (global install, outside repo) starts gateway on :3002 without error | ☐ |
+| 1.9 | `curl http://localhost:3002/agent/health` returns JSON with skill count after `octopus start` | ☐ |
 | 2.1 | `POST /api/ask` weather | ☐ |
 | 2.2 | `POST /api/ask` translation | ☐ |
 | 2.3 | `POST /api/ask` IP lookup | ☐ |

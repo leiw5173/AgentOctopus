@@ -26,6 +26,10 @@ The interactive wizard will:
 octopus ask "what's the weather in Tokyo"
 octopus ask "translate hello to French"
 octopus list
+
+# Search for specific skills
+octopus search "weather"
+octopus search "translate" --run
 ```
 
 ## Next steps

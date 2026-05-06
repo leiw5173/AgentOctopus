@@ -97,6 +97,8 @@ pnpm --filter @agentoctopus/registry exec vitest run tests/registry.test.ts
 # CLI (must build first)
 node apps/cli/dist/index.js list
 node apps/cli/dist/index.js ask "What's the weather in Tokyo?"
+node apps/cli/dist/index.js search "weather"      # search local skills with scored ranking
+node apps/cli/dist/index.js search "weather" --run  # search and interactively pick a skill to run
 
 # CLI update commands (must build first)
 node apps/cli/dist/index.js update          # check and install latest @agentoctopus packages
