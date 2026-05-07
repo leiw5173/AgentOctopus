@@ -78,12 +78,13 @@ program
       }
 
       const installSpinner = ora('Installing @agentoctopus/cli@latest...').start();
-      const success = runGlobalInstall();
-      if (success) {
+      try {
+        runGlobalInstall();
         installSpinner.succeed('Update installed successfully!');
         console.log(chalk.gray('  Run `octopus --version` to verify the new version.'));
-      } else {
-        installSpinner.fail('Update failed. Try running `npm install -g @agentoctopus/cli@latest` manually.');
+      } catch (installErr) {
+        installSpinner.fail(`Update failed: ${(installErr as Error).message}`);
+        console.log(chalk.gray('  Try running `npm install -g @agentoctopus/cli@latest --force` manually.'));
       }
     } catch (err) {
       spinner.fail(`Update check failed: ${(err as Error).message}`);

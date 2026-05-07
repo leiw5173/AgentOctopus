@@ -189,13 +189,15 @@ export function displayUpdateTable(updates: PackageVersion[]): number {
 
 /**
  * Run npm install -g to update the CLI package.
- * Returns true on success.
+ * Returns true on success, or throws with the npm error message on failure.
  */
 export function runGlobalInstall(): boolean {
   try {
-    _exec('npm install -g @agentoctopus/cli@latest', { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
+    _exec('npm install -g @agentoctopus/cli@latest --force', { encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    const stderr = (err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? '';
+    const message = stderr.split('\n').find(l => l.startsWith('npm error')) ?? String(err);
+    throw new Error(message);
   }
 }
