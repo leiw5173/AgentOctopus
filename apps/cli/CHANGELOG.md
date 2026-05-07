@@ -1,5 +1,15 @@
 # @agentoctopus/cli
 
+## 0.6.1
+
+### Patch Changes
+
+- e21bf1f: Fix `octopus update` failing with EEXIST when the `octopus` binary already exists in the global npm bin directory. The install now passes `--force` to npm and surfaces the actual error message on failure instead of showing a generic fallback.
+  - @agentoctopus/skills@0.6.1
+  - @agentoctopus/registry@0.6.1
+  - @agentoctopus/core@0.6.1
+  - @agentoctopus/gateway@0.6.1
+
 ## 0.6.0
 
 ### Minor Changes

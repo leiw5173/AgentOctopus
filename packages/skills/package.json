@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/skills",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "AgentOctopus skill invocation pipeline — loading, eligibility, install, snapshots",
   "type": "module",
   "main": "./dist/index.js",

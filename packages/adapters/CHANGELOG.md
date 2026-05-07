@@ -1,5 +1,11 @@
 # @agentoctopus/adapters
 
+## 0.6.1
+
+### Patch Changes
+
+- @agentoctopus/registry@0.6.1
+
 ## 0.6.0
 
 ### Patch Changes

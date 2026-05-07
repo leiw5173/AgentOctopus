@@ -1,5 +1,16 @@
 # agentoctopus
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [e21bf1f]
+  - @agentoctopus/cli@0.6.1
+  - @agentoctopus/registry@0.6.1
+  - @agentoctopus/adapters@0.6.1
+  - @agentoctopus/core@0.6.1
+  - @agentoctopus/gateway@0.6.1
+
 ## 0.6.0
 
 ### Patch Changes
