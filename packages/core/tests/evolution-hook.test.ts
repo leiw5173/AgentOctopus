@@ -24,7 +24,7 @@ describe('recordExecutionSignal', () => {
   });
 
   it('writes invocation signal to skills .evolution dir', () => {
-    recordExecutionSignal(tmpDir, 'test-skill', true, 200, 100, null);
+    recordExecutionSignal(tmpDir, true, 200, 100, null);
 
     const filePath = path.join(tmpDir, '.evolution', 'signals.jsonl');
     expect(fs.existsSync(filePath)).toBe(true);
@@ -40,7 +40,7 @@ describe('recordExecutionSignal', () => {
       evolution: { enabled: false, signalThreshold: 3, feedbackThreshold: 2 },
     } as any);
 
-    recordExecutionSignal(tmpDir, 'test-skill', true, 200, 100, null);
+    recordExecutionSignal(tmpDir, true, 200, 100, null);
 
     const filePath = path.join(tmpDir, '.evolution', 'signals.jsonl');
     expect(fs.existsSync(filePath)).toBe(false);
@@ -85,5 +85,22 @@ describe('shouldTriggerAnalysis', () => {
     } as any);
 
     expect(shouldTriggerAnalysis(tmpDir, new Date(0).toISOString())).toBe(false);
+  });
+
+  it('returns true when negative feedback exceeds feedbackThreshold', () => {
+    const evolutionDir = path.join(tmpDir, '.evolution');
+    fs.mkdirSync(evolutionDir, { recursive: true });
+    const ts = new Date().toISOString();
+
+    // Write 2 negative feedback entries (threshold is 2)
+    fs.writeFileSync(
+      path.join(evolutionDir, 'signals.jsonl'),
+      [
+        JSON.stringify({ ts, type: 'feedback', positive: false, comment: 'wrong result' }),
+        JSON.stringify({ ts, type: 'feedback', positive: false, comment: 'failed again' }),
+      ].join('\n') + '\n',
+    );
+
+    expect(shouldTriggerAnalysis(tmpDir, new Date(0).toISOString())).toBe(true);
   });
 });

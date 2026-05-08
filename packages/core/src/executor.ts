@@ -257,7 +257,6 @@ export class Executor {
         if (skill.dirPath && latencyMs > 0) {
           recordExecutionSignal(
             skill.dirPath,
-            skill.manifest.name,
             adapterResult !== undefined ? adapterResult.success : false,
             latencyMs,
             tokenUsage,

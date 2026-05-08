@@ -4,7 +4,6 @@ import { getConfig } from './config-resolver.js';
 
 export function recordExecutionSignal(
   skillDirPath: string,
-  skillName: string,
   success: boolean,
   latencyMs: number,
   tokenUsage: number,
