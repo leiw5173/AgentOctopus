@@ -92,6 +92,17 @@ export const SkillsConfigSchema = z.object({
 });
 export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
 
+export const EvolutionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  autoApplySafe: z.boolean().default(true),
+  signalThreshold: z.number().int().min(1).default(10),
+  feedbackThreshold: z.number().int().min(1).default(3),
+  staleDays: z.number().int().min(1).default(30),
+  maxHistorySnapshots: z.number().int().min(1).default(20),
+  scheduleCron: z.string().default('0 3 * * *'),
+});
+export type EvolutionConfigSection = z.infer<typeof EvolutionConfigSchema>;
+
 export const OctopusConfigV2Schema = z.object({
   version: z.literal(2),
   llm: LLMConfigSchema.partial().default({}),
@@ -105,6 +116,7 @@ export const OctopusConfigV2Schema = z.object({
   rating: RatingConfigSchema.partial().default({}),
   slack: SlackConfigSchema.partial().default({}),
   skills: SkillsConfigSchema.partial().default({}),
+  evolution: EvolutionConfigSchema.partial().default({}),
 });
 
 export type OctopusConfigV2 = z.input<typeof OctopusConfigV2Schema>;
@@ -121,4 +133,5 @@ export interface ResolvedConfig {
   rating: RatingConfigSection;
   slack: SlackConfigSection;
   skills: SkillsConfigSection;
+  evolution: EvolutionConfigSection;
 }

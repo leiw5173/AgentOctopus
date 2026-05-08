@@ -7,7 +7,8 @@ import {
   RerankConfigSchema, GatewayConfigSchema, RegistryConfigSchema,
   ExecutionConfigSchema, DeployConfigSchema, AuthConfigSchema,
   RatingConfigSchema, SlackConfigSchema, SkillsConfigSchema,
-  type ResolvedConfig, type OctopusConfigV2,
+  EvolutionConfigSchema,
+  type ResolvedConfig, type OctopusConfigV2, type EvolutionConfigSection,
 } from './config-types.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.agentoctopus');
@@ -105,6 +106,7 @@ export function loadConfig(): ResolvedConfig {
     rating: resolveAllEnvRefs(mergeSection(RatingConfigSchema, parsed.rating)),
     slack: resolveAllEnvRefs(mergeSection(SlackConfigSchema, parsed.slack)),
     skills: resolveAllEnvRefs(mergeSection(SkillsConfigSchema, parsed.skills)),
+    evolution: resolveAllEnvRefs(mergeSection(EvolutionConfigSchema, parsed.evolution)),
   };
 
   if (raw && raw.version !== 2) {
