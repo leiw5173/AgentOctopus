@@ -18,6 +18,7 @@ import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
 import { runSync } from './sync-skills.js';
 import { runRatingSync } from './rating-sync.js';
+import { runEvolveCheck, runEvolveReview, runEvolvePropose, runEvolveLog, runEvolveRollback } from './evolve.js';
 import { fileURLToPath } from 'url';
 
 // Read version from package.json dynamically
@@ -988,6 +989,42 @@ configCmd
     console.log(`  ${chalk.cyan('Registry')}:  ${c.registry.skillsDir}`);
     console.log(`  ${chalk.cyan('Timing')}:    ${c.execution.timing ? 'on' : 'off'}`);
     console.log();
+  });
+
+program
+  .command('evolve')
+  .description('AI-powered skill evolution — analyze, propose, review, and rollback')
+  .option('--check', 'Show evolution status for all skills')
+  .option('--propose <skill>', 'Manually trigger analysis for a specific skill')
+  .option('--review', 'Review pending risky proposals')
+  .option('--log <skill>', 'Show snapshot history for a skill')
+  .option('--rollback <skill>', 'Roll back a skill to a snapshot')
+  .option('--to <n>', 'Snapshot index for rollback (from --log)')
+  .action(async (options: {
+    check?: boolean;
+    propose?: string;
+    review?: boolean;
+    log?: string;
+    rollback?: string;
+    to?: string;
+  }) => {
+    try {
+      if (options.propose) {
+        await runEvolvePropose(options.propose);
+      } else if (options.review) {
+        await runEvolveReview();
+      } else if (options.log) {
+        await runEvolveLog(options.log);
+      } else if (options.rollback) {
+        await runEvolveRollback(options.rollback, options.to ? parseInt(options.to, 10) : undefined);
+      } else {
+        // default: --check or no option shows status
+        await runEvolveCheck();
+      }
+    } catch (err) {
+      console.error(chalk.red(`Evolve failed: ${err}`));
+      process.exitCode = 1;
+    }
   });
 
 program.parse();
