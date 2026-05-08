@@ -7,6 +7,7 @@ import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
 import { getConfig } from './config-resolver.js';
+import { recordExecutionSignal } from './evolution-hook.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -151,6 +152,10 @@ export class Executor {
       skillsConfig as any,
     );
 
+    let adapterResult: AdapterResult | undefined;
+    let latencyMs: number = 0;
+    let tokenUsage: number = 0;
+
     try {
     // Check required credentials before invoking
     const required = getRequiredEnvVars(skill.manifest);
@@ -194,7 +199,6 @@ export class Executor {
     const startTime = Date.now();
     // Lazily load SKILL.md body from disk — only for the selected skill, not at startup
     const instructions = this.registry.readInstructions(skill);
-    let adapterResult: AdapterResult;
     try {
       // For subprocess skills, check if we should use LLM-guided execution
       if (adapter === this.subprocess && this.chatClient) {
@@ -206,7 +210,7 @@ export class Executor {
         adapterResult = await adapter.invoke(skill, input);
       }
     } catch (err) {
-      const latencyMs = Date.now() - startTime;
+      latencyMs = Date.now() - startTime;
       this.registry.recordInvocationMetrics(skill.manifest.name, {
         success: false,
         latencyMs,
@@ -214,7 +218,7 @@ export class Executor {
       });
       throw err;
     }
-    const latencyMs = Date.now() - startTime;
+    latencyMs = Date.now() - startTime;
 
     if (adapterResult.rawText) {
       dbg(debug, `Raw output (first 200 chars): "${adapterResult.rawText.slice(0, 200).trim()}"`);
@@ -225,7 +229,7 @@ export class Executor {
     dbg(debug, `Execution time: ${latencyMs}ms`);
 
     // Record invocation metrics in registry
-    const tokenUsage = typeof (adapterResult as any).tokenUsage === 'number' ? (adapterResult as any).tokenUsage : 0;
+    tokenUsage = typeof (adapterResult as any).tokenUsage === 'number' ? (adapterResult as any).tokenUsage : 0;
     this.registry.recordInvocationMetrics(skill.manifest.name, {
       success: adapterResult.success,
       latencyMs,
@@ -249,6 +253,20 @@ export class Executor {
     return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
     } finally {
       revertEnv();
+      try {
+        if (skill.dirPath && latencyMs > 0) {
+          recordExecutionSignal(
+            skill.dirPath,
+            skill.manifest.name,
+            adapterResult !== undefined ? adapterResult.success : false,
+            latencyMs,
+            tokenUsage,
+            adapterResult !== undefined ? (adapterResult.error ?? null) : null,
+          );
+        }
+      } catch {
+        // evolution signal recording must never affect execution
+      }
     }
   }
 
