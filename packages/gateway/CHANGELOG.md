@@ -1,5 +1,14 @@
 # @agentoctopus/gateway
 
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies [afdd379]
+  - @agentoctopus/core@0.7.0
+  - @agentoctopus/registry@0.7.0
+  - @agentoctopus/adapters@0.7.0
+
 ## 0.6.1
 
 ### Patch Changes

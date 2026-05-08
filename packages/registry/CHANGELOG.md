@@ -1,5 +1,12 @@
 # @agentoctopus/registry
 
+## 0.7.0
+
+### Patch Changes
+
+- Updated dependencies [afdd379]
+  - @agentoctopus/skills@0.7.0
+
 ## 0.6.1
 
 ### Patch Changes

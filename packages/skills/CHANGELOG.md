@@ -1,5 +1,11 @@
 # @agentoctopus/skills
 
+## 0.7.0
+
+### Minor Changes
+
+- afdd379: Add AI-driven skill evolution: signal collection, LLM analysis, safe/risky proposal dispatch, shadow-copy rollback, CLI review commands, and onboard opt-in
+
 ## 0.6.1
 
 ## 0.6.0

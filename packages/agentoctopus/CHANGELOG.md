@@ -1,5 +1,20 @@
 # agentoctopus
 
+## 0.7.0
+
+### Minor Changes
+
+- afdd379: Add AI-driven skill evolution: signal collection, LLM analysis, safe/risky proposal dispatch, shadow-copy rollback, CLI review commands, and onboard opt-in
+
+### Patch Changes
+
+- Updated dependencies [afdd379]
+  - @agentoctopus/core@0.7.0
+  - @agentoctopus/cli@0.7.0
+  - @agentoctopus/registry@0.7.0
+  - @agentoctopus/gateway@0.7.0
+  - @agentoctopus/adapters@0.7.0
+
 ## 0.6.1
 
 ### Patch Changes
