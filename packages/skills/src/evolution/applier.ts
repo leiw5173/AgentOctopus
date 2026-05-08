@@ -25,19 +25,16 @@ export function applyChanges(proposal: EvolutionProposal): ApplyResult {
     let content = fs.readFileSync(skillFilePath, 'utf8');
     for (const change of safeChanges) {
       if (content.includes(change.original)) {
-        content = content.replace(change.original, change.proposed);
+        content = content.replaceAll(change.original, change.proposed);
         applied++;
+        recordSignal(evolutionDir, {
+          type: 'evolution',
+          change: `${change.field}: ${change.original.slice(0, 80)} → ${change.proposed.slice(0, 80)}`,
+          risk: 'safe',
+        });
       }
     }
     fs.writeFileSync(skillFilePath, content, 'utf8');
-
-    for (const change of safeChanges) {
-      recordSignal(evolutionDir, {
-        type: 'evolution',
-        change: `${change.field}: ${change.original.slice(0, 80)} → ${change.proposed.slice(0, 80)}`,
-        risk: 'safe',
-      });
-    }
   }
 
   if (riskyChanges.length > 0) {
