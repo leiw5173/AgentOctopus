@@ -5,6 +5,7 @@ export { recordSignal, getSignalsSince, countSignalsSince, countNegativeFeedback
 export { shadowCopy, listSnapshots, rollback, clearSnapshots } from './evolution/rollback.js';
 export { applyChanges, stageProposal, readProposal, clearProposal } from './evolution/applier.js';
 export { buildAnalysisPrompt, buildStaleAnalysisPrompt, parseAnalyzerResponse } from './evolution/analyzer.js';
+export { shouldSweep, getStaleSkills } from './evolution/scheduler.js';
 export { SkillFrontmatterSchema } from "./schema.js";
 export type { SkillFrontmatter } from "./schema.js";
 export { parseSkillFrontmatter } from "./frontmatter.js";
