@@ -25,6 +25,7 @@ interface OnboardConfig {
   cloudApiKey?: string;
   cloudGatewayUrl?: string;
   disabledSkills: string[];
+  enableEvolution: boolean;
 }
 
 interface DiscoveredSkill {
@@ -187,6 +188,17 @@ function saveOnboardConfig(config: OnboardConfig): void {
   // Deploy mode
   v2.deploy = { mode: (config.executionMode === 'cloud' ? 'cloud' : 'local') as 'local' | 'cloud', root: null };
 
+  // Evolution
+  v2.evolution = {
+    enabled: config.enableEvolution,
+    autoApplySafe: true,
+    signalThreshold: 10,
+    feedbackThreshold: 3,
+    staleDays: 30,
+    maxHistorySnapshots: 20,
+    scheduleCron: '0 3 * * *',
+  };
+
   envLines.push('');
   saveEnvFile(envLines.join('\n') + '\n');
   saveConfigFile(v2);
@@ -197,7 +209,7 @@ function saveOnboardConfig(config: OnboardConfig): void {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 export async function runOnboarding(_rootDir?: string): Promise<void> {
-  const totalSteps = 6;
+  const totalSteps = 7;
 
   printBanner();
 
@@ -249,6 +261,7 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
     embedSameProvider: true,
     executionMode: 'local',
     disabledSkills: [],
+    enableEvolution: false,
   };
 
   // ── Step 1: LLM Provider ────────────────────────────────────────────────
@@ -454,9 +467,26 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
     // Collected credentials will be saved to .env at the end
   }
 
-  // ── Step 6: Review & Save ──────────────────────────────────────────────
+  // ── Step 5.5: Evolution ─────────────────────────────────────────────────
+  printStep(6, totalSteps, 'Skill Evolution');
 
-  printStep(6, totalSteps, 'Review & Save');
+  config.enableEvolution = await confirm({
+    message: 'Enable AI-powered skill evolution?\n' +
+      chalk.gray('  When enabled, AI monitors skill performance and auto-improves underperforming skills.\n') +
+      chalk.gray('  Safe changes are applied automatically; risky changes require your approval.'),
+    default: true,
+  });
+
+  if (config.enableEvolution) {
+    console.log(chalk.green('\n  ✓ Evolution enabled.'));
+    console.log(chalk.gray('    Review pending changes anytime with: ') + chalk.cyan('octopus evolve --review'));
+  } else {
+    console.log(chalk.gray('\n  Evolution disabled. You can enable it later in ~/.agentoctopus/octopus.json'));
+  }
+
+  // ── Step 7: Review & Save ──────────────────────────────────────────────
+
+  printStep(7, totalSteps, 'Review & Save');
 
   console.log(chalk.white.bold('  Configuration Summary:'));
   console.log('');
@@ -474,6 +504,8 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
       console.log(`  ${chalk.gray('Disabled:')}         ${chalk.yellow(config.disabledSkills.join(', '))}`);
     }
   }
+
+  console.log(`  ${chalk.gray('Evolution:')}       ${config.enableEvolution ? chalk.green('enabled') : chalk.gray('disabled')}`);
 
   console.log('');
 
