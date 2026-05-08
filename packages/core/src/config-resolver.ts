@@ -8,7 +8,7 @@ import {
   ExecutionConfigSchema, DeployConfigSchema, AuthConfigSchema,
   RatingConfigSchema, SlackConfigSchema, SkillsConfigSchema,
   EvolutionConfigSchema,
-  type ResolvedConfig, type OctopusConfigV2, type EvolutionConfigSection,
+  type ResolvedConfig, type OctopusConfigV2,
 } from './config-types.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.agentoctopus');
