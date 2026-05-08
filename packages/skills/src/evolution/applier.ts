@@ -10,6 +10,9 @@ interface ApplyResult {
 }
 
 export function applyChanges(proposal: EvolutionProposal): ApplyResult {
+  if (!proposal.skillDirPath) {
+    throw new Error('applyChanges: skillDirPath is required');
+  }
   const skillFilePath = path.join(proposal.skillDirPath, 'SKILL.md');
   const evolutionDir = path.join(proposal.skillDirPath, '.evolution');
   let applied = 0;

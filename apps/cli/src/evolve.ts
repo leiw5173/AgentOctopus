@@ -196,7 +196,13 @@ export async function runEvolveLog(skillName: string): Promise<void> {
   loadConfig();
   const config = getConfig();
   const skillsDir = config.registry?.skillsDir || path.join(process.env.HOME || '~', '.agentoctopus', 'skills');
-  const evolutionDir = path.join(skillsDir, skillName, '.evolution');
+  const skillDirPath = path.join(skillsDir, skillName);
+  const evolutionDir = path.join(skillDirPath, '.evolution');
+
+  if (!fs.existsSync(skillDirPath)) {
+    console.log(chalk.red(`\n  Skill "${skillName}" not found.\n`));
+    return;
+  }
 
   if (!fs.existsSync(evolutionDir)) {
     console.log(chalk.gray(`\n  No evolution data for ${skillName}.\n`));
