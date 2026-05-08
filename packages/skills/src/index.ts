@@ -2,6 +2,7 @@ export { extractQueryTokens, scoreKeywordMatch, CJK_RANGE, type SearchableSkill 
 export * from "./types.js";
 export type { ChangeRisk, EvolutionSignal, EvolutionChange, EvolutionProposal, EvolutionState } from './evolution/types.js';
 export { recordSignal, getSignalsSince, countSignalsSince, countNegativeFeedbackSince } from './evolution/collector.js';
+export { shadowCopy, listSnapshots, rollback, clearSnapshots } from './evolution/rollback.js';
 export { SkillFrontmatterSchema } from "./schema.js";
 export type { SkillFrontmatter } from "./schema.js";
 export { parseSkillFrontmatter } from "./frontmatter.js";
