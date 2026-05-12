@@ -71,13 +71,13 @@ export type SlackConfigSection = z.infer<typeof SlackConfigSchema>;
 export const SkillPerConfigSchema = z.object({
   enabled: z.boolean().optional(),
   apiKey: z.string().optional(),
-  env: z.record(z.string()).optional(),
-  config: z.record(z.unknown()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const SkillsConfigSchema = z.object({
   allowBundled: z.array(z.string()).optional(),
-  entries: z.record(SkillPerConfigSchema).optional(),
+  entries: z.record(z.string(), SkillPerConfigSchema).optional(),
   load: z.object({
     extraDirs: z.array(z.string()).optional(),
     watch: z.boolean().optional(),

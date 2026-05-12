@@ -19,7 +19,7 @@
   "dependencies": {
     "glob": "^13.0.6",
     "gray-matter": "^4.0.3",
-    "zod": "^3.22.0"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
