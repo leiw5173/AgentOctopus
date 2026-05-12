@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@agentoctopus/skills": "workspace:*",
-    "zod": "^3.22.0",
+    "zod": "^4.4.3",
     "gray-matter": "^4.0.3",
     "glob": "^13.0.6"
   },
