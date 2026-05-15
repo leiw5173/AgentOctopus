@@ -29,17 +29,23 @@ node apps/cli/dist/index.js search "weather"
 
 **Expected:** Lists skills matching "weather" with names, star ratings, descriptions, and tags.
 
+Done
+
 ```bash
 node apps/cli/dist/index.js search "nonexistent"
 ```
 
 **Expected:** Shows "No skills found" with hint to use `octopus list`.
 
+Done
+
 ```bash
 node apps/cli/dist/index.js search
 ```
 
 **Expected:** Shows error asking for a search query.
+
+Done
 
 ```bash
 node apps/cli/dist/index.js search "weather" --run
