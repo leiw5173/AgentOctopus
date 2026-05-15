@@ -108,7 +108,7 @@ export function skillToText(skill: LoadedSkill): string {
   const parts = [
     `Name: ${skill.manifest.name}`,
     `Description: ${skill.manifest.description}`,
-    `Tags: ${skill.manifest.tags.join(', ')}`,
+    `Tags: ${Array.isArray(skill.manifest.tags) ? skill.manifest.tags.join(', ') : ''}`,
     `Adapter: ${skill.manifest.adapter}`,
   ];
   if (skill.manifest.endpoint) {

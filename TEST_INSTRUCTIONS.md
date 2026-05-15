@@ -296,9 +296,9 @@ Open `http://localhost:3000` in a browser.
 In a new terminal:
 
 ```bash
-cd /root/AgentOctopus
+cd /Users/sam/Documents/Code/AgentOctopus
 node -e "
-import('@octopus/gateway').then(g => g.startAgentGateway('/root/AgentOctopus')).catch(console.error)
+import('/Users/sam/Documents/Code/AgentOctopus/packages/gateway/dist/index.js').then(g => g.startAgentGateway()).catch(console.error)
 "
 # Wait for: [Agent Gateway] Listening on port 3002
 ```
