@@ -81,6 +81,8 @@ node apps/cli/dist/index.js ask "What's the weather in London?"
 - Prompt: `Was this helpful? (y/n):`
 - Type `y` → prints "Rating updated."
 
+Done
+
 ---
 
 ### 1.4 Translation query
@@ -216,6 +218,8 @@ curl -s -X POST http://localhost:3000/api/ask \
 ```
 
 **Expected:** `{ "error": "Query is missing" }` with HTTP 400.
+
+Done
 
 ---
 
