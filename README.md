@@ -27,14 +27,14 @@ octopus ask "what's the weather in Tokyo"
 
 ## Documentation
 
-Full documentation is available at the [GitBook docs site](docs/SUMMARY.md).
+Full documentation is available at the [GitBook docs site](https://agentoctopus.gitbook.io/readme).
 
-- [What is AgentOctopus?](docs/introduction/what-is-agentoctopus.md)
-- [Quick Start](docs/getting-started/quick-start.md)
-- [Configuration](docs/getting-started/configuration.md)
-- [Skills](docs/core-concepts/skills.md) — bundled skills, adding community skills, API key setup
+- [What is AgentOctopus?](https://agentoctopus.gitbook.io/readme/what-is-agentoctopus/how-it-works)
+- [Quick Start](https://agentoctopus.gitbook.io/readme/quick-start)
+- [Configuration](https://agentoctopus.gitbook.io/readme/quick-start/configuration)
+- [Skills](https://agentoctopus.gitbook.io/readme/routing/skills) — bundled skills, adding community skills, API key setup
 - [CLI Reference](docs/api-reference/cli-reference.md) — `ask`, `sync`, `update`, retry config
-- [Routing](docs/core-concepts/routing.md)
+- [Routing](https://agentoctopus.gitbook.io/readme/routing)
 - [API Reference](docs/api-reference/rest-api.md)
 - [Deployment](docs/deployment/docker.md)
 - [Contributing](docs/contributing/adding-skills.md)
