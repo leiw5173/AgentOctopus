@@ -63,5 +63,24 @@ bin/
 skills-index.json
 skills-index.json.gz
 .superpowers/
+
+# Worktrees
 .worktrees/
+
+# Superpowers docs
 docs/superpowers/
+
+# Python virtual env
+.venv/
+
+# Claude Code worktrees and job state
+.claude/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Competition / hackathon submission files
+competition/
+
+# Competition / hackathon submission files
+competition/
