@@ -189,8 +189,8 @@ importers:
         specifier: ^0.6.3
         version: 0.6.3
       openai:
-        specifier: ^4.47.0
-        version: 4.104.0(ws@8.20.1)(zod@4.4.3)
+        specifier: ^6.38.0
+        version: 6.38.0(ws@8.20.1)(zod@4.4.3)
       vectra:
         specifier: ^0.14.0
         version: 0.14.0(ws@8.20.1)(zod@4.4.3)
@@ -3538,6 +3538,18 @@ packages:
     peerDependencies:
       ws: ^8.18.0
       zod: ^3.23.8
+    peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
+
+  openai@6.38.0:
+    resolution: {integrity: sha512-AoMplt2UalrpgUDMh3L09QWjNRlgJPipclQvA6sYAaeF6nHNBMgmikAZGmcYLn8on4d9sQY9Q8bOLfrBS7Lc8g==}
+    hasBin: true
+    peerDependencies:
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
     peerDependenciesMeta:
       ws:
         optional: true
@@ -7847,6 +7859,11 @@ snapshots:
       zod: 4.4.3
     transitivePeerDependencies:
       - encoding
+
+  openai@6.38.0(ws@8.20.1)(zod@4.4.3):
+    optionalDependencies:
+      ws: 8.20.1
+      zod: 4.4.3
 
   optionator@0.9.4:
     dependencies:
