@@ -12,7 +12,7 @@ import { Router, Executor, createChatClient, dbg, type LLMConfig, type Credentia
 import { startService } from './service.js';
 import { installSkill, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
-import { loadConfig, getConfig, getEnvPath } from '@agentoctopus/core';
+import { loadConfig, getConfig, getEnvPath, getConfigPath } from '@agentoctopus/core';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
@@ -122,7 +122,13 @@ program
     const port = config.gateway.port;
 
     console.log(chalk.bold('\n🐙 Starting AgentOctopus gateway\n'));
-    console.log(chalk.gray(`  Agent gateway: http://localhost:${port}/agent/health`));
+    console.log(chalk.gray(`  Control Plane:   http://localhost:${port}/agent/health`));
+    console.log(chalk.gray(`  Agent Gateway:   http://localhost:${port}/agent/ask`));
+    console.log(chalk.gray(`  WebChat (WS):    ws://localhost:${(config as any).canvas?.port ?? 3006}`));
+    if (process.env.SLACK_BOT_TOKEN) console.log(chalk.gray('  Slack:           enabled'));
+    if (process.env.DISCORD_TOKEN) console.log(chalk.gray('  Discord:         enabled'));
+    if (process.env.TELEGRAM_BOT_TOKEN) console.log(chalk.gray('  Telegram:        enabled'));
+    if ((config as any).gateway?.webhookPort) console.log(chalk.gray(`  Webhook:         http://localhost:${(config as any).gateway.webhookPort}${(config as any).gateway.webhookPath ?? '/webhook'}`));
     console.log(chalk.gray('  Press Ctrl+C to stop\n'));
 
     try {
@@ -988,6 +994,20 @@ configCmd
     console.log(`  ${chalk.cyan('Gateway')}:   port ${c.gateway.port}`);
     console.log(`  ${chalk.cyan('Registry')}:  ${c.registry.skillsDir}`);
     console.log(`  ${chalk.cyan('Timing')}:    ${c.execution.timing ? 'on' : 'off'}`);
+
+    if (c.agents.entries && c.agents.entries.length > 0) {
+      console.log(`\n  ${chalk.cyan('Agents')}:`);
+      for (const agent of c.agents.entries) {
+        const isDefault = agent.id === c.agents.default;
+        const sb = agent.sandbox?.enabled ? chalk.gray(` [${agent.sandbox.backend}]`) : '';
+        console.log(`    ${isDefault ? chalk.yellow('★') : ' '} ${chalk.cyan(agent.id)} — ${agent.name}${sb} ${chalk.gray(`(dm:${agent.dmPolicy})`)}`);
+      }
+    }
+
+    if (c.sandbox.defaultBackend !== 'none') {
+      console.log(`\n  ${chalk.cyan('Sandbox')}:   ${c.sandbox.defaultBackend}`);
+    }
+
     console.log();
   });
 
@@ -1025,6 +1045,140 @@ program
       console.error(chalk.red(`Evolve failed: ${err}`));
       process.exitCode = 1;
     }
+  });
+
+// ── octopus agent <subcommand> ─────────────────────────────────────────────
+const agentCmd = program
+  .command('agent')
+  .description('Manage agents — create, list, switch, remove');
+
+agentCmd
+  .command('list')
+  .description('List all configured agents')
+  .action(async () => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    console.log(chalk.bold('\n🐙 AgentOctopus — Agents\n'));
+
+    if (!c.agents.entries || c.agents.entries.length === 0) {
+      console.log(chalk.gray('  No agents configured.'));
+      return;
+    }
+
+    const defaultId = c.agents.default;
+    for (const agent of c.agents.entries) {
+      const isDefault = agent.id === defaultId;
+      const sb = agent.sandbox?.enabled ? chalk.gray(` [sandbox:${agent.sandbox.backend}]`) : '';
+      const dm = chalk.gray(` dm:${agent.dmPolicy}`);
+      const star = isDefault ? chalk.yellow(' ★ default') : '';
+      console.log(`  ${chalk.cyan.bold(agent.id)}${star}`);
+      console.log(`    ${chalk.gray('Name:')} ${agent.name}${dm}${sb}`);
+      if (agent.workspace) {
+        console.log(`    ${chalk.gray('Workspace:')} ${agent.workspace}`);
+      }
+      console.log();
+    }
+  });
+
+agentCmd
+  .command('create <id>')
+  .description('Create a new agent')
+  .option('--name <name>', 'Agent display name')
+  .option('--dm-policy <policy>', 'DM policy (pairing or open)', 'pairing')
+  .option('--sandbox <backend>', 'Sandbox backend (docker, ssh, openshell, none)', 'none')
+  .option('--model <model>', 'Per-agent LLM model override')
+  .action(async (id: string, options: { name?: string; dmPolicy?: string; sandbox?: string; model?: string }) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    const existing = c.agents.entries?.find((a) => a.id === id);
+    if (existing) {
+      console.log(chalk.red(`\n  Agent "${id}" already exists.`));
+      return;
+    }
+
+    const newAgent = {
+      id,
+      name: options.name || id,
+      dmPolicy: (options.dmPolicy === 'open' ? 'open' : 'pairing') as 'pairing' | 'open',
+      sandbox: options.sandbox && options.sandbox !== 'none'
+        ? { enabled: true, backend: options.sandbox as any }
+        : { enabled: false, backend: 'none' as const },
+      model: options.model ? { model: options.model } : undefined,
+    };
+
+    const entries = [...(c.agents.entries || []), newAgent];
+    const updatedConfig = {
+      ...c,
+      agents: { ...c.agents, entries },
+    };
+
+    // Save back to config file
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents = updatedConfig.agents;
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Agent "${newAgent.name}" (${id}) created.`));
+    console.log(chalk.gray(`    DM Policy: ${newAgent.dmPolicy}`));
+    if (newAgent.sandbox?.enabled) {
+      console.log(chalk.gray(`    Sandbox: ${newAgent.sandbox.backend}`));
+    }
+    console.log(chalk.gray(`    Workspace: ~/.agentoctopus/agents/${id}/workspace`));
+  });
+
+agentCmd
+  .command('switch <id>')
+  .description('Set the default agent')
+  .action(async (id: string) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    const exists = c.agents.entries?.some((a) => a.id === id);
+    if (!exists) {
+      console.log(chalk.red(`\n  Agent "${id}" not found.`));
+      return;
+    }
+
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents = parsed.agents || {};
+    parsed.agents.default = id;
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Default agent switched to "${id}".`));
+  });
+
+agentCmd
+  .command('remove <id>')
+  .description('Remove an agent')
+  .action(async (id: string) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    if (!c.agents.entries?.some((a) => a.id === id)) {
+      console.log(chalk.red(`\n  Agent "${id}" not found.`));
+      return;
+    }
+
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents.entries = (parsed.agents.entries || []).filter((a: any) => a.id !== id);
+    if (parsed.agents.default === id) {
+      parsed.agents.default = parsed.agents.entries[0]?.id || 'default';
+    }
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Agent "${id}" removed.`));
+    console.log(chalk.gray(`    New default: ${parsed.agents.default}`));
   });
 
 program.parse();

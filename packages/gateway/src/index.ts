@@ -24,6 +24,8 @@ export {
   type WebchatChannelOptions,
 } from './channels/index.js';
 export { createAgentRouter, startAgentGateway } from './agent-protocol.js';
+export { getControlPlane, resetControlPlane, type ControlPlane } from './control-plane/control-plane.js';
+export { eventBus, type GatewayEvent, type EventListener, type EventBus } from './control-plane/event-bus.js';
 export { getDeployMode, isCloudMode, isLocalMode, type DeployMode } from './deploy-mode.js';
 
 // Security middleware
