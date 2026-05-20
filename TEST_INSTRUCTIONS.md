@@ -1207,3 +1207,284 @@ Open OpenClaw and send each query. Observe what CLI command the agent generates.
 | 3.7 | L3-D: positive feedback in OpenClaw | ☐ |
 | 3.8 | L3-D: negative feedback in OpenClaw | ☐ |
 | 3.9 | L3-D: rating comparison after feedback | ☐ |
+
+---
+
+## Phase 13 — OpenClaw Architecture Extension
+
+### Prerequisites
+
+```bash
+pnpm install && pnpm build
+# Confirm all packages build successfully
+```
+
+### 13.1 Multi-Agent Configuration
+
+Create `~/.agentoctopus/octopus.json` with multiple agents:
+
+```json
+{
+  "version": 2,
+  "agents": {
+    "default": "personal",
+    "entries": [
+      {
+        "id": "personal",
+        "name": "Personal Assistant",
+        "dmPolicy": "pairing"
+      },
+      {
+        "id": "work",
+        "name": "Work Agent",
+        "dmPolicy": "open",
+        "sandbox": {
+          "enabled": true,
+          "backend": "docker"
+        }
+      }
+    ]
+  }
+}
+```
+
+Restart gateway and verify both agents initialized:
+
+```bash
+curl -s http://localhost:3002/agent/health | jq .
+```
+
+**Expected:** Status `ok`, both agent workspaces created under `~/.agentoctopus/agents/`.
+
+### 13.2 Agent-Specific Skill Isolation
+
+```bash
+# Add a skill to work agent only
+cp -r ~/.agentoctopus/skills/weather ~/.agentoctopus/agents/work/workspace/skills/
+
+# Query via personal agent — should NOT see work-only skill
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "weather in Tokyo", "agentId": "personal"}' | jq '.skill'
+
+# Query via work agent — should see work-only skill
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "weather in Tokyo", "agentId": "work"}' | jq '.skill'
+```
+
+**Expected:** Personal agent falls back to direct LLM or different skill; work agent routes to `weather`.
+
+### 13.3 Webhook Channel
+
+```bash
+# Start webhook channel (requires programmatic setup)
+node -e "
+import('@agentoctopus/gateway').then(g => {
+  const wh = new g.WebhookChannel({ port: 3005, path: '/webhook', secret: 'test-secret' });
+  wh.start();
+})
+"
+```
+
+Send test request:
+
+```bash
+curl -s -X POST http://localhost:3005/webhook \
+  -H 'Content-Type: application/json' \
+  -H 'X-Webhook-Secret: test-secret' \
+  -d '{"text": "weather in London", "channelId": "test-ch", "userId": "test-user"}' | jq .
+```
+
+**Expected:** JSON response with `response`, `skillUsed`, `isError` fields.
+
+### 13.4 WebSocket WebChat Channel
+
+Start WebChat server:
+
+```bash
+node -e "
+import('@agentoctopus/gateway').then(g => {
+  const wc = new g.WebchatChannel({ port: 3006 });
+  wc.start();
+})
+"
+```
+
+Connect via WebSocket:
+
+```bash
+node -e "
+const ws = new (require('ws'))('ws://localhost:3006');
+ws.on('open', () => {
+  ws.send(JSON.stringify({ type: 'message', text: 'weather in Paris', channelId: 'browser-1', userId: 'u1' }));
+});
+ws.on('message', (data) => console.log(JSON.parse(data)));
+"
+```
+
+**Expected:** WebSocket response with `type: 'response'`, weather data, `skillUsed: 'weather'`.
+
+### 13.5 Sandbox — Docker Execution
+
+Create a test skill with sandbox config:
+
+```bash
+mkdir -p ~/.agentoctopus/skills/sandbox-test/scripts
+cat > ~/.agentoctopus/skills/sandbox-test/SKILL.md << 'EOF'
+---
+name: sandbox-test
+description: Test sandbox execution
+adapter: subprocess
+sandbox:
+  backend: docker
+  image: node:20-alpine
+---
+
+Return "sandbox-ok" to stdout.
+EOF
+
+cat > ~/.agentoctopus/skills/sandbox-test/scripts/invoke.js << 'EOF'
+console.log('sandbox-ok');
+EOF
+```
+
+Restart gateway (to pick up new skill) and query:
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "sandbox-test"}' | jq '.response'
+```
+
+**Expected:** Response contains `sandbox-ok`, confirming Docker container execution.
+
+### 13.6 Sandbox — SSH Execution (optional)
+
+Requires `sandbox.ssh.host` and `sandbox.ssh.user` configured in `octopus.json`.
+
+```bash
+# Create skill with SSH sandbox
+cat > ~/.agentoctopus/skills/ssh-test/SKILL.md << 'EOF'
+---
+name: ssh-test
+description: Test SSH sandbox
+adapter: subprocess
+sandbox:
+  backend: ssh
+---
+EOF
+```
+
+**Expected:** Skill executes on remote host via SSH; output returned via gateway.
+
+### 13.7 Skill Composition
+
+Create a composed skill:
+
+```bash
+mkdir -p ~/.agentoctopus/skills/composed-demo
+cat > ~/.agentoctopus/skills/composed-demo/SKILL.md << 'EOF'
+---
+name: composed-demo
+description: Demo composed skill chain
+adapter: composed
+compose:
+  steps:
+    - skill: weather
+      inputMapping:
+        query: "{{query}}"
+      outputAs: weather_result
+    - skill: translation
+      inputMapping:
+        query: weather_result
+      outputAs: final_result
+---
+EOF
+```
+
+Query the composed skill:
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "composed-demo: weather in Tokyo"}' | jq '.response'
+```
+
+**Expected:** Output contains weather data passed through translation skill.
+
+### 13.8 DM Pairing Policy — Pairing Mode (default)
+
+Configure agent with `dmPolicy: "pairing"` and send a DM via Telegram/Discord bot from an unknown user.
+
+**Expected:**
+- First message: bot replies with pairing code (e.g., `Please pair this device. Reply with code: A1B2C3`)
+- User replies with wrong code: message ignored
+- User replies with correct code: pairing confirmed, subsequent messages processed normally
+
+### 13.9 DM Pairing Policy — Open Mode
+
+Configure agent with `dmPolicy: "open"` and send a DM from an unknown user.
+
+**Expected:** Message processed immediately without pairing challenge.
+
+### 13.10 ControlPlane — Event Bus
+
+Subscribe to events programmatically:
+
+```bash
+node -e "
+import('@agentoctopus/gateway').then(g => {
+  const unsubscribe = g.eventBus.on('skill-executed', (evt) => {
+    console.log('Skill executed:', evt.skillName, evt.success);
+  });
+})
+"
+```
+
+Send a query and verify event emitted.
+
+**Expected:** Console logs `Skill executed: weather true` after successful query.
+
+### 13.11 Planner — Structured Output Passing
+
+Test multi-hop query where step 1 produces JSON and step 2 consumes it:
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "Get weather in Tokyo and then translate the conditions to Spanish", "agentId": "personal"}' | jq '.response'
+```
+
+**Expected:** Final response contains Spanish translation of weather conditions (not just raw English output).
+
+### 13.12 Planner — Composite Step Detection
+
+Query that matches a composed skill:
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "Run composed demo for Tokyo"}' | jq '.skill'
+```
+
+**Expected:** `skill` field is `composed-demo`, confirming planner recognized composite step.
+
+---
+
+## Pass / Fail Checklist (Phase 13)
+
+| # | Test | Pass |
+|---|---|---|
+| 13.1 | Multi-agent config initializes both agents | ☐ |
+| 13.2 | Agent-specific skill isolation works | ☐ |
+| 13.3 | Webhook channel responds with JSON | ☐ |
+| 13.4 | WebChat WebSocket responds with weather data | ☐ |
+| 13.5 | Docker sandbox executes skill in container | ☐ |
+| 13.6 | SSH sandbox executes on remote host (optional) | ☐ |
+| 13.7 | Composed skill chain executes both steps | ☐ |
+| 13.8 | DM pairing mode challenges unknown sender | ☐ |
+| 13.9 | DM open mode allows unknown sender immediately | ☐ |
+| 13.10 | ControlPlane event bus emits skill-executed event | ☐ |
+| 13.11 | Planner passes structured output between steps | ☐ |
+| 13.12 | Planner detects composite step for composed skill | ☐ |
