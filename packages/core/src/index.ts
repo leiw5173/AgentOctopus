@@ -2,6 +2,7 @@ export { Router, type RoutingResult } from './router.js';
 export { Executor, extractCredentialErrors, type ExecutionResult, type CredentialMissingResult, type BinaryMissingResult } from './executor.js';
 export { createChatClient, createEmbedClient, skillToText, type ChatClient, type EmbedClient, type LLMConfig } from './llm-client.js';
 export { Planner, type ExecutionPlan, type PlanStep, type PlanStepResult, type PlanExecutionResult } from './planner.js';
+export { SkillComposer, type CompositionPlan, type CompositionStep, type CompositionResult } from './composer.js';
 export { dbg } from './debug.js';
 
 export {
@@ -9,4 +10,8 @@ export {
   getConfigDir, getConfigPath, getEnvPath,
   saveConfigFile, saveEnvFile,
 } from './config-resolver.js';
-export type { ResolvedConfig, OctopusConfigV2 } from './config-types.js';
+export type {
+  ResolvedConfig, OctopusConfigV2,
+  AgentConfigSection, AgentsConfigSection,
+  SandboxConfigSection, CanvasConfigSection, CompanionConfigSection,
+} from './config-types.js';

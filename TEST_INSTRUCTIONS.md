@@ -169,6 +169,8 @@ curl -s -X POST http://localhost:3000/api/ask \
 }
 ```
 
+Done
+
 ---
 
 ### 2.2 POST /api/ask — translation
@@ -188,6 +190,8 @@ curl -s -X POST http://localhost:3000/api/ask \
 }
 ```
 
+Done
+
 ---
 
 ### 2.3 POST /api/ask — IP lookup
@@ -206,6 +210,8 @@ curl -s -X POST http://localhost:3000/api/ask \
   "response": "IP / Host  : 8.8.8.8\nLocation   : Ashburn, Virginia, United States\n..."
 }
 ```
+
+Done
 
 ---
 
@@ -237,6 +243,8 @@ curl -s -X POST http://localhost:3000/api/feedback \
 ```
 Rating should be slightly above the baseline (4.8).
 
+Done
+
 ---
 
 ### 2.6 POST /api/feedback — thumbs down
@@ -249,6 +257,8 @@ curl -s -X POST http://localhost:3000/api/feedback \
 
 **Expected:** `{ "success": true, "skillName": "translation", "newRating": <number slightly below 4.5> }`
 
+Done
+
 ---
 
 ### 2.7 POST /api/feedback — unknown skill (validation)
@@ -260,6 +270,8 @@ curl -s -X POST http://localhost:3000/api/feedback \
 ```
 
 **Expected:** `{ "error": "Skill \"nonexistent\" not found" }` with HTTP 404.
+
+Done
 
 ---
 
@@ -286,6 +298,8 @@ Open `http://localhost:3000` in a browser.
 1. Type "Translate goodbye to French" → press Enter
 2. Response: `"goodbye" in French: Au revoir`
 3. Shift+Enter in the textarea → inserts newline (does NOT send)
+
+Done
 
 ---
 
@@ -316,6 +330,8 @@ curl -s http://localhost:3002/agent/health | jq .
 { "status": "ok", "skills": 3 }
 ```
 
+Done
+
 ---
 
 ### 3.3 POST /agent/ask — first turn
@@ -338,6 +354,8 @@ curl -s -X POST http://localhost:3002/agent/ask \
 ```
 
 Copy the `sessionId` from the response for the next test.
+
+Done
 
 ---
 
@@ -597,6 +615,8 @@ ls ~/.agentoctopus/skills/
 ```
 
 **Expected:** Directories for `weather`, `translation`, `ip-lookup`, and `x-search` are present, each containing a `SKILL.md`.
+
+Done
 
 ---
 

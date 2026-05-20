@@ -7,7 +7,8 @@ import {
   RerankConfigSchema, GatewayConfigSchema, RegistryConfigSchema,
   ExecutionConfigSchema, DeployConfigSchema, AuthConfigSchema,
   RatingConfigSchema, SlackConfigSchema, SkillsConfigSchema,
-  EvolutionConfigSchema,
+  EvolutionConfigSchema, AgentsConfigSchema, SandboxConfigSchema,
+  CanvasConfigSchema, CompanionConfigSchema,
   type ResolvedConfig, type OctopusConfigV2,
 } from './config-types.js';
 
@@ -107,6 +108,10 @@ export function loadConfig(): ResolvedConfig {
     slack: resolveAllEnvRefs(mergeSection(SlackConfigSchema, parsed.slack)),
     skills: resolveAllEnvRefs(mergeSection(SkillsConfigSchema, parsed.skills)),
     evolution: resolveAllEnvRefs(mergeSection(EvolutionConfigSchema, parsed.evolution)),
+    agents: resolveAllEnvRefs(mergeSection(AgentsConfigSchema, parsed.agents)),
+    sandbox: resolveAllEnvRefs(mergeSection(SandboxConfigSchema, parsed.sandbox)),
+    canvas: resolveAllEnvRefs(mergeSection(CanvasConfigSchema, parsed.canvas)),
+    companion: resolveAllEnvRefs(mergeSection(CompanionConfigSchema, parsed.companion)),
   };
 
   if (raw && raw.version !== 2) {

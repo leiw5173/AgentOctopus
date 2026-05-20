@@ -1,13 +1,15 @@
 import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/registry';
 import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
-import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
+import { HttpAdapter, McpAdapter, SubprocessAdapter, DockerAdapter, SshAdapter, OpenShellAdapter } from '@agentoctopus/adapters';
 import { applySkillEnvOverrides } from '@agentoctopus/skills';
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
 import { getConfig } from './config-resolver.js';
 import { recordExecutionSignal } from './evolution-hook.js';
+import { SkillComposer } from './composer.js';
+import type { Router } from './router.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -137,8 +139,29 @@ export class Executor {
   private http = new HttpAdapter();
   private mcp = new McpAdapter();
   private subprocess = new SubprocessAdapter();
+  private docker = new DockerAdapter();
+  private ssh?: SshAdapter;
+  private openshell = new OpenShellAdapter();
+  private composer?: SkillComposer;
 
-  constructor(private registry: SkillRegistry, private chatClient?: ChatClient) {}
+  constructor(
+    private registry: SkillRegistry,
+    private chatClient?: ChatClient,
+    private router?: Router,
+  ) {
+    // Lazy-init SSH adapter from config
+    const config = getConfig();
+    if (config.sandbox.ssh?.host && config.sandbox.ssh?.user) {
+      this.ssh = new SshAdapter({
+        host: config.sandbox.ssh.host,
+        user: config.sandbox.ssh.user,
+        keyPath: config.sandbox.ssh.keyPath,
+      });
+    }
+    if (this.router && this.chatClient) {
+      this.composer = new SkillComposer(this.registry, this.router, this, this.chatClient);
+    }
+  }
 
   async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
     const { debug = false } = opts;
@@ -174,6 +197,23 @@ export class Executor {
     const missingBins = requiredBins.filter(bin => !isBinAvailable(bin));
     if (missingBins.length > 0) {
       return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
+    }
+
+    // Handle composed skills (skill chaining)
+    if (skill.manifest.adapter === 'composed') {
+      if (!this.composer) {
+        return {
+          skill,
+          adapterResult: { success: false, error: 'SkillComposer not available — router required for composed skills' },
+          formattedOutput: 'Error: SkillComposer not available — router required for composed skills',
+        };
+      }
+      const composeResult = await this.composer.executeChain(skill, input);
+      return {
+        skill,
+        adapterResult: { success: composeResult.success, rawText: composeResult.finalOutput, error: composeResult.error },
+        formattedOutput: composeResult.success ? composeResult.finalOutput : `Error: ${composeResult.error}`,
+      };
     }
 
     let adapter = this.pickAdapter(skill);
@@ -614,10 +654,26 @@ If you're not confident about the URL, say "Visit the provider's website" instea
   }
 
   private pickAdapter(skill: LoadedSkill) {
+    // Check sandbox override first
+    const sandboxBackend = skill.manifest.sandbox?.backend;
+    if (sandboxBackend && sandboxBackend !== 'none') {
+      switch (sandboxBackend) {
+        case 'docker':
+          return this.docker;
+        case 'ssh':
+          return this.ssh ?? this.subprocess;
+        case 'openshell':
+          return this.openshell;
+      }
+    }
+
     switch (skill.manifest.adapter) {
       case 'mcp':
         return this.mcp;
       case 'subprocess':
+        return this.subprocess;
+      case 'composed':
+        // Composed skills are handled at a higher level before pickAdapter
         return this.subprocess;
       case 'http':
       default:

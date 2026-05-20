@@ -103,6 +103,65 @@ export const EvolutionConfigSchema = z.object({
 });
 export type EvolutionConfigSection = z.infer<typeof EvolutionConfigSchema>;
 
+// ── Agent Config (multi-agent routing) ───────────────────────────────────
+
+export const AgentConfigSchema = z.object({
+  id: z.string(),
+  name: z.string().optional(),
+  model: LLMConfigSchema.partial().optional(),
+  workspace: z.string().optional(),
+  dmPolicy: z.enum(['pairing', 'open']).default('pairing'),
+  sandbox: z.object({
+    enabled: z.boolean().default(false),
+    backend: z.enum(['docker', 'ssh', 'openshell', 'none']).default('none'),
+    image: z.string().optional(),
+    memory: z.string().optional(),
+    timeout: z.number().int().optional(),
+  }).optional(),
+  skills: SkillsConfigSchema.partial().optional(),
+});
+export type AgentConfigSection = z.infer<typeof AgentConfigSchema>;
+
+export const AgentsConfigSchema = z.object({
+  default: z.string().optional(),
+  entries: z.array(AgentConfigSchema).optional(),
+});
+export type AgentsConfigSection = z.infer<typeof AgentsConfigSchema>;
+
+// ── Sandbox Config (global defaults) ─────────────────────────────────────
+
+export const SandboxConfigSchema = z.object({
+  defaultBackend: z.enum(['docker', 'ssh', 'openshell', 'none']).default('none'),
+  docker: z.object({
+    image: z.string().default('node:20-alpine'),
+    memory: z.string().default('512m'),
+    network: z.enum(['bridge', 'none', 'host']).default('none'),
+  }).optional(),
+  ssh: z.object({
+    host: z.string().optional(),
+    user: z.string().optional(),
+    keyPath: z.string().optional(),
+  }).optional(),
+});
+export type SandboxConfigSection = z.infer<typeof SandboxConfigSchema>;
+
+// ── Canvas Config ────────────────────────────────────────────────────────
+
+export const CanvasConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  port: z.number().int().default(3003),
+});
+export type CanvasConfigSection = z.infer<typeof CanvasConfigSchema>;
+
+// ── Companion Config ─────────────────────────────────────────────────────
+
+export const CompanionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  port: z.number().int().default(3004),
+  heartbeatIntervalMs: z.number().int().default(30000),
+});
+export type CompanionConfigSection = z.infer<typeof CompanionConfigSchema>;
+
 export const OctopusConfigV2Schema = z.object({
   version: z.literal(2),
   llm: LLMConfigSchema.partial().default({}),
@@ -117,6 +176,10 @@ export const OctopusConfigV2Schema = z.object({
   slack: SlackConfigSchema.partial().default({}),
   skills: SkillsConfigSchema.partial().default({}),
   evolution: EvolutionConfigSchema.partial().default({}),
+  agents: AgentsConfigSchema.partial().default({}),
+  sandbox: SandboxConfigSchema.partial().default({}),
+  canvas: CanvasConfigSchema.partial().default({}),
+  companion: CompanionConfigSchema.partial().default({}),
 });
 
 export type OctopusConfigV2 = z.input<typeof OctopusConfigV2Schema>;
@@ -134,4 +197,8 @@ export interface ResolvedConfig {
   slack: SlackConfigSection;
   skills: SkillsConfigSection;
   evolution: EvolutionConfigSection;
+  agents: AgentsConfigSection;
+  sandbox: SandboxConfigSection;
+  canvas: CanvasConfigSection;
+  companion: CompanionConfigSection;
 }
