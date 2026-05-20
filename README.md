@@ -17,6 +17,18 @@ User: "Translate hello to French"
   "Bonjour"
 ```
 
+## Key Features
+
+| Feature | Description |
+|---|---|
+| **Smart Routing** | Embedding similarity + keyword matching + LLM re-rank with rating-aware scoring |
+| **Multi-Agent** | Isolate agents with separate workspaces, models, and skill registries |
+| **Multi-Channel** | CLI, REST API, Slack, Discord, Telegram, WebSocket WebChat, generic Webhooks |
+| **Skill Composition** | Chain skills into execution DAGs with input/output mapping |
+| **Sandbox Execution** | Run skills in Docker, SSH, or OpenShell for isolation |
+| **DM Security** | Pairing mode for unknown direct-message senders |
+| **Self-Evolving** | Skills auto-improve based on execution signals and user feedback |
+
 ## Quick start
 
 ```bash
