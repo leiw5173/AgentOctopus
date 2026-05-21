@@ -89,6 +89,7 @@ export const SkillsConfigSchema = z.object({
     maxSkillFileBytes: z.number().int().optional(),
   }).optional(),
   packs: z.array(z.string()).optional(),
+  installPrefs: z.record(z.string(), z.enum(['always', 'never', 'prompt'])).optional(),
 });
 export type SkillsConfigSection = z.infer<typeof SkillsConfigSchema>;
 

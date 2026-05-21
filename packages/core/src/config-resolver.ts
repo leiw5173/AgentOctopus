@@ -143,3 +143,35 @@ export function saveEnvFile(content: string): void {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   fs.writeFileSync(getEnvPath(), content, 'utf8');
 }
+
+export function getInstallPref(bin: string): 'always' | 'never' | 'prompt' {
+  const config = getConfig();
+  return (config.skills.installPrefs?.[bin] as 'always' | 'never' | 'prompt') ?? 'prompt';
+}
+
+export function saveInstallPref(bins: string[], preference: 'always' | 'never'): void {
+  const rawPath = getConfigPath();
+  let raw: Record<string, unknown> = {};
+  if (fs.existsSync(rawPath)) {
+    try { raw = JSON.parse(fs.readFileSync(rawPath, 'utf8')); } catch { /* ignore */ }
+  }
+
+  if (!raw.skills || typeof raw.skills !== 'object') {
+    raw.skills = {};
+  }
+  const skills = raw.skills as Record<string, unknown>;
+  if (!skills.installPrefs || typeof skills.installPrefs !== 'object') {
+    skills.installPrefs = {};
+  }
+  const prefs = skills.installPrefs as Record<string, string>;
+
+  for (const bin of bins) {
+    prefs[bin] = preference;
+  }
+
+  fs.mkdirSync(path.dirname(rawPath), { recursive: true });
+  fs.writeFileSync(rawPath, JSON.stringify(raw, null, 2), 'utf8');
+
+  // Invalidate in-memory cache so next getConfig() sees the update
+  resetConfig();
+}
