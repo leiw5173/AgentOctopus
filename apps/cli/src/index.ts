@@ -8,7 +8,7 @@ import fs from 'fs';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult, extractCredentialErrors, getInstallPref, saveInstallPref } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
@@ -307,7 +307,7 @@ program
 
       spinner.start(`Executing ${skill.manifest.name}...`);
       try {
-        const result = await engine.executor.execute(skill, input, { debug: !!options.debug });
+        let result = await engine.executor.execute(skill, input, { debug: !!options.debug });
         const t3 = Date.now();
 
         if (options.debug) {
@@ -334,6 +334,58 @@ program
             console.log(chalk.yellow(`↻ Trying next skill...\n`));
           }
           continue;
+        }
+
+        if ('type' in result && result.type === 'binary_installable') {
+          const biaResult = result as BinaryInstallableResult;
+          const missing = biaResult.missing as string[];
+          const allAlways = missing.every(b => getInstallPref(b) === 'always');
+          const anyNever = missing.some(b => getInstallPref(b) === 'never');
+          spinner.stop();
+
+          if (anyNever) {
+            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
+            continue;
+          }
+
+          let shouldInstall = allAlways;
+          let rememberPref: 'always' | 'never' | null = null;
+
+          if (!shouldInstall) {
+            console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+            const choice = await promptSelect('Install missing tools?', [
+              { label: 'Yes, install now', value: 'yes' },
+              { label: 'Yes, and always install automatically', value: 'always' },
+              { label: 'No, try another skill', value: 'no' },
+              { label: 'Never install automatically', value: 'never' },
+            ]);
+            if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
+            else if (choice === 'yes') { shouldInstall = true; }
+            else if (choice === 'never') { rememberPref = 'never'; }
+          }
+
+          if (rememberPref) saveInstallPref(missing, rememberPref);
+
+          if (!shouldInstall) {
+            if (i < candidates.length - 1) console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+            continue;
+          }
+
+          spinner.start(`Installing ${missing.join(', ')}...`);
+          result = await engine.executor.execute(skill, input, { debug: !!options.debug, autoInstall: true });
+
+          if ('type' in result && result.type === 'binary_install_failed') {
+            const biafResult = result as BinaryInstallFailedResult;
+            spinner.fail(`Failed to install required tools for ${biafResult.skillName}`);
+            console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
+            (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
+            console.error();
+            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
+            continue;
+          }
+
+          spinner.start('Finalizing...');
         }
 
         if ('type' in result && result.type === 'binary_missing') {
@@ -585,7 +637,7 @@ program
       const input = { query: pick.query, text: pick.query };
       const execSpinner = ora(`Executing ${pick.skill.manifest.name}...`).start();
       try {
-        const result = await executor.execute(pick.skill, input);
+        let result = await executor.execute(pick.skill, input);
         execSpinner.stop();
 
         if ('type' in result && result.type === 'credential_missing') {
@@ -597,6 +649,41 @@ program
             missingKeys,
           );
           console.log(chalk.yellow(guide.split('\n').map((l: string) => `  ${l}`).join('\n')));
+        } else if ('type' in result && result.type === 'binary_installable') {
+          const biaResult = result as BinaryInstallableResult;
+          const missing = biaResult.missing as string[];
+          const allAlways = missing.every(b => getInstallPref(b) === 'always');
+          const anyNever = missing.some(b => getInstallPref(b) === 'never');
+
+          if (anyNever) {
+            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+          } else {
+            let shouldInstall = allAlways;
+            let rememberPref: 'always' | 'never' | null = null;
+            if (!shouldInstall) {
+              console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+              const choice = await promptSelect('Install missing tools?', [
+                { label: 'Yes, install now', value: 'yes' },
+                { label: 'Yes, and always install automatically', value: 'always' },
+                { label: 'No', value: 'no' },
+                { label: 'Never install automatically', value: 'never' },
+              ]);
+              if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
+              else if (choice === 'yes') { shouldInstall = true; }
+              else if (choice === 'never') { rememberPref = 'never'; }
+            }
+            if (rememberPref) saveInstallPref(missing, rememberPref);
+            if (shouldInstall) {
+              const installSpinner = ora(`Installing ${missing.join(', ')}...`).start();
+              result = await executor.execute(pick.skill, input, { autoInstall: true });
+              installSpinner.stop();
+              if ('type' in result && result.type === 'binary_install_failed') {
+                const biafResult = result as BinaryInstallFailedResult;
+                console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
+                (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
+              }
+            }
+          }
         } else if ('type' in result && result.type === 'binary_missing') {
           const tools = (result.missing as string[]).map((b: string) => `  • ${b}`).join('\n');
           console.log(chalk.red(`\n${pick.skill.manifest.name} requires missing tools:`));
