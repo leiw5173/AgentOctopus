@@ -1,11 +1,12 @@
 import express, { type Request, type Response } from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, validateApiKey } from './auth-middleware.js';
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
 import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
-import { getConfig, type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
+import { getConfig, type CredentialMissingResult, type BinaryMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult } from '@agentoctopus/core';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
@@ -13,6 +14,14 @@ function isCredentialMissing(result: unknown): result is CredentialMissingResult
 
 function isBinaryMissing(result: unknown): result is BinaryMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
+}
+
+function isBinaryInstallable(result: unknown): result is BinaryInstallableResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_installable';
+}
+
+function isBinaryInstallFailed(result: unknown): result is BinaryInstallFailedResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_install_failed';
 }
 
 /**
@@ -112,11 +121,12 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
   // ── Authenticated: Ask ─────────────────────────────────────────────────
 
   router.post('/ask', async (req: Request, res: Response) => {
-    const { query, sessionId, agentId = 'external-agent', metadata = {} } = req.body as {
+    const { query, sessionId, agentId = 'external-agent', metadata = {}, autoInstall = false } = req.body as {
       query?: string;
       sessionId?: string;
       agentId?: string;
       metadata?: Record<string, unknown>;
+      autoInstall?: boolean;
     };
 
     if (!query || typeof query !== 'string') {
@@ -125,7 +135,8 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     }
 
     // Resolve or create session
-    const channelId = sessionId ?? agentId;
+    // Without a sessionId, generate a fresh channelId so every request gets a new session.
+    const channelId = sessionId ?? uuidv4();
     const session = sessionId
       ? sessionManager.getById(sessionId) ?? sessionManager.getOrCreate(channelId, agentId, 'agent')
       : sessionManager.getOrCreate(channelId, agentId, 'agent');
@@ -186,7 +197,7 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
         return;
       }
 
-      const result = await engine.executor.execute(routing.skill, { query });
+      let result = await engine.executor.execute(routing.skill, { query }, { autoInstall });
 
       if (isCredentialMissing(result)) {
         const lines = result.missing
@@ -201,6 +212,36 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
           skillName: result.skillName,
           missing: result.missing,
           response: `I matched a skill that could answer this, but it needs an API key that isn't configured:\n${lines}${setupCmd}`,
+          skill: routing.skill.manifest.name,
+          sessionId: session.id,
+          confidence: routing.score,
+        });
+        return;
+      }
+
+      if (isBinaryInstallable(result)) {
+        res.json({
+          success: false,
+          type: 'binary_installable',
+          skillName: result.skillName,
+          missing: result.missing,
+          installSpecs: result.installSpecs,
+          response: `I matched a skill but it requires tools that aren't installed: ${(result.missing as string[]).join(', ')}. Retry with autoInstall=true to install automatically, or install them manually.`,
+          skill: routing.skill.manifest.name,
+          sessionId: session.id,
+          confidence: routing.score,
+        });
+        return;
+      }
+
+      if (isBinaryInstallFailed(result)) {
+        res.json({
+          success: false,
+          type: 'binary_install_failed',
+          skillName: result.skillName,
+          missing: result.missing,
+          manualInstructions: result.manualInstructions,
+          response: `Installation of required tools failed. Manual steps:\n${(result.manualInstructions as string[]).map(i => `  ${i}`).join('\n')}`,
           skill: routing.skill.manifest.name,
           sessionId: session.id,
           confidence: routing.score,
