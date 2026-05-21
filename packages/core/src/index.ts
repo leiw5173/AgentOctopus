@@ -1,5 +1,5 @@
 export { Router, type RoutingResult } from './router.js';
-export { Executor, extractCredentialErrors, type ExecutionResult, type CredentialMissingResult, type BinaryMissingResult } from './executor.js';
+export { Executor, extractCredentialErrors, type ExecutionResult, type CredentialMissingResult, type BinaryMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult } from './executor.js';
 export { createChatClient, createEmbedClient, skillToText, type ChatClient, type EmbedClient, type LLMConfig } from './llm-client.js';
 export { Planner, type ExecutionPlan, type PlanStep, type PlanStepResult, type PlanExecutionResult } from './planner.js';
 export { SkillComposer, type CompositionPlan, type CompositionStep, type CompositionResult } from './composer.js';
@@ -9,6 +9,7 @@ export {
   loadConfig, getConfig, resetConfig,
   getConfigDir, getConfigPath, getEnvPath,
   saveConfigFile, saveEnvFile,
+  getInstallPref, saveInstallPref,
 } from './config-resolver.js';
 export type {
   ResolvedConfig, OctopusConfigV2,
