@@ -305,6 +305,8 @@ Done
 
 ## Phase 3 — IM & Agent Gateway
 
+> **API Key:** Agent Gateway requires authentication. The examples below use key `ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf`. If this key is revoked, generate a new one with `node -e "import('./packages/gateway/dist/auth-middleware.js').then(m => console.log(m.createApiKey({email:'test@example.com'}).key))"`.
+
 ### 3.1 Agent Protocol — standalone server
 
 In a new terminal:
@@ -339,6 +341,7 @@ Done
 ```bash
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "What is the weather in Berlin?", "agentId": "test-agent"}' | jq .
 ```
 
@@ -365,6 +368,7 @@ Done
 # Replace <SESSION_ID> with the value from 3.3
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "Translate that city name to Japanese", "sessionId": "<SESSION_ID>"}' | jq .
 ```
 
@@ -377,10 +381,13 @@ curl -s -X POST http://localhost:3002/agent/ask \
 ```bash
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"agentId": "test"}' | jq .
 ```
 
 **Expected:** `{ "success": false, "error": "query is required" }` with HTTP 400.
+
+Done
 
 ---
 
@@ -389,10 +396,13 @@ curl -s -X POST http://localhost:3002/agent/ask \
 ```bash
 curl -s -X POST http://localhost:3002/agent/feedback \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"skillName": "weather", "positive": true, "comment": "accurate result"}' | jq .
 ```
 
 **Expected:** `{ "success": true }`
+
+Done
 
 ---
 
@@ -401,10 +411,13 @@ curl -s -X POST http://localhost:3002/agent/feedback \
 ```bash
 curl -s -X POST http://localhost:3002/agent/feedback \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"skillName": "weather"}' | jq .
 ```
 
 **Expected:** `{ "success": false, "error": "skillName and positive (boolean) are required" }` with HTTP 400.
+
+Done
 
 ---
 
@@ -413,7 +426,7 @@ curl -s -X POST http://localhost:3002/agent/feedback \
 The session manager expires sessions after 30 minutes of inactivity. To verify the logic without waiting:
 
 ```bash
-pnpm --filter @octopus/gateway test
+pnpm --filter @agentoctopus/gateway test
 ```
 
 **Expected:** 10 tests pass, including the `prune` test that artificially ages a session and verifies it is replaced on the next `getOrCreate` call.
@@ -489,11 +502,13 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 ### 4.1 GET /agent/skills/export
 
 ```bash
-curl -s http://localhost:3002/agent/skills/export | jq '.skills | length'
+curl -s http://localhost:3002/agent/skills/export \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' | jq '.skills | length'
 ```
 
 **Expected:** Returns number of skills (e.g., `3`), each with `name`, `version`, `skillMd`, `scripts` fields.
 
+Done
 ---
 
 ### 4.2 POST /agent/sync — sync from cloud
@@ -512,6 +527,7 @@ Trigger sync:
 ```bash
 curl -s -X POST http://localhost:3003/agent/sync \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"cloudUrl": "http://localhost:3002"}' | jq .
 ```
 
@@ -527,45 +543,46 @@ node apps/cli/dist/index.js sync --cloud-url http://localhost:3002
 
 **Expected:** Output shows added/updated/skipped skills.
 
+Done
 ---
 
-### 4.4 octopus sync-awesome — dry run (no writes)
+### 4.4 octopus sync — dry run (no writes)
 
 ```bash
-node apps/cli/dist/index.js sync-awesome --dry-run --limit 5
+node apps/cli/dist/index.js sync --dry-run --limit 5
 ```
 
 **Expected:** Prints up to 5 skill slugs prefixed with cyan color, then `Total: 5`. No new directories created under `registry/skills/`.
 
 ---
 
-### 4.5 octopus sync-awesome — install with limit
+### 4.5 octopus sync — install with limit
 
 ```bash
-node apps/cli/dist/index.js sync-awesome --limit 3
+node apps/cli/dist/index.js sync --limit 3
 ```
 
 **Expected:** Installs 3 skills. Each creates a directory under `registry/skills/<slug>/` containing at minimum `SKILL.md` and `.clawhub-origin.json`. Final line shows `Installed: 3  Skipped: 0  Failed: 0`.
 
 ---
 
-### 4.6 octopus sync-awesome — category filter
+### 4.6 octopus sync — category filter
 
 ```bash
-node apps/cli/dist/index.js sync-awesome --category git-and-github --dry-run
+node apps/cli/dist/index.js sync --category git-and-github --dry-run
 ```
 
 **Expected:** Lists only skills from the `git-and-github` category. Slug count is smaller than the full list.
 
 ---
 
-### 4.7 octopus sync-awesome — skip already-installed
+### 4.7 octopus sync — skip already-installed
 
-Run sync-awesome twice without --force:
+Run sync twice without --force:
 
 ```bash
-node apps/cli/dist/index.js sync-awesome --limit 2
-node apps/cli/dist/index.js sync-awesome --limit 2
+node apps/cli/dist/index.js sync --limit 2
+node apps/cli/dist/index.js sync --limit 2
 ```
 
 **Expected:** Second run produces no per-skill output lines for unchanged skills — they are counted silently. The unified footer shows `Sync: N unchanged` (e.g. `Sync: 2 unchanged`). Use `--force` to overwrite already-installed skills.
@@ -712,12 +729,12 @@ octopus connect openclaw
 
 ---
 
-## Skills Index Bundle (Phase: sync-awesome)
+## Skills Index Bundle (Phase: sync)
 
-### 6.1 `octopus sync-awesome --dry-run --limit 3`
+### 6.1 `octopus sync --dry-run --limit 3`
 
 ```bash
-node apps/cli/dist/index.js sync-awesome --dry-run --limit 3
+node apps/cli/dist/index.js sync --dry-run --limit 3
 ```
 
 **Expected:** Prints "Dry run — skills that would be installed" with up to 3 slugs. No files written.
@@ -762,7 +779,7 @@ Run: octopus config set SOME_KEY <your-value>
 
 | # | Test | Pass |
 |---|---|---|
-| 6.1 | `sync-awesome --dry-run --limit 3` lists slugs, writes nothing | ☐ |
+| 6.1 | `sync --dry-run --limit 3` lists slugs, writes nothing | ☐ |
 | 6.2 | `octopus config set MY_KEY abc123` prints confirmation | ☐ |
 | 6.3 | `octopus config list` shows MY_KEY masked | ☐ |
 | 6.4 | `octopus.json` contains the key after set | ☐ |
@@ -1265,11 +1282,13 @@ cp -r ~/.agentoctopus/skills/weather ~/.agentoctopus/agents/work/workspace/skill
 # Query via personal agent — should NOT see work-only skill
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "weather in Tokyo", "agentId": "personal"}' | jq '.skill'
 
 # Query via work agent — should see work-only skill
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "weather in Tokyo", "agentId": "work"}' | jq '.skill'
 ```
 
@@ -1354,6 +1373,7 @@ Restart gateway (to pick up new skill) and query:
 ```bash
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "sandbox-test"}' | jq '.response'
 ```
 
@@ -1408,6 +1428,7 @@ Query the composed skill:
 ```bash
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "composed-demo: weather in Tokyo"}' | jq '.response'
 ```
 
@@ -1453,6 +1474,7 @@ Test multi-hop query where step 1 produces JSON and step 2 consumes it:
 ```bash
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "Get weather in Tokyo and then translate the conditions to Spanish", "agentId": "personal"}' | jq '.response'
 ```
 
@@ -1465,6 +1487,7 @@ Query that matches a composed skill:
 ```bash
 curl -s -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf' \
   -d '{"query": "Run composed demo for Tokyo"}' | jq '.skill'
 ```
 
@@ -1488,3 +1511,137 @@ curl -s -X POST http://localhost:3002/agent/ask \
 | 13.10 | ControlPlane event bus emits skill-executed event | ☐ |
 | 13.11 | Planner passes structured output between steps | ☐ |
 | 13.12 | Planner detects composite step for composed skill | ☐ |
+
+---
+
+## Phase 14 — Binary Auto-Install
+
+Tests for interactive/automatic installation of missing skill binaries across all interfaces.
+
+### Setup
+
+Skills declare required binaries via `metadata.openclaw.requires.bins` and installation specs via `metadata.openclaw.install`. The executor detects missing binaries and returns `binary_installable` (when install specs exist) or `binary_missing` (when no specs exist).
+
+### 14.1 CLI — binary_installable prompt (ask command)
+
+Find or create a skill with `requires.bins` and an `install` spec. Run:
+
+```bash
+# With the binary uninstalled, query a skill that needs it
+node apps/cli/dist/index.js ask "get weather for Tokyo"
+```
+
+**Expected:** After routing to a skill with a missing binary + install spec, CLI shows:
+```
+✖ <skill-name> requires missing tools
+
+<skill-name> requires missing tools:
+  • <binary>
+
+Install missing tools?
+  1. Yes, install now
+  2. Yes, and always install automatically
+  3. No, try another skill
+  4. Never install automatically
+```
+
+### 14.2 CLI — install preference "always"
+
+```bash
+node apps/cli/dist/index.js ask "get weather for Tokyo"
+# Choose: 2. Yes, and always install automatically
+```
+
+**Expected:** Tool is installed, execution continues. On the next identical query, the tool installs without prompting (preference saved to `~/.agentoctopus/octopus.json` under `skills.installPrefs`).
+
+### 14.3 CLI — install preference "never"
+
+```bash
+node apps/cli/dist/index.js ask "get weather for Tokyo"
+# Choose: 4. Never install automatically
+```
+
+**Expected:** Install blocked, next candidate tried. Preference persists — future queries skip install prompt and fall through to next skill.
+
+### 14.4 REST API — binary_installable response
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <api-key>' \
+  -d '{"query": "get weather for Tokyo"}' | jq '{type, missing, installSpecs}'
+```
+
+**Expected when binary is missing with install spec:**
+```json
+{
+  "type": "binary_installable",
+  "missing": ["<binary>"],
+  "installSpecs": [{"kind": "brew", "formula": "..."}]
+}
+```
+
+### 14.5 REST API — autoInstall=true
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <api-key>' \
+  -d '{"query": "get weather for Tokyo", "autoInstall": true}' | jq '{success, type, response}'
+```
+
+**Expected:** Tool installs automatically; if successful, `success: true` with skill response. If install fails, `type: "binary_install_failed"` with `manualInstructions`.
+
+### 14.6 REST API — binary_missing (no install spec)
+
+For a skill with `requires.bins` but no `install` spec:
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <api-key>' \
+  -d '{"query": "..."}' | jq .type
+```
+
+**Expected:** `"binary_missing"` (no installSpecs field, no prompt).
+
+### 14.7 Chat channel (Slack/Discord/Telegram) — two-phase install
+
+Send a query that routes to a skill with a missing binary + install spec.
+
+**Expected first reply:**
+```
+I matched a skill but it requires tools that aren't installed:
+  - <binary>
+
+Reply "yes" to install automatically, or install them manually.
+```
+
+Reply "yes" to the bot.
+
+**Expected second reply:** Skill executes successfully (or install failure message with manual instructions).
+
+### 14.8 Web API — binary_installable response
+
+```bash
+curl -s -X POST http://localhost:3000/api/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "get weather for Tokyo"}' | jq '{type, missing}'
+```
+
+**Expected:** `type: "binary_installable"` when binary is missing with an install spec declared.
+
+---
+
+## Pass / Fail Checklist (Phase 14)
+
+| # | Test | Pass |
+|---|---|---|
+| 14.1 | CLI ask: binary_installable shows install prompt | ☐ |
+| 14.2 | CLI ask: "always" preference auto-installs on next query | ☐ |
+| 14.3 | CLI ask: "never" preference skips install, tries next skill | ☐ |
+| 14.4 | REST API returns binary_installable with installSpecs | ☐ |
+| 14.5 | REST API autoInstall=true installs and executes skill | ☐ |
+| 14.6 | REST API returns binary_missing when no install spec | ☐ |
+| 14.7 | Chat channel two-phase: prompt then install on "yes" reply | ☐ |
+| 14.8 | Web API returns binary_installable response | ☐ |
