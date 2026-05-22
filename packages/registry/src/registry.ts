@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { glob } from 'glob';
-import { loadSkillsFromDir, type SkillEntry, extractQueryTokens, scoreKeywordMatch } from '@agentoctopus/skills';
+import { loadSkillsFromDir, type SkillEntry, type SkillSource, extractQueryTokens, scoreKeywordMatch } from '@agentoctopus/skills';
 import { type SkillManifest, type SkillCredential } from './manifest-schema.js';
 import { RatingStore } from './rating.js';
 import type { TaskType } from './rating-dimensions.js';
@@ -52,6 +52,7 @@ function skillEntryToLoadedSkill(
     rating: manifest.rating,
     routingScore: ratingStore.getRoutingScore(manifest.name, manifest.taskType),
     negativeFeedbackCount: ratingStore.getOrCreate(manifest.name).recentFeedback.filter(f => !f.positive).length,
+    entry,
   };
 }
 
@@ -61,6 +62,57 @@ export interface LoadedSkill {
   rating: number;
   routingScore?: number;
   negativeFeedbackCount?: number;
+  /** Original SkillEntry parsed from @agentoctopus/skills — may be missing for cache-restored skills. */
+  entry?: SkillEntry;
+}
+
+/**
+ * Return the original SkillEntry for a LoadedSkill.
+ * If the skill was restored from cache (entry missing), build a minimal
+ * fallback from the manifest so downstream consumers never crash.
+ */
+export function getSkillEntry(skill: LoadedSkill): SkillEntry {
+  if (skill.entry) return skill.entry;
+
+  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
+  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
+
+  // Lazily read instructions from disk when the original SkillEntry is missing
+  // (e.g. skill was restored from cache). This prevents downstream consumers
+  // like SubprocessAdapter from failing to locate scripts.
+  let lazyInstructions = '';
+  try {
+    const skillMdPath = path.join(skill.dirPath, 'SKILL.md');
+    if (fs.existsSync(skillMdPath)) {
+      const raw = fs.readFileSync(skillMdPath, 'utf-8');
+      const match = raw.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
+      lazyInstructions = (match ? match[1] : raw).trim();
+    }
+  } catch {
+    // Keep empty on read failure — downstream already handles missing instructions
+  }
+
+  return {
+    skill: {
+      name: skill.manifest.name,
+      description: skill.manifest.description,
+      version: skill.manifest.version,
+      dirPath: skill.dirPath,
+      source: ((rawMeta.source as string) ?? (openclaw ? 'clawhub' : 'user')) as SkillSource,
+      tags: skill.manifest.tags,
+      instructions: lazyInstructions,
+      frontmatter: {},
+    },
+    frontmatter: skill.manifest.metadata ?? {},
+    metadata: {
+      skillKey: (openclaw.skillKey as string) ?? skill.manifest.name,
+      always: (rawMeta.always as boolean) ?? undefined,
+      os: (rawMeta.os as string[]) ?? undefined,
+      requires: (rawMeta.requires as any) ?? undefined,
+      primaryEnv: (rawMeta.primaryEnv as string) ?? (openclaw.primaryEnv as string) ?? undefined,
+    },
+    invocation: { userInvocable: true, disableModelInvocation: false },
+  };
 }
 
 export class SkillRegistry {
@@ -129,6 +181,7 @@ export class SkillRegistry {
                 dirPath: s.dirPath,
                 rating: manifest.rating,
                 routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
+                entry: s.entry,
               });
               restored++;
             } catch { /* skip corrupt entries */ }
@@ -163,6 +216,7 @@ export class SkillRegistry {
       const serialized = Array.from(this.skills.values()).map(s => ({
         manifest: s.manifest,
         dirPath: s.dirPath,
+        entry: s.entry,
       }));
       fs.writeFileSync(this.cachePath(), JSON.stringify({ hash, skills: serialized }));
     } catch { /* cache write failure is non-fatal */ }

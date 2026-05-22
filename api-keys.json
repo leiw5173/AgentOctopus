@@ -45,9 +45,9 @@
       "tier": "free",
       "createdAt": "2026-05-15T09:02:03.128Z",
       "usage": {
-        "daily": 9,
-        "monthly": 9,
-        "lastDailyReset": "2026-05-15",
+        "daily": 1,
+        "monthly": 10,
+        "lastDailyReset": "2026-05-21",
         "lastMonthlyReset": "2026-05"
       },
       "active": true
@@ -58,9 +58,9 @@
       "tier": "free",
       "createdAt": "2026-05-15T09:02:06.422Z",
       "usage": {
-        "daily": 0,
-        "monthly": 0,
-        "lastDailyReset": "2026-05-15",
+        "daily": 14,
+        "monthly": 14,
+        "lastDailyReset": "2026-05-21",
         "lastMonthlyReset": "2026-05"
       },
       "active": true

@@ -587,6 +587,8 @@ node apps/cli/dist/index.js sync --limit 2
 
 **Expected:** Second run produces no per-skill output lines for unchanged skills — they are counted silently. The unified footer shows `Sync: N unchanged` (e.g. `Sync: 2 unchanged`). Use `--force` to overwrite already-installed skills.
 
+Done
+
 ---
 
 ### 4.8 Docker build (cloud)
@@ -597,6 +599,8 @@ docker compose --profile cloud build
 
 **Expected:** Build completes without errors.
 
+Done
+
 ---
 
 ### 4.9 Docker build (local)
@@ -606,6 +610,8 @@ docker compose --profile local build
 ```
 
 **Expected:** Build completes without errors.
+
+Done
 
 ---
 

@@ -1,6 +1,7 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
-import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
+import { getRequiredEnvVars, getRequiredBins, getSkillEntry } from '@agentoctopus/registry';
 import { shouldIncludeSkill, extractQueryTokens, scoreKeywordMatch, CJK_RANGE, type SkillEligibilityContext } from '@agentoctopus/skills';
+import type { SkillsConfig } from '@agentoctopus/skills';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { getConfig } from './config-resolver.js';
@@ -62,35 +63,6 @@ interface VectorEntry {
 interface EmbedCacheFile {
   model: string;
   skills: Record<string, { hash: string; embedding: number[] }>;
-}
-
-/**
- * Build a lightweight adapter from LoadedSkill to a shape compatible with
- * shouldIncludeSkill from @agentoctopus/skills. Only populates fields that
- * shouldIncludeSkill (and its callees) actually access.
- */
-function loadedSkillToEligibilityEntry(skill: LoadedSkill) {
-  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
-  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
-
-  return {
-    skill: {
-      name: skill.manifest.name,
-      source: (rawMeta.source as string) ??
-        (rawMeta.openclaw ? 'clawhub' : 'user'),
-    },
-    metadata: {
-      skillKey: (openclaw.skillKey as string) ?? undefined,
-      always: (rawMeta.always as boolean) ?? undefined,
-      os: (rawMeta.os as string[]) ?? undefined,
-      requires: (rawMeta.requires as {
-        bins?: string[];
-        anyBins?: string[];
-        env?: string[];
-        config?: string[];
-      }) ?? undefined,
-    },
-  };
 }
 
 function parseRerankDecision(response: string, candidates: RoutingResultCandidate[]): string | 'none' {
@@ -283,8 +255,8 @@ export class Router {
     const eligible: VectorEntry[] = [];
     for (const entry of this.index) {
       const pass = shouldIncludeSkill({
-        entry: loadedSkillToEligibilityEntry(entry.skill) as any,
-        config: skillsConfig as any,
+        entry: getSkillEntry(entry.skill),
+        config: skillsConfig as unknown as SkillsConfig,
         eligibility,
       });
       dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → ${pass ? 'PASS' : 'SKIP'}`);

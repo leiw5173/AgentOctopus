@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Router } from '../src/router.js';
 import { Executor } from '../src/executor.js';
 import { SkillRegistry } from '@agentoctopus/registry';
-import { SubprocessAdapter } from '@agentoctopus/adapters';
+import { SubprocessAdapter, HttpAdapter, McpAdapter, DockerAdapter, SshAdapter, OpenShellAdapter } from '@agentoctopus/adapters';
 
 vi.mock('@agentoctopus/adapters', () => {
   return {
@@ -11,6 +11,9 @@ vi.mock('@agentoctopus/adapters', () => {
     SubprocessAdapter: vi.fn().mockImplementation(() => ({
       invoke: vi.fn().mockResolvedValue({ success: true, rawText: 'translated string' }),
     })),
+    DockerAdapter: vi.fn(),
+    SshAdapter: vi.fn(),
+    OpenShellAdapter: vi.fn(),
   };
 });
 
