@@ -202,35 +202,39 @@ function resolveSkillsDir(configValue: string): string {
   return configValue;
 }
 
+async function listSkills() {
+  const spinner = ora('Loading registry...').start();
+  try {
+    const { registry } = await bootstrap();
+    const skills = registry.getAll();
+    spinner.stop();
+
+    console.log(chalk.bold('\n🐙 AgentOctopus — Available Skills\n'));
+
+    if (skills.length === 0) {
+      console.log(chalk.gray('  No skills found in registry.'));
+      return;
+    }
+
+    skills.sort((a, b) => b.rating - a.rating);
+
+    skills.forEach((s) => {
+      const { manifest, rating } = s;
+      const stars = '⭐'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
+      console.log(`  ${chalk.cyan.bold(manifest.name)} ${chalk.yellow(stars)} (${rating.toFixed(1)})`);
+      console.log(`  ${chalk.gray(manifest.description)}`);
+      console.log(`  Adapter: ${manifest.adapter} | Uses: ${manifest.invocations}\n`);
+    });
+  } catch (err) {
+    spinner.fail(`Failed to load registry: ${err}`);
+  }
+}
+
 program
   .command('list')
   .description('List all available skills')
   .action(async () => {
-    const spinner = ora('Loading registry...').start();
-    try {
-      const { registry } = await bootstrap();
-      const skills = registry.getAll();
-      spinner.stop();
-
-      console.log(chalk.bold('\n🐙 AgentOctopus — Available Skills\n'));
-
-      if (skills.length === 0) {
-        console.log(chalk.gray('  No skills found in registry.'));
-        return;
-      }
-
-      skills.sort((a, b) => b.rating - a.rating);
-
-      skills.forEach((s) => {
-        const { manifest, rating } = s;
-        const stars = '⭐'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
-        console.log(`  ${chalk.cyan.bold(manifest.name)} ${chalk.yellow(stars)} (${rating.toFixed(1)})`);
-        console.log(`  ${chalk.gray(manifest.description)}`);
-        console.log(`  Adapter: ${manifest.adapter} | Uses: ${manifest.invocations}\n`);
-      });
-    } catch (err) {
-      spinner.fail(`Failed to load registry: ${err}`);
-    }
+    await listSkills();
   });
 
 program
@@ -954,7 +958,7 @@ skillCmd
   .command('list')
   .description('List all available skills')
   .action(async () => {
-    await program.parseAsync(['', '', 'list'], { from: 'user' });
+    await listSkills();
   });
 
 skillCmd
