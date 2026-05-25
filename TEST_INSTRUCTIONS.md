@@ -472,13 +472,13 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 | 1.4 | No-match query falls back to direct LLM answer | ✅ |
 | 1.5 | `ratings.json` valid with skill entries | ✅ |
 | 1.6 | `pnpm test` — 313 tests all green | ✅ |
-| 2.1 | `POST /api/ask` weather | ☐ |
+| 2.1 | `POST /api/ask` weather | ✅ |
 | 2.2 | `POST /api/ask` translation | ☐ |
 | 2.3 | `POST /api/ask` IP lookup | ☐ |
-| 2.4 | `POST /api/ask` 400 on missing query | ☐ |
-| 2.5 | `POST /api/feedback` thumbs up | ☐ |
-| 2.6 | `POST /api/feedback` thumbs down | ☐ |
-| 2.7 | `POST /api/feedback` 404 on unknown skill | ☐ |
+| 2.4 | `POST /api/ask` 400 on missing query | ✅ |
+| 2.5 | `POST /api/feedback` thumbs up | ✅ |
+| 2.6 | `POST /api/feedback` thumbs down | ✅ |
+| 2.7 | `POST /api/feedback` 404 on unknown skill | ✅ |
 | 2.8 | Web UI loads, example pills work, feedback buttons work | ☐ |
 | 3.1 | Agent gateway starts on port 3002 | ☐ |
 | 3.2 | `GET /agent/health` returns `skills: ~4000+` | ☐ |
