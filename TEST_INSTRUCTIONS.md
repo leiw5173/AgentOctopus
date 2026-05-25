@@ -463,15 +463,15 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 
 | # | Test | Pass |
 |---|---|---|
-| 1.1a | `octopus search "weather"` lists matching skills | ☐ |
-| 1.1b | `octopus search "nonexistent"` shows "No skills found" | ☐ |
-| 1.1c | `octopus search` (no query) shows error | ☐ |
+| 1.1a | `octopus search "weather"` lists matching skills | ✅ |
+| 1.1b | `octopus search "nonexistent"` shows "No skills found" | ✅ |
+| 1.1c | `octopus search` (no query) shows error | ✅ |
 | 1.1d | `octopus search "weather" --run` shows interactive pick-and-run | ☐ |
-| 1.2 | CLI `list` shows ~4000+ ClawHub skills | ☐ |
-| 1.3 | Weather skill executes (via search --run or direct invoke) | ☐ |
-| 1.4 | No-match query falls back to direct LLM answer | ☐ |
-| 1.5 | `ratings.json` valid with skill entries | ☐ |
-| 1.6 | `pnpm test` — 312 tests all green | ☐ |
+| 1.2 | CLI `list` shows ~4000+ ClawHub skills | ✅ |
+| 1.3 | Weather skill executes (via search --run or direct invoke) | ✅ |
+| 1.4 | No-match query falls back to direct LLM answer | ✅ |
+| 1.5 | `ratings.json` valid with skill entries | ✅ |
+| 1.6 | `pnpm test` — 313 tests all green | ✅ |
 | 2.1 | `POST /api/ask` weather | ☐ |
 | 2.2 | `POST /api/ask` translation | ☐ |
 | 2.3 | `POST /api/ask` IP lookup | ☐ |
