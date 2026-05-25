@@ -156,6 +156,7 @@ export function getSkillEntry(skill: LoadedSkill): SkillEntry {
       os: (rawMeta.os as string[]) ?? undefined,
       requires: (rawMeta.requires as any) ?? undefined,
       primaryEnv: (rawMeta.primaryEnv as string) ?? (openclaw.primaryEnv as string) ?? undefined,
+      install: (rawMeta.install as any[]) ?? (openclaw.install as any[]) ?? undefined,
     },
     invocation: { userInvocable: true, disableModelInvocation: false },
   };
