@@ -52,12 +52,17 @@ export function scoreKeywordMatch(tokens: string[], skill: SearchableSkill): num
   let score = 0;
   for (const token of tokens) {
     if (CJK_RANGE.test(token)) {
-      if (name.includes(token)) score += 2;
+      if (name === token) score += 4;
+      else if (name.includes(token)) score += 2;
       else if (desc.includes(token)) score += 1;
       else if (tags.includes(token)) score += 1;
     } else {
-      const pattern = new RegExp(`\\b${token}`, 'i');
-      if (pattern.test(name)) score += 2;
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const prefixPattern = new RegExp(`^${escaped}\\b`, 'i');
+      const pattern = new RegExp(`\\b${escaped}`, 'i');
+      if (name === token) score += 4;
+      else if (prefixPattern.test(name)) score += 3;
+      else if (pattern.test(name)) score += 2;
       else if (pattern.test(desc)) score += 1;
       else if (pattern.test(tags)) score += 1;
     }
