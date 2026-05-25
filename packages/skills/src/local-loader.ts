@@ -37,6 +37,14 @@ export async function loadSkillsFromDir(
           frontmatter as Record<string, unknown>,
         );
 
+        // Use tags from raw frontmatter (schema may strip them)
+        const rawTags = parsed.data.tags;
+        const tags = Array.isArray(rawTags)
+          ? rawTags.map(String)
+          : typeof rawTags === 'string'
+            ? [rawTags]
+            : [];
+
         const skillDir = dirname(file);
         const skill: Skill = {
           name: frontmatter.name,
@@ -44,7 +52,7 @@ export async function loadSkillsFromDir(
           version: frontmatter.version ?? "0.0.0",
           dirPath: skillDir,
           source,
-          tags: [],
+          tags,
           instructions: (parsed.content ?? "").trim(),
           frontmatter: frontmatter as Record<string, unknown>,
         };

@@ -259,8 +259,27 @@ export class Router {
         config: skillsConfig as unknown as SkillsConfig,
         eligibility,
       });
-      dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → ${pass ? 'PASS' : 'SKIP'}`);
-      if (pass) eligible.push(entry);
+      if (!pass) {
+        dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → SKIP`);
+        continue;
+      }
+
+      // Filter out agent-only skills that cannot execute in CLI context.
+      // Agent-only skills have `allowed-tools` in their frontmatter but no
+      // endpoint, no scripts/, and no invoke.js — they are designed for
+      // agent-level tool calling (MCP/OpenClaw), not standalone execution.
+      const fm = getSkillEntry(entry.skill).frontmatter;
+      if (fm?.['allowed-tools'] && !entry.skill.manifest.endpoint) {
+        const scriptsDir = entry.skill.dirPath ? path.join(entry.skill.dirPath, 'scripts') : '';
+        const hasScripts = scriptsDir && fs.existsSync(scriptsDir) && fs.readdirSync(scriptsDir).length > 0;
+        if (!hasScripts) {
+          dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → SKIP (agent-only, no executable scripts or endpoint)`);
+          continue;
+        }
+      }
+
+      dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → PASS`);
+      eligible.push(entry);
     }
     if (eligible.length === 0) return [];
 
@@ -281,7 +300,7 @@ export class Router {
           .filter(e => e.embedding.length > 0)
           .map(({ skill, embedding }) => {
             const cosine = cosineSimilarity(queryEmbedding, embedding);
-            const routingScore = Math.max(RELIABILITY_FLOOR, skill.routingScore ?? (skill.rating / 5));
+            const routingScore = Math.max(RELIABILITY_FLOOR, skill.routingScore || (skill.rating / 5));
             const negCount = skill.negativeFeedbackCount ?? 0;
             const penalty = negCount * FAILURE_PENALTY;
             const catchAllPenalty = isCatchAllSkill(skill) ? CATCHALL_PENALTY * 0.1 : 0;
@@ -328,20 +347,27 @@ export class Router {
     const candidateList = candidates
       .map((c, i) => {
         const neg = c.skill.negativeFeedbackCount ?? 0;
-        const ratingNote = neg > 0 ? ` [⚠ ${neg} negative feedback${neg > 1 ? 's' : ''}]` : '';
+        const flags: string[] = [];
+        if (neg > 0) flags.push(`⚠ ${neg} negative`);
+        const missingBins = getRequiredBins(c.skill.manifest).filter(b => !isBinAvailable(b));
+        const missingCreds = getRequiredEnvVars(c.skill.manifest).filter(v => !process.env[v.key]);
+        if (missingBins.length > 0) flags.push(`❌ missing tools: ${missingBins.join(', ')}`);
+        if (missingCreds.length > 0) flags.push(`🔑 needs API keys`);
+        const flagNote = flags.length > 0 ? ` [${flags.join(' | ')}]` : '';
         let desc = c.skill.manifest.description;
         if (desc.length > 120) desc = desc.slice(0, 120) + '…';
-        return `${i + 1}. ${c.skill.manifest.name}: ${desc}${ratingNote}`;
+        return `${i + 1}. ${c.skill.manifest.name} (score: ${c.score.toFixed(2)})${flagNote}: ${desc}`;
       })
       .join('\n');
 
     const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill that SPECIFICALLY handles the user's request. Follow these rules:
 
 1. Match the skill's PRIMARY purpose to the user's intent — ignore skills that only tangentially relate.
-2. "URL shortening" ≠ "web hosting" ≠ "link sharing". Be precise about what the skill does.
+2. Skills marked with ❌ are MISSING required tools and CANNOT RUN — avoid them unless no alternative exists.
 3. Skills marked with ⚠ have received negative user feedback — strongly prefer alternatives.
 4. Skills with very broad descriptions ("any request", "any task") are LESS likely to be correct — prefer specific skills.
-5. Respond "none" if no skill is a genuine match for what the user is asking.
+5. Prefer skills with higher scores — they have better performance and reliability.
+6. Respond "none" if no skill is a genuine match for what the user is asking.
 
 Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
     const userMessage = `User request: "${query}"\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
@@ -368,15 +394,14 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
 
     if (bestSkillName === 'none') return [];
 
-    // Return top candidates ranked by score, with the LLM's pick first
+    // Score-based ranking is primary; the reranker is a veto/filter, not a re-orderer.
+    // The top-scored candidate wins unless the reranker explicitly says "none".
     const ranked = candidates.slice().sort((a, b) => b.score - a.score);
-    const best = ranked.find(
-      (c) => c.skill.manifest.name.toLowerCase() === bestSkillName,
-    );
+    const best = ranked[0];
     if (!best) return [];
 
-    // Move the LLM's pick to the front, then remaining by score
-    const rest = ranked.filter(c => c.skill.manifest.name.toLowerCase() !== bestSkillName);
+    // Return top candidates ranked by score, best first
+    const rest = ranked.filter(c => c !== best);
     const ordered = [best, ...rest];
 
     return ordered.map(c => ({
@@ -395,7 +420,7 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
     return candidates.map(entry => {
       const missingCreds = getRequiredEnvVars(entry.skill.manifest).filter(v => !process.env[v.key]);
       const missingBins = getRequiredBins(entry.skill.manifest).filter(b => !isBinAvailable(b));
-      const penalty = (missingCreds.length > 0 ? 0.25 : 0) + (missingBins.length > 0 ? 0.25 : 0);
+      const penalty = (missingCreds.length > 0 ? 0.25 : 0) + (missingBins.length > 0 ? 1.5 : 0);
       if (penalty === 0) return entry;
       return { ...entry, score: Math.max(0, entry.score - penalty) };
     });
@@ -412,7 +437,7 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
         description: skill.manifest.description,
         tags: skill.manifest.tags,
       });
-      const routingScore = skill.routingScore ?? (skill.rating / 5);
+      const routingScore = skill.routingScore || (skill.rating / 5);
       const ratingBoost = routingScore * RATING_WEIGHT;
       const negCount = skill.negativeFeedbackCount ?? 0;
       const penalty = negCount * FAILURE_PENALTY;
