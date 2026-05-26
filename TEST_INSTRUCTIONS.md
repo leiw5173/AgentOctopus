@@ -29,17 +29,23 @@ node apps/cli/dist/index.js search "weather"
 
 **Expected:** Lists skills matching "weather" with names, star ratings, descriptions, and tags.
 
+Done
+
 ```bash
 node apps/cli/dist/index.js search "nonexistent"
 ```
 
 **Expected:** Shows "No skills found" with hint to use `octopus list`.
 
+Done
+
 ```bash
 node apps/cli/dist/index.js search
 ```
 
 **Expected:** Shows error asking for a search query.
+
+Done
 
 ```bash
 node apps/cli/dist/index.js search "weather" --run
@@ -74,6 +80,8 @@ node apps/cli/dist/index.js ask "What's the weather in London?"
 - Output includes temperature in °C/°F, conditions, humidity, wind speed
 - Prompt: `Was this helpful? (y/n):`
 - Type `y` → prints "Rating updated."
+
+Done
 
 ---
 
@@ -211,6 +219,8 @@ curl -s -X POST http://localhost:3000/api/ask \
 
 **Expected:** `{ "error": "Query is missing" }` with HTTP 400.
 
+Done
+
 ---
 
 ### 2.5 POST /api/feedback — thumbs up
@@ -286,9 +296,9 @@ Open `http://localhost:3000` in a browser.
 In a new terminal:
 
 ```bash
-cd /root/AgentOctopus
+cd /Users/sam/Documents/Code/AgentOctopus
 node -e "
-import('@octopus/gateway').then(g => g.startAgentGateway('/root/AgentOctopus')).catch(console.error)
+import('/Users/sam/Documents/Code/AgentOctopus/packages/gateway/dist/index.js').then(g => g.startAgentGateway()).catch(console.error)
 "
 # Wait for: [Agent Gateway] Listening on port 3002
 ```
@@ -853,3 +863,327 @@ node apps/cli/dist/index.js ask "search X for AI news"
 | 9.8 | Credential guidance shows LLM-generated setup tutorial (pre-execution) | ☐ |
 | 9.9 | Runtime credential error detected and shown with setup guide | ☐ |
 | 9.10 | Credential guidance falls back to template when LLM unavailable | ☐ |
+
+---
+
+## Phase 12 — OpenClaw Skill Routing & Feedback
+
+These tests validate the `agentoctopus` skill published to OpenClaw marketplace and installed locally. Run in order: L1 first (terminal), then L2/L3 (requires OpenClaw).
+
+### Prerequisites
+
+```bash
+# Confirm prerequisites
+octopus list | head -5          # skills loaded
+cat ~/.agentoctopus/ratings.json | python3 -m json.tool | head -10  # rating data exists
+echo $XAI_API_KEY | head -c 8   # x-search key configured
+echo $ZODIAC_API_KEY             # should be EMPTY for credential-missing tests
+```
+
+### Automated Checks (L1-C, L1-E)
+
+Run: `bash test/octopus-cli-test.sh`
+
+---
+
+### L1-A: Routing Accuracy
+
+| # | Command | Expected | Pass |
+|---|---|---|---|
+| 1.1 | `octopus ask "what's the weather in Tokyo?"` | Matches **weather**, returns Tokyo temperature/conditions/humidity/wind | ☐ |
+| 1.2 | `octopus ask "show me TSLA stock analysis and fundamentals"` | Matches **yumstock** (or yfinance if yumstock not installed) | ☐ |
+| 1.3 | `octopus ask "analyze this YouTube video: https://youtube.com/watch?v=dQw4w9WgXcQ"` | Matches **youtube-video-analyzer** | ☐ |
+| 1.4 | `octopus ask "extract subtitles from this YouTube video"` | Matches **youtube-transcript** (not youtube-video-analyzer) | ☐ |
+| 1.5 | `octopus ask "scan this skill for security vulnerabilities"` | Matches **skill-auditor** | ☐ |
+| 1.6 | `octopus ask "what is the sales tax rate for zip code 94102 in San Francisco"` | Matches **ziptax-sales-tax** | ☐ |
+
+### L1-B: Routing Edge Cases
+
+| # | Command | Expected | Pass |
+|---|---|---|---|
+| 1.7 | `octopus ask "how do I optimize ARC for my ZFS pool"` | Matches **zfs** | ☐ |
+| 1.8 | `octopus ask "what's my horoscope today"` | ZODIAC_API_KEY not set: shows credential missing guide with `octopus config set ZODIAC_API_KEY` hint | ☐ |
+| 1.9 | `octopus ask "What is the capital of France?"` | LLM direct answer (no skill matched), no skill name in output | ☐ |
+| 1.10 | `octopus ask "hello"` | LLM direct answer, no skill matched | ☐ |
+
+### L1-C: Debug & Diagnostics
+
+| # | Command | Expected | Pass |
+|---|---|---|---|
+| 1.11 | `octopus ask --debug "convert 1000 USD to JPY"` | Shows `[debug]` lines with rerank candidates, embedding scores, final decision | ☐ |
+| 1.12 | `bash test/octopus-cli-test.sh` (automated) | CLI count and FS count comparison passes | ☐ |
+
+### L1-D: CLI Feedback Interaction
+
+Execute `cat ~/.agentoctopus/ratings.json | python3 -c "import json,sys; d=json.load(sys.stdin); w=d.get('weather',{}); print('weather rating:', w.get('dimensions',{}).get('quality','N/A'))"` before and after each feedback test to compare.
+
+| # | Steps | Expected | Pass |
+|---|---|---|---|
+| 1.13 | 1. `octopus ask "weather in London"` 2. Type `y` at feedback prompt | weather rating in ratings.json increases | ☐ |
+| 1.14 | `octopus ask "weather in London" --no-prompt` | No feedback prompt appears; result returned directly | ☐ |
+| 1.15 | `octopus list` | Each skill shows star rating (e.g., `⭐⭐⭐☆☆`) and invocation count (`Uses: N`) | ☐ |
+| 1.16 | `cat ~/.agentoctopus/ratings.json \| python3 -m json.tool` | Each skill entry has `dimensions` object with all 5 scores (completion, quality, reliability, latency, tokenCost) | ☐ |
+| 1.17 | 1. Run `octopus ask "weather in London"` 3 times, answer `n` each time 2. `octopus list` | weather star rating visibly lower than before | ☐ |
+| 1.18 | `octopus ask "convert 100 USD to JPY"` | If LLM direct answer: no feedback prompt shown | ☐ |
+
+---
+
+### L2-A: Command Generation Accuracy (Requires OpenClaw)
+
+Open OpenClaw and send each query. Observe what CLI command the agent generates.
+
+| # | Input in OpenClaw | Expected LLM action | Pass |
+|---|---|---|---|
+| 2.1 | `weather in Tokyo` | Runs `octopus ask "weather in Tokyo"` | ☐ |
+| 2.2 | `what skills do you have installed?` | Runs `octopus list` | ☐ |
+| 2.3 | `check if there are any skill updates available` | Runs `octopus sync --check` | ☐ |
+| 2.4 | `search for YouTube-related skills` | Runs `octopus search "youtube"` | ☐ |
+
+### L2-B: Command Boundary Cases
+
+| # | Input in OpenClaw | Expected LLM action | Pass |
+|---|---|---|---|
+| 2.5 | `configure my API keys` | Guides to `octopus onboard` or `octopus config set` | ☐ |
+| 2.6 | `how do I connect my OpenClaw account?` | Guides to `octopus connect openclaw` | ☐ |
+| 2.7 | `show me what changed in the weather skill after evolution` | Runs `octopus evolve --log weather` | ☐ |
+
+### L2-C: Fallback Behavior
+
+| # | Input in OpenClaw | Expected | Pass |
+|---|---|---|---|
+| 2.8 | `write me a poem about octopus` | LLM answers directly, no `octopus` CLI call made | ☐ |
+
+---
+
+### L3-A: End-to-End Golden Path (Requires OpenClaw)
+
+| # | Input in OpenClaw | Expected result | Pass |
+|---|---|---|---|
+| 3.1 | `What's the weather in Tokyo?` | Returns Tokyo weather data (temperature, conditions, humidity, wind speed) | ☐ |
+| 3.2 | `Search my local skills for anything related to YouTube` | Lists local YouTube-related skill names and descriptions | ☐ |
+| 3.3 | `Translate 'good evening' to Japanese` | Returns Japanese translation: こんばんは | ☐ |
+
+### L3-B: Error Handling
+
+| # | Input in OpenClaw | Expected behavior | Pass |
+|---|---|---|---|
+| 3.4 | `look up my horoscope for today` | Prompts ZODIAC_API_KEY is missing, shows `octopus config set` guidance | ☐ |
+| 3.5 | `what is the meaning of life` | Answers directly, no error, no skill invocation attempt | ☐ |
+
+### L3-C: Session Continuity
+
+| # | Steps | Expected | Pass |
+|---|---|---|---|
+| 3.6 | 1. Send `weather in London` 2. After response, send `what about Paris?` | Second query also routes to weather, returns Paris weather | ☐ |
+
+### L3-D: OpenClaw Feedback Collection
+
+| # | Steps | Expected | Pass |
+|---|---|---|---|
+| 3.7 | 1. Send `weather in Berlin` 2. After result, reply `that was great, thanks` | Agent recognizes positive sentiment; feedback recorded | ☐ |
+| 3.8 | 1. Send `weather in Paris` 2. After result, reply `wrong, that's not what I asked` | Agent recognizes negative sentiment; feedback recorded | ☐ |
+| 3.9 | 1. Send `octopus list` in OpenClaw 2. Note ratings 3. Run 3.7 or 3.8 above 4. Send `octopus list` again | Star ratings and invocation counts visible; ratings change after feedback | ☐ |
+
+---
+
+## Pass / Fail Checklist (Phase 12)
+
+| # | Test | Pass |
+|---|---|---|
+| 1.1 | L1-A: weather routing | ☐ |
+| 1.2 | L1-A: yumstock routing | ☐ |
+| 1.3 | L1-A: youtube-video-analyzer routing | ☐ |
+| 1.4 | L1-A: youtube-transcript routing (fine-grained) | ☐ |
+| 1.5 | L1-A: skill-auditor routing | ☐ |
+| 1.6 | L1-A: ziptax-sales-tax routing | ☐ |
+| 1.7 | L1-B: zfs routing (technical domain) | ☐ |
+| 1.8 | L1-B: credential missing guidance | ☐ |
+| 1.9 | L1-B: no-match fallback (factual) | ☐ |
+| 1.10 | L1-B: no-match fallback (greeting) | ☐ |
+| 1.11 | L1-C: debug mode internals | ☐ |
+| 1.12 | L1-C: skill list count (automated) | ☐ |
+| 1.13 | L1-D: positive feedback (y) | ☐ |
+| 1.14 | L1-D: --no-prompt flag | ☐ |
+| 1.15 | L1-D: octopus list display | ☐ |
+| 1.16 | L1-D: ratings.json 5 dimensions | ☐ |
+| 1.17 | L1-D: negative feedback (n) accumulation | ☐ |
+| 1.18 | L1-D: no feedback for direct LLM answer | ☐ |
+| 2.1 | L2-A: octopus ask command generation | ☐ |
+| 2.2 | L2-A: octopus list command generation | ☐ |
+| 2.3 | L2-A: octopus sync --check generation | ☐ |
+| 2.4 | L2-A: octopus search generation | ☐ |
+| 2.5 | L2-B: config guidance | ☐ |
+| 2.6 | L2-B: connect openclaw guidance | ☐ |
+| 2.7 | L2-B: evolve --log command | ☐ |
+| 2.8 | L2-C: non-skill fallback | ☐ |
+| 3.1 | L3-A: weather end-to-end | ☐ |
+| 3.2 | L3-A: skill search end-to-end | ☐ |
+| 3.3 | L3-A: translation end-to-end | ☐ |
+| 3.4 | L3-B: credential missing end-to-end | ☐ |
+| 3.5 | L3-B: no-match fallback end-to-end | ☐ |
+| 3.6 | L3-C: session continuity | ☐ |
+| 3.7 | L3-D: positive feedback in OpenClaw | ☐ |
+| 3.8 | L3-D: negative feedback in OpenClaw | ☐ |
+| 3.9 | L3-D: rating comparison after feedback | ☐ |
+
+---
+
+## Phase 12 — OpenClaw Skill Routing & Feedback
+
+These tests validate the `agentoctopus` skill published to OpenClaw marketplace and installed locally. Run in order: L1 first (terminal), then L2/L3 (requires OpenClaw).
+
+### Prerequisites
+
+```bash
+# Confirm prerequisites
+octopus list | head -5          # skills loaded
+cat ~/.agentoctopus/ratings.json | python3 -m json.tool | head -10  # rating data exists
+echo $XAI_API_KEY | head -c 8   # x-search key configured
+echo $ZODIAC_API_KEY             # should be EMPTY for credential-missing tests
+```
+
+### Automated Checks (L1-C, L1-E)
+
+Run: `bash test/octopus-cli-test.sh`
+
+---
+
+### L1-A: Routing Accuracy
+
+| # | Command | Expected | Pass |
+|---|---|---|---|
+| 1.1 | `octopus ask "what's the weather in Tokyo?"` | Matches **weather**, returns Tokyo temperature/conditions/humidity/wind | ☐ |
+| 1.2 | `octopus ask "show me TSLA stock analysis and fundamentals"` | Matches **yumstock** (or yfinance if yumstock not installed) | ☐ |
+| 1.3 | `octopus ask "analyze this YouTube video: https://youtube.com/watch?v=dQw4w9WgXcQ"` | Matches **youtube-video-analyzer** | ☐ |
+| 1.4 | `octopus ask "extract subtitles from this YouTube video"` | Matches **youtube-transcript** (not youtube-video-analyzer) | ☐ |
+| 1.5 | `octopus ask "scan this skill for security vulnerabilities"` | Matches **skill-auditor** | ☐ |
+| 1.6 | `octopus ask "what is the sales tax rate for zip code 94102 in San Francisco"` | Matches **ziptax-sales-tax** | ☐ |
+
+### L1-B: Routing Edge Cases
+
+| # | Command | Expected | Pass |
+|---|---|---|---|
+| 1.7 | `octopus ask "how do I optimize ARC for my ZFS pool"` | Matches **zfs** | ☐ |
+| 1.8 | `octopus ask "what's my horoscope today"` | ZODIAC_API_KEY not set: shows credential missing guide with `octopus config set ZODIAC_API_KEY` hint | ☐ |
+| 1.9 | `octopus ask "What is the capital of France?"` | LLM direct answer (no skill matched), no skill name in output | ☐ |
+| 1.10 | `octopus ask "hello"` | LLM direct answer, no skill matched | ☐ |
+
+### L1-C: Debug & Diagnostics
+
+| # | Command | Expected | Pass |
+|---|---|---|---|
+| 1.11 | `octopus ask --debug "convert 1000 USD to JPY"` | Shows `[debug]` lines with rerank candidates, embedding scores, final decision | ☐ |
+| 1.12 | `bash test/octopus-cli-test.sh` (automated) | CLI count and FS count comparison passes | ☐ |
+
+### L1-D: CLI Feedback Interaction
+
+Execute `cat ~/.agentoctopus/ratings.json | python3 -c "import json,sys; d=json.load(sys.stdin); w=d.get('weather',{}); print('weather rating:', w.get('dimensions',{}).get('quality','N/A'))"` before and after each feedback test to compare.
+
+| # | Steps | Expected | Pass |
+|---|---|---|---|
+| 1.13 | 1. `octopus ask "weather in London"` 2. Type `y` at feedback prompt | weather rating in ratings.json increases | ☐ |
+| 1.14 | `octopus ask "weather in London" --no-prompt` | No feedback prompt appears; result returned directly | ☐ |
+| 1.15 | `octopus list` | Each skill shows star rating (e.g., `⭐⭐⭐☆☆`) and invocation count (`Uses: N`) | ☐ |
+| 1.16 | `cat ~/.agentoctopus/ratings.json \| python3 -m json.tool` | Each skill entry has `dimensions` object with all 5 scores (completion, quality, reliability, latency, tokenCost) | ☐ |
+| 1.17 | 1. Run `octopus ask "weather in London"` 3 times, answer `n` each time 2. `octopus list` | weather star rating visibly lower than before | ☐ |
+| 1.18 | `octopus ask "convert 100 USD to JPY"` | If LLM direct answer: no feedback prompt shown | ☐ |
+
+---
+
+### L2-A: Command Generation Accuracy (Requires OpenClaw)
+
+Open OpenClaw and send each query. Observe what CLI command the agent generates.
+
+| # | Input in OpenClaw | Expected LLM action | Pass |
+|---|---|---|---|
+| 2.1 | `weather in Tokyo` | Runs `octopus ask "weather in Tokyo"` | ☐ |
+| 2.2 | `what skills do you have installed?` | Runs `octopus list` | ☐ |
+| 2.3 | `check if there are any skill updates available` | Runs `octopus sync --check` | ☐ |
+| 2.4 | `search for YouTube-related skills` | Runs `octopus search "youtube"` | ☐ |
+
+### L2-B: Command Boundary Cases
+
+| # | Input in OpenClaw | Expected LLM action | Pass |
+|---|---|---|---|
+| 2.5 | `configure my API keys` | Guides to `octopus onboard` or `octopus config set` | ☐ |
+| 2.6 | `how do I connect my OpenClaw account?` | Guides to `octopus connect openclaw` | ☐ |
+| 2.7 | `show me what changed in the weather skill after evolution` | Runs `octopus evolve --log weather` | ☐ |
+
+### L2-C: Fallback Behavior
+
+| # | Input in OpenClaw | Expected | Pass |
+|---|---|---|---|
+| 2.8 | `write me a poem about octopus` | LLM answers directly, no `octopus` CLI call made | ☐ |
+
+---
+
+### L3-A: End-to-End Golden Path (Requires OpenClaw)
+
+| # | Input in OpenClaw | Expected result | Pass |
+|---|---|---|---|
+| 3.1 | `What's the weather in Tokyo?` | Returns Tokyo weather data (temperature, conditions, humidity, wind speed) | ☐ |
+| 3.2 | `Search my local skills for anything related to YouTube` | Lists local YouTube-related skill names and descriptions | ☐ |
+| 3.3 | `Translate 'good evening' to Japanese` | Returns Japanese translation: こんばんは | ☐ |
+
+### L3-B: Error Handling
+
+| # | Input in OpenClaw | Expected behavior | Pass |
+|---|---|---|---|
+| 3.4 | `look up my horoscope for today` | Prompts ZODIAC_API_KEY is missing, shows `octopus config set` guidance | ☐ |
+| 3.5 | `what is the meaning of life` | Answers directly, no error, no skill invocation attempt | ☐ |
+
+### L3-C: Session Continuity
+
+| # | Steps | Expected | Pass |
+|---|---|---|---|
+| 3.6 | 1. Send `weather in London` 2. After response, send `what about Paris?` | Second query also routes to weather, returns Paris weather | ☐ |
+
+### L3-D: OpenClaw Feedback Collection
+
+| # | Steps | Expected | Pass |
+|---|---|---|---|
+| 3.7 | 1. Send `weather in Berlin` 2. After result, reply `that was great, thanks` | Agent recognizes positive sentiment; feedback recorded | ☐ |
+| 3.8 | 1. Send `weather in Paris` 2. After result, reply `wrong, that's not what I asked` | Agent recognizes negative sentiment; feedback recorded | ☐ |
+| 3.9 | 1. Send `octopus list` in OpenClaw 2. Note ratings 3. Run 3.7 or 3.8 above 4. Send `octopus list` again | Star ratings and invocation counts visible; ratings change after feedback | ☐ |
+
+---
+
+## Pass / Fail Checklist (Phase 12)
+
+| # | Test | Pass |
+|---|---|---|
+| 1.1 | L1-A: weather routing | ☐ |
+| 1.2 | L1-A: yumstock routing | ☐ |
+| 1.3 | L1-A: youtube-video-analyzer routing | ☐ |
+| 1.4 | L1-A: youtube-transcript routing (fine-grained) | ☐ |
+| 1.5 | L1-A: skill-auditor routing | ☐ |
+| 1.6 | L1-A: ziptax-sales-tax routing | ☐ |
+| 1.7 | L1-B: zfs routing (technical domain) | ☐ |
+| 1.8 | L1-B: credential missing guidance | ☐ |
+| 1.9 | L1-B: no-match fallback (factual) | ☐ |
+| 1.10 | L1-B: no-match fallback (greeting) | ☐ |
+| 1.11 | L1-C: debug mode internals | ☐ |
+| 1.12 | L1-C: skill list count (automated) | ☐ |
+| 1.13 | L1-D: positive feedback (y) | ☐ |
+| 1.14 | L1-D: --no-prompt flag | ☐ |
+| 1.15 | L1-D: octopus list display | ☐ |
+| 1.16 | L1-D: ratings.json 5 dimensions | ☐ |
+| 1.17 | L1-D: negative feedback (n) accumulation | ☐ |
+| 1.18 | L1-D: no feedback for direct LLM answer | ☐ |
+| 2.1 | L2-A: octopus ask command generation | ☐ |
+| 2.2 | L2-A: octopus list command generation | ☐ |
+| 2.3 | L2-A: octopus sync --check generation | ☐ |
+| 2.4 | L2-A: octopus search generation | ☐ |
+| 2.5 | L2-B: config guidance | ☐ |
+| 2.6 | L2-B: connect openclaw guidance | ☐ |
+| 2.7 | L2-B: evolve --log command | ☐ |
+| 2.8 | L2-C: non-skill fallback | ☐ |
+| 3.1 | L3-A: weather end-to-end | ☐ |
+| 3.2 | L3-A: skill search end-to-end | ☐ |
+| 3.3 | L3-A: translation end-to-end | ☐ |
+| 3.4 | L3-B: credential missing end-to-end | ☐ |
+| 3.5 | L3-B: no-match fallback end-to-end | ☐ |
+| 3.6 | L3-C: session continuity | ☐ |
+| 3.7 | L3-D: positive feedback in OpenClaw | ☐ |
+| 3.8 | L3-D: negative feedback in OpenClaw | ☐ |
+| 3.9 | L3-D: rating comparison after feedback | ☐ |

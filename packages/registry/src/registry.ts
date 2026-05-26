@@ -139,7 +139,7 @@ export class SkillRegistry {
     }
 
     // Delegate SKILL.md discovery and parsing to the @agentoctopus/skills package
-    const entries = await loadSkillsFromDir(this.skillsDir, 'clawhub');
+    const entries = await loadSkillsFromDir(this.skillsDir, 'clawhub', { maxCandidates: Infinity });
     let failCount = 0;
     for (const entry of entries) {
       try {
