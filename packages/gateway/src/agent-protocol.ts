@@ -177,7 +177,11 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     }
 
     try {
-      const [routing] = await engine.router.route(query);
+      // Pass previous skill name from session for follow-up query routing
+      const assistantMsgs = session.messages.filter(m => m.role === 'assistant');
+      const prevSkill = lastAssistant ? (lastAssistant as any).skillUsed as string : undefined;
+      console.log(`[AgentProtocol] session=${session.id} msgs=${session.messages.length} assistantMsgs=${assistantMsgs.length} lastAssistant=${!!lastAssistant} prevSkill=${prevSkill}`);
+      const [routing] = await engine.router.route(query, 20, { previousSkill: prevSkill });
       if (!routing) {
         const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, query);
 

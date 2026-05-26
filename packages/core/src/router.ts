@@ -195,8 +195,8 @@ export class Router {
    * Route a query to the best skill.
    * Flow: translate → eligibility filter → embed query → cosine × routingScore → top K → LLM rerank
    */
-  async route(query: string, topK = 20, opts: { debug?: boolean } = {}): Promise<RoutingResult[]> {
-    const { debug = false } = opts;
+  async route(query: string, topK = 20, opts: { debug?: boolean; previousSkill?: string } = {}): Promise<RoutingResult[]> {
+    const { debug = false, previousSkill } = opts;
     if (this.index.length === 0) return [];
 
     // For non-Latin queries: merge translation + intent extraction into a single LLM call.
@@ -343,6 +343,25 @@ export class Router {
 
     candidates = this.penalizeUnconfiguredSkills(candidates);
 
+    // When a previous skill is provided (session follow-up), ensure it appears
+    // in the candidate list so the reranker can choose to reuse it.
+    if (previousSkill) {
+      const alreadyIn = candidates.some(c => c.skill.manifest.name.toLowerCase() === previousSkill.toLowerCase());
+      dbg(debug, `previousSkill=${previousSkill}, alreadyInCandidates=${alreadyIn}`);
+      if (!alreadyIn) {
+        const prevEntry = this.index.find(e => e.skill.manifest.name.toLowerCase() === previousSkill.toLowerCase());
+        if (prevEntry) {
+          const medianScore = candidates.length > 0
+            ? candidates.map(c => c.score).sort((a, b) => a - b)[Math.floor(candidates.length / 2)]
+            : 0.5;
+          candidates.push({ skill: prevEntry.skill, score: medianScore });
+          dbg(debug, `Boosted previousSkill "${previousSkill}" into candidates with score=${medianScore.toFixed(3)}`);
+        } else {
+          dbg(debug, `previousSkill "${previousSkill}" not found in index — cannot boost`);
+        }
+      }
+    }
+
     // LLM rerank
     const candidateList = candidates
       .map((c, i) => {
@@ -365,12 +384,15 @@ export class Router {
 1. Match the skill's PRIMARY purpose to the user's intent — ignore skills that only tangentially relate.
 2. Skills marked with ❌ are MISSING required tools and CANNOT RUN — avoid them unless no alternative exists.
 3. Skills marked with ⚠ have received negative user feedback — strongly prefer alternatives.
-4. Skills with very broad descriptions ("any request", "any task") are LESS likely to be correct — prefer specific skills.
-5. Prefer skills with higher scores — they have better performance and reliability.
-6. Respond "none" if no skill is a genuine match for what the user is asking.
+4. Skills with very broad descriptions ("any request", "any task", "any query") are LESS likely to be correct — prefer specific, purpose-built skills.
+5. When multiple skills relate to the same topic (e.g. YouTube), pick the one whose description most precisely matches the user's action (e.g. "extract transcript/subtitles" → transcript skill, NOT notification/analysis).
+6. For translation requests, prefer skills that describe themselves as translation/language-translation tools — NOT language tutors, dictionaries, or greeting skills.
+7. Prefer skills with higher scores — they have better performance and reliability.
+8. Respond "none" if no skill is a genuine match for what the user is asking.
 
 Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
-    const userMessage = `User request: "${query}"\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
+    const prevCtx = previousSkill ? `\nPrevious skill used in this conversation: ${previousSkill}. If the user's request is a follow-up (e.g. "what about X?", "and Paris?"), strongly prefer reusing this skill or a closely related one.` : '';
+    const userMessage = `User request: "${query}"${prevCtx}\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
 
     let bestSkillName: string;
     try {
@@ -394,13 +416,16 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
 
     if (bestSkillName === 'none') return [];
 
-    // Score-based ranking is primary; the reranker is a veto/filter, not a re-orderer.
-    // The top-scored candidate wins unless the reranker explicitly says "none".
+    // The reranker picks the best skill based on semantic understanding of
+    // descriptions; embedding scores handle initial filtering. When the reranker
+    // selects a specific skill, prefer it over the raw embedding ranking — but
+    // keep remaining candidates sorted by score for fallback ordering.
     const ranked = candidates.slice().sort((a, b) => b.score - a.score);
-    const best = ranked[0];
+    const rerankerPick = candidates.find(c => c.skill.manifest.name.toLowerCase() === bestSkillName);
+    const best = rerankerPick ?? ranked[0];
     if (!best) return [];
 
-    // Return top candidates ranked by score, best first
+    // Return best first, then remaining candidates by embedding score
     const rest = ranked.filter(c => c !== best);
     const ordered = [best, ...rest];
 
