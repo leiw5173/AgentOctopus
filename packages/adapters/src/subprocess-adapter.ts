@@ -91,6 +91,9 @@ export class SubprocessAdapter implements Adapter {
       return { success: false, error: `No script found in ${skill.dirPath}/scripts/` };
     }
 
+    // Ensure script is executable (ClawHub downloads may not preserve +x)
+    try { fs.chmodSync(entry.scriptPath, 0o755); } catch { /* non-fatal */ }
+
     const isNode = entry.runtime === 'node';
 
     return new Promise((resolve) => {
