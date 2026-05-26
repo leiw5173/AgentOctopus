@@ -1,5 +1,11 @@
-// Re-exports — will grow as modules are added
+export { extractQueryTokens, scoreKeywordMatch, CJK_RANGE, type SearchableSkill } from './search.js';
 export * from "./types.js";
+export type { ChangeRisk, EvolutionSignal, EvolutionChange, EvolutionProposal, EvolutionState } from './evolution/types.js';
+export { recordSignal, getSignalsSince, countSignalsSince, countNegativeFeedbackSince } from './evolution/collector.js';
+export { shadowCopy, listSnapshots, rollback, clearSnapshots } from './evolution/rollback.js';
+export { applyChanges, stageProposal, readProposal, clearProposal } from './evolution/applier.js';
+export { buildAnalysisPrompt, buildStaleAnalysisPrompt, parseAnalyzerResponse } from './evolution/analyzer.js';
+export { shouldSweep, getStaleSkills } from './evolution/scheduler.js';
 export { SkillFrontmatterSchema } from "./schema.js";
 export type { SkillFrontmatter } from "./schema.js";
 export { parseSkillFrontmatter } from "./frontmatter.js";
@@ -11,8 +17,8 @@ export { loadWorkspaceSkills, mergeByPriority } from "./workspace.js";
 export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
 export { resolveBundledSkillsDir } from "./bundled.js";
 export { resolvePluginSkillDirs } from "./plugin-skills.js";
-export { installSkillDeps, sanitizeString } from "./install.js";
-export type { InstallPreferences } from "./install.js";
+export { installSkillDeps, sanitizeString, filterInstallSpecs, installMissingBins, generateManualInstruction } from "./install.js";
+export type { InstallPreferences, InstallAttempt, MissingBinInstallResult } from "./install.js";
 export { buildWorkspaceSkillCommandSpecs } from "./command-specs.js";
 export { buildWorkspaceSkillSnapshot } from "./snapshot.js";
 export type { SnapshotLimits } from "./snapshot.js";

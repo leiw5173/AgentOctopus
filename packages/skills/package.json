@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/skills",
-  "version": "0.5.18",
+  "version": "0.7.0",
   "description": "AgentOctopus skill invocation pipeline — loading, eligibility, install, snapshots",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,11 +19,11 @@
   "dependencies": {
     "glob": "^13.0.6",
     "gray-matter": "^4.0.3",
-    "zod": "^3.22.0"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "vitest": "^1.5.0"
   },
   "publishConfig": {

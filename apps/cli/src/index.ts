@@ -8,16 +8,17 @@ import fs from 'fs';
 import readline from 'readline';
 
 import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult, extractCredentialErrors, getInstallPref, saveInstallPref } from '@agentoctopus/core';
 import { startService } from './service.js';
-import { installSkill, searchSkills, fetchSkillMeta } from './clawhub.js';
+import { installSkill, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
-import { loadConfig, getConfig, getEnvPath } from '@agentoctopus/core';
+import { loadConfig, getConfig, getEnvPath, getConfigPath } from '@agentoctopus/core';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
 import { runSync } from './sync-skills.js';
 import { runRatingSync } from './rating-sync.js';
+import { runEvolveCheck, runEvolveReview, runEvolvePropose, runEvolveLog, runEvolveRollback } from './evolve.js';
 import { fileURLToPath } from 'url';
 
 // Read version from package.json dynamically
@@ -78,12 +79,13 @@ program
       }
 
       const installSpinner = ora('Installing @agentoctopus/cli@latest...').start();
-      const success = runGlobalInstall();
-      if (success) {
+      try {
+        runGlobalInstall();
         installSpinner.succeed('Update installed successfully!');
         console.log(chalk.gray('  Run `octopus --version` to verify the new version.'));
-      } else {
-        installSpinner.fail('Update failed. Try running `npm install -g @agentoctopus/cli@latest` manually.');
+      } catch (installErr) {
+        installSpinner.fail(`Update failed: ${(installErr as Error).message}`);
+        console.log(chalk.gray('  Try running `npm install -g @agentoctopus/cli@latest --force` manually.'));
       }
     } catch (err) {
       spinner.fail(`Update check failed: ${(err as Error).message}`);
@@ -120,7 +122,13 @@ program
     const port = config.gateway.port;
 
     console.log(chalk.bold('\n🐙 Starting AgentOctopus gateway\n'));
-    console.log(chalk.gray(`  Agent gateway: http://localhost:${port}/agent/health`));
+    console.log(chalk.gray(`  Control Plane:   http://localhost:${port}/agent/health`));
+    console.log(chalk.gray(`  Agent Gateway:   http://localhost:${port}/agent/ask`));
+    console.log(chalk.gray(`  WebChat (WS):    ws://localhost:${(config as any).canvas?.port ?? 3006}`));
+    if (process.env.SLACK_BOT_TOKEN) console.log(chalk.gray('  Slack:           enabled'));
+    if (process.env.DISCORD_TOKEN) console.log(chalk.gray('  Discord:         enabled'));
+    if (process.env.TELEGRAM_BOT_TOKEN) console.log(chalk.gray('  Telegram:        enabled'));
+    if ((config as any).gateway?.webhookPort) console.log(chalk.gray(`  Webhook:         http://localhost:${(config as any).gateway.webhookPort}${(config as any).gateway.webhookPath ?? '/webhook'}`));
     console.log(chalk.gray('  Press Ctrl+C to stop\n'));
 
     try {
@@ -194,35 +202,39 @@ function resolveSkillsDir(configValue: string): string {
   return configValue;
 }
 
+async function listSkills() {
+  const spinner = ora('Loading registry...').start();
+  try {
+    const { registry } = await bootstrap();
+    const skills = registry.getAll();
+    spinner.stop();
+
+    console.log(chalk.bold('\n🐙 AgentOctopus — Available Skills\n'));
+
+    if (skills.length === 0) {
+      console.log(chalk.gray('  No skills found in registry.'));
+      return;
+    }
+
+    skills.sort((a, b) => b.rating - a.rating);
+
+    skills.forEach((s) => {
+      const { manifest, rating } = s;
+      const stars = '⭐'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
+      console.log(`  ${chalk.cyan.bold(manifest.name)} ${chalk.yellow(stars)} (${rating.toFixed(1)})`);
+      console.log(`  ${chalk.gray(manifest.description)}`);
+      console.log(`  Adapter: ${manifest.adapter} | Uses: ${manifest.invocations}\n`);
+    });
+  } catch (err) {
+    spinner.fail(`Failed to load registry: ${err}`);
+  }
+}
+
 program
   .command('list')
   .description('List all available skills')
   .action(async () => {
-    const spinner = ora('Loading registry...').start();
-    try {
-      const { registry } = await bootstrap();
-      const skills = registry.getAll();
-      spinner.stop();
-
-      console.log(chalk.bold('\n🐙 AgentOctopus — Available Skills\n'));
-
-      if (skills.length === 0) {
-        console.log(chalk.gray('  No skills found in registry.'));
-        return;
-      }
-
-      skills.sort((a, b) => b.rating - a.rating);
-
-      skills.forEach((s) => {
-        const { manifest, rating } = s;
-        const stars = '⭐'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
-        console.log(`  ${chalk.cyan.bold(manifest.name)} ${chalk.yellow(stars)} (${rating.toFixed(1)})`);
-        console.log(`  ${chalk.gray(manifest.description)}`);
-        console.log(`  Adapter: ${manifest.adapter} | Uses: ${manifest.invocations}\n`);
-      });
-    } catch (err) {
-      spinner.fail(`Failed to load registry: ${err}`);
-    }
+    await listSkills();
   });
 
 program
@@ -299,7 +311,7 @@ program
 
       spinner.start(`Executing ${skill.manifest.name}...`);
       try {
-        const result = await engine.executor.execute(skill, input, { debug: !!options.debug });
+        let result = await engine.executor.execute(skill, input, { debug: !!options.debug });
         const t3 = Date.now();
 
         if (options.debug) {
@@ -326,6 +338,58 @@ program
             console.log(chalk.yellow(`↻ Trying next skill...\n`));
           }
           continue;
+        }
+
+        if ('type' in result && result.type === 'binary_installable') {
+          const biaResult = result as BinaryInstallableResult;
+          const missing = biaResult.missing as string[];
+          const allAlways = missing.every(b => getInstallPref(b) === 'always');
+          const anyNever = missing.some(b => getInstallPref(b) === 'never');
+          spinner.stop();
+
+          if (anyNever) {
+            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
+            continue;
+          }
+
+          let shouldInstall = allAlways;
+          let rememberPref: 'always' | 'never' | null = null;
+
+          if (!shouldInstall) {
+            console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+            const choice = await promptSelect('Install missing tools?', [
+              { label: 'Yes, install now', value: 'yes' },
+              { label: 'Yes, and always install automatically', value: 'always' },
+              { label: 'No, try another skill', value: 'no' },
+              { label: 'Never install automatically', value: 'never' },
+            ]);
+            if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
+            else if (choice === 'yes') { shouldInstall = true; }
+            else if (choice === 'never') { rememberPref = 'never'; }
+          }
+
+          if (rememberPref) saveInstallPref(missing, rememberPref);
+
+          if (!shouldInstall) {
+            if (i < candidates.length - 1) console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+            continue;
+          }
+
+          spinner.start(`Installing ${missing.join(', ')}...`);
+          result = await engine.executor.execute(skill, input, { debug: !!options.debug, autoInstall: true });
+
+          if ('type' in result && result.type === 'binary_install_failed') {
+            const biafResult = result as BinaryInstallFailedResult;
+            spinner.fail(`Failed to install required tools for ${biafResult.skillName}`);
+            console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
+            (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
+            console.error();
+            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
+            continue;
+          }
+
+          spinner.start('Finalizing...');
         }
 
         if ('type' in result && result.type === 'binary_missing') {
@@ -491,28 +555,168 @@ program
   });
 
 program
-  .command('search <query>')
-  .description('Search for skills on ClaWHub')
-  .option('--registry <url>', 'Custom ClaWHub registry URL')
-  .action(async (query: string, options: { registry?: string }) => {
-    const spinner = ora(`Searching ClaWHub for "${query}"...`).start();
-    try {
-      const results = await searchSkills(query, options.registry);
-      spinner.stop();
+  .command('search [query]')
+  .description('Search local skills')
+  .option('--run', 'Interactively pick a skill and run a query against it')
+  .action(async (query: string | undefined, options: { run?: boolean }) => {
+    if (!query) {
+      console.log(chalk.red('Provide a search query, e.g. "octopus search weather"'));
+      return;
+    }
 
-      if (results.length === 0) {
-        console.log(chalk.yellow(`\n  No skills found for "${query}".`));
+    const spinner = ora('Searching local skills...').start();
+    let registry, router, executor;
+    try {
+      ({ registry, router, executor } = await bootstrap());
+    } catch (err) {
+      spinner.fail(`Failed to initialize: ${(err as Error).message}`);
+      return;
+    }
+    const results = registry.search(query);
+    spinner.stop();
+
+    if (results.length === 0) {
+      console.log(chalk.yellow(`\nNo skills found for "${query}".`));
+      console.log(chalk.gray('Try "octopus list" to see all available skills.'));
+      return;
+    }
+
+    // Display results
+    console.log(chalk.bold(`\n🐙 Search Results for "${query}"\n`));
+    results.forEach((skill, i) => {
+      const rating = skill.rating;
+      const stars = '★'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
+      const desc = skill.manifest.description.length > 80
+        ? skill.manifest.description.slice(0, 80) + '…'
+        : skill.manifest.description;
+      const skillTags = Array.isArray(skill.manifest.tags) ? skill.manifest.tags : [];
+      const tags = skillTags.length > 0
+        ? chalk.gray(`[${skillTags.join(', ')}]`)
+        : '';
+      console.log(`  ${chalk.cyan.bold(`${i + 1}.`)} ${chalk.cyan.bold(skill.manifest.name)} ${chalk.yellow(stars)} ${chalk.gray(`(${skill.manifest.invocations} uses)`)}`);
+      console.log(`     ${desc} ${tags}`);
+      console.log();
+    });
+
+    // --run: interactive pick-and-run
+    if (options.run) {
+      await router.buildIndex(registry.getAll());
+
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+      const pickSkill = (): Promise<{ skill: typeof results[0]; query: string } | null> => {
+        return new Promise((resolve) => {
+          rl.question(chalk.yellow(`Pick a skill (1-${results.length}, or Enter to cancel): `), (answer) => {
+            const trimmed = answer.trim();
+            if (trimmed === '') {
+              resolve(null);
+              return;
+            }
+            const idx = parseInt(trimmed, 10);
+            if (isNaN(idx) || idx < 1 || idx > results.length) {
+              console.log(chalk.red(`Invalid choice. Pick 1-${results.length} or press Enter to cancel.`));
+              resolve(pickSkill());
+              return;
+            }
+            const skill = results[idx - 1]!;
+            rl.question(chalk.yellow(`Query for ${chalk.cyan(skill.manifest.name)} (or Enter to cancel): `), (query) => {
+              if (query.trim() === '') {
+                resolve(null);
+              } else {
+                resolve({ skill, query: query.trim() });
+              }
+            });
+          });
+        });
+      };
+
+      const pick = await pickSkill();
+      if (!pick) {
+        console.log(chalk.gray('Cancelled.'));
+        rl.close();
         return;
       }
 
-      console.log(chalk.bold(`\n🐙 ClaWHub — Search Results for "${query}"\n`));
-      for (const r of results) {
-        console.log(`  ${chalk.cyan.bold(r.slug)} ${chalk.gray(`v${r.version}`)} ${chalk.yellow(`⭐ ${r.stars || 0}`)}`);
-        console.log(`  ${chalk.gray(r.description || 'No description')}`);
-        console.log(`  ${chalk.gray(`by ${r.author}`)}  →  ${chalk.green(`octopus add ${r.slug}`)}\n`);
+      console.log();
+      const input = { query: pick.query, text: pick.query };
+      const execSpinner = ora(`Executing ${pick.skill.manifest.name}...`).start();
+      try {
+        let result = await executor.execute(pick.skill, input);
+        execSpinner.stop();
+
+        if ('type' in result && result.type === 'credential_missing') {
+          console.log(chalk.red(`\n${pick.skill.manifest.name} requires unconfigured API keys.`));
+          const missingKeys = result.missing.map((v: { key: string }) => v.key);
+          const guide = await executor.generateCredentialGuide(
+            pick.skill.manifest.name,
+            pick.skill.manifest.description,
+            missingKeys,
+          );
+          console.log(chalk.yellow(guide.split('\n').map((l: string) => `  ${l}`).join('\n')));
+        } else if ('type' in result && result.type === 'binary_installable') {
+          const biaResult = result as BinaryInstallableResult;
+          const missing = biaResult.missing as string[];
+          const allAlways = missing.every(b => getInstallPref(b) === 'always');
+          const anyNever = missing.some(b => getInstallPref(b) === 'never');
+
+          if (anyNever) {
+            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+          } else {
+            let shouldInstall = allAlways;
+            let rememberPref: 'always' | 'never' | null = null;
+            if (!shouldInstall) {
+              console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+              const choice = await promptSelect('Install missing tools?', [
+                { label: 'Yes, install now', value: 'yes' },
+                { label: 'Yes, and always install automatically', value: 'always' },
+                { label: 'No', value: 'no' },
+                { label: 'Never install automatically', value: 'never' },
+              ]);
+              if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
+              else if (choice === 'yes') { shouldInstall = true; }
+              else if (choice === 'never') { rememberPref = 'never'; }
+            }
+            if (rememberPref) saveInstallPref(missing, rememberPref);
+            if (shouldInstall) {
+              const installSpinner = ora(`Installing ${missing.join(', ')}...`).start();
+              result = await executor.execute(pick.skill, input, { autoInstall: true });
+              installSpinner.stop();
+              if ('type' in result && result.type === 'binary_install_failed') {
+                const biafResult = result as BinaryInstallFailedResult;
+                console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
+                (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
+              }
+            }
+          }
+        } else if ('type' in result && result.type === 'binary_missing') {
+          const tools = (result.missing as string[]).map((b: string) => `  • ${b}`).join('\n');
+          console.log(chalk.red(`\n${pick.skill.manifest.name} requires missing tools:`));
+          console.log(tools);
+        } else {
+          const execResult = result as import('@agentoctopus/core').ExecutionResult;
+          if (execResult.adapterResult.success) {
+            console.log(chalk.green('\nResult:'));
+            console.log(execResult.formattedOutput);
+          } else {
+            console.log(chalk.red(`\nExecution failed: ${execResult.adapterResult.error ?? 'Unknown error'}`));
+          }
+        }
+      } catch (err) {
+        execSpinner.fail(`Execution failed: ${(err as Error).message}`);
       }
-    } catch (err) {
-      spinner.fail(`Search failed: ${(err as Error).message}`);
+
+      // Feedback prompt
+      rl.question(chalk.yellow('\nWas this helpful? (y/n): '), (answer) => {
+        const isPositive = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+        rl.question(chalk.yellow('Any comments? (press Enter to skip): '), (comment) => {
+          const trimmedComment = comment.trim() || undefined;
+          registry.recordFeedback(pick.skill.manifest.name, isPositive, trimmedComment, 'cli');
+          console.log(chalk.gray('Thank you for your feedback!'));
+          rl.close();
+        });
+      });
+    } else {
+      console.log(chalk.gray('Use --run to pick a skill and run a query.'));
     }
   });
 
@@ -754,7 +958,7 @@ skillCmd
   .command('list')
   .description('List all available skills')
   .action(async () => {
-    await program.parseAsync(['', '', 'list'], { from: 'user' });
+    await listSkills();
   });
 
 skillCmd
@@ -779,12 +983,12 @@ skillCmd
   });
 
 skillCmd
-  .command('search <query>')
-  .description('Search for skills on ClaWHub')
-  .option('--registry <url>', 'Custom ClaWHub registry URL')
-  .action(async (query: string, options: { registry?: string }) => {
-    const args = ['', '', 'search', query];
-    if (options.registry) args.push('--registry', options.registry);
+  .command('search [query]')
+  .description('Search local skills')
+  .option('--run', 'Interactively pick a skill and run a query against it')
+  .action(async (query: string | undefined, options: { run?: boolean }) => {
+    const args = ['', '', 'search', ...(query ? [query] : [])];
+    if (options.run) args.push('--run');
     await program.parseAsync(args, { from: 'user' });
   });
 
@@ -881,7 +1085,191 @@ configCmd
     console.log(`  ${chalk.cyan('Gateway')}:   port ${c.gateway.port}`);
     console.log(`  ${chalk.cyan('Registry')}:  ${c.registry.skillsDir}`);
     console.log(`  ${chalk.cyan('Timing')}:    ${c.execution.timing ? 'on' : 'off'}`);
+
+    if (c.agents.entries && c.agents.entries.length > 0) {
+      console.log(`\n  ${chalk.cyan('Agents')}:`);
+      for (const agent of c.agents.entries) {
+        const isDefault = agent.id === c.agents.default;
+        const sb = agent.sandbox?.enabled ? chalk.gray(` [${agent.sandbox.backend}]`) : '';
+        console.log(`    ${isDefault ? chalk.yellow('★') : ' '} ${chalk.cyan(agent.id)} — ${agent.name}${sb} ${chalk.gray(`(dm:${agent.dmPolicy})`)}`);
+      }
+    }
+
+    if (c.sandbox.defaultBackend !== 'none') {
+      console.log(`\n  ${chalk.cyan('Sandbox')}:   ${c.sandbox.defaultBackend}`);
+    }
+
     console.log();
+  });
+
+program
+  .command('evolve')
+  .description('AI-powered skill evolution — analyze, propose, review, and rollback')
+  .option('--check', 'Show evolution status for all skills')
+  .option('--propose <skill>', 'Manually trigger analysis for a specific skill')
+  .option('--review', 'Review pending risky proposals')
+  .option('--log <skill>', 'Show snapshot history for a skill')
+  .option('--rollback <skill>', 'Roll back a skill to a snapshot')
+  .option('--to <n>', 'Snapshot index for rollback (from --log)')
+  .action(async (options: {
+    check?: boolean;
+    propose?: string;
+    review?: boolean;
+    log?: string;
+    rollback?: string;
+    to?: string;
+  }) => {
+    try {
+      if (options.propose) {
+        await runEvolvePropose(options.propose);
+      } else if (options.review) {
+        await runEvolveReview();
+      } else if (options.log) {
+        await runEvolveLog(options.log);
+      } else if (options.rollback) {
+        await runEvolveRollback(options.rollback, options.to ? parseInt(options.to, 10) : undefined);
+      } else {
+        // default: --check or no option shows status
+        await runEvolveCheck();
+      }
+    } catch (err) {
+      console.error(chalk.red(`Evolve failed: ${err}`));
+      process.exitCode = 1;
+    }
+  });
+
+// ── octopus agent <subcommand> ─────────────────────────────────────────────
+const agentCmd = program
+  .command('agent')
+  .description('Manage agents — create, list, switch, remove');
+
+agentCmd
+  .command('list')
+  .description('List all configured agents')
+  .action(async () => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    console.log(chalk.bold('\n🐙 AgentOctopus — Agents\n'));
+
+    if (!c.agents.entries || c.agents.entries.length === 0) {
+      console.log(chalk.gray('  No agents configured.'));
+      return;
+    }
+
+    const defaultId = c.agents.default;
+    for (const agent of c.agents.entries) {
+      const isDefault = agent.id === defaultId;
+      const sb = agent.sandbox?.enabled ? chalk.gray(` [sandbox:${agent.sandbox.backend}]`) : '';
+      const dm = chalk.gray(` dm:${agent.dmPolicy}`);
+      const star = isDefault ? chalk.yellow(' ★ default') : '';
+      console.log(`  ${chalk.cyan.bold(agent.id)}${star}`);
+      console.log(`    ${chalk.gray('Name:')} ${agent.name}${dm}${sb}`);
+      if (agent.workspace) {
+        console.log(`    ${chalk.gray('Workspace:')} ${agent.workspace}`);
+      }
+      console.log();
+    }
+  });
+
+agentCmd
+  .command('create <id>')
+  .description('Create a new agent')
+  .option('--name <name>', 'Agent display name')
+  .option('--dm-policy <policy>', 'DM policy (pairing or open)', 'pairing')
+  .option('--sandbox <backend>', 'Sandbox backend (docker, ssh, openshell, none)', 'none')
+  .option('--model <model>', 'Per-agent LLM model override')
+  .action(async (id: string, options: { name?: string; dmPolicy?: string; sandbox?: string; model?: string }) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    const existing = c.agents.entries?.find((a) => a.id === id);
+    if (existing) {
+      console.log(chalk.red(`\n  Agent "${id}" already exists.`));
+      return;
+    }
+
+    const newAgent = {
+      id,
+      name: options.name || id,
+      dmPolicy: (options.dmPolicy === 'open' ? 'open' : 'pairing') as 'pairing' | 'open',
+      sandbox: options.sandbox && options.sandbox !== 'none'
+        ? { enabled: true, backend: options.sandbox as any }
+        : { enabled: false, backend: 'none' as const },
+      model: options.model ? { model: options.model } : undefined,
+    };
+
+    const entries = [...(c.agents.entries || []), newAgent];
+    const updatedConfig = {
+      ...c,
+      agents: { ...c.agents, entries },
+    };
+
+    // Save back to config file
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents = updatedConfig.agents;
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Agent "${newAgent.name}" (${id}) created.`));
+    console.log(chalk.gray(`    DM Policy: ${newAgent.dmPolicy}`));
+    if (newAgent.sandbox?.enabled) {
+      console.log(chalk.gray(`    Sandbox: ${newAgent.sandbox.backend}`));
+    }
+    console.log(chalk.gray(`    Workspace: ~/.agentoctopus/agents/${id}/workspace`));
+  });
+
+agentCmd
+  .command('switch <id>')
+  .description('Set the default agent')
+  .action(async (id: string) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    const exists = c.agents.entries?.some((a) => a.id === id);
+    if (!exists) {
+      console.log(chalk.red(`\n  Agent "${id}" not found.`));
+      return;
+    }
+
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents = parsed.agents || {};
+    parsed.agents.default = id;
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Default agent switched to "${id}".`));
+  });
+
+agentCmd
+  .command('remove <id>')
+  .description('Remove an agent')
+  .action(async (id: string) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    if (!c.agents.entries?.some((a) => a.id === id)) {
+      console.log(chalk.red(`\n  Agent "${id}" not found.`));
+      return;
+    }
+
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents.entries = (parsed.agents.entries || []).filter((a: any) => a.id !== id);
+    if (parsed.agents.default === id) {
+      parsed.agents.default = parsed.agents.entries[0]?.id || 'default';
+    }
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Agent "${id}" removed.`));
+    console.log(chalk.gray(`    New default: ${parsed.agents.default}`));
   });
 
 program.parse();

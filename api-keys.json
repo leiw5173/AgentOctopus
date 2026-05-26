@@ -38,6 +38,32 @@
         "lastMonthlyReset": "2026-04"
       },
       "active": true
+    },
+    "ak_hnnAlDncAFr3nGqoRc6VZ9myUVuGpj_N": {
+      "userId": "user_5b917b45b4da858d",
+      "email": "test@example.com",
+      "tier": "free",
+      "createdAt": "2026-05-15T09:02:03.128Z",
+      "usage": {
+        "daily": 1,
+        "monthly": 10,
+        "lastDailyReset": "2026-05-21",
+        "lastMonthlyReset": "2026-05"
+      },
+      "active": true
+    },
+    "ak_IAswfojL_-Cd-ohT3YT1rHdbv1tMQbnf": {
+      "userId": "user_afe849aa84f7dc9f",
+      "email": "test@example.com",
+      "tier": "free",
+      "createdAt": "2026-05-15T09:02:06.422Z",
+      "usage": {
+        "daily": 14,
+        "monthly": 14,
+        "lastDailyReset": "2026-05-21",
+        "lastMonthlyReset": "2026-05"
+      },
+      "active": true
     }
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/core",
-  "version": "0.5.18",
+  "version": "0.7.0",
   "description": "AgentOctopus core: semantic router, executor, and LLM client",
   "type": "module",
   "main": "./dist/index.js",
@@ -21,15 +21,15 @@
     "@agentoctopus/registry": "workspace:*",
     "@agentoctopus/skills": "workspace:*",
     "@google/generative-ai": "^0.24.1",
-    "dotenv": "^16.4.0",
-    "ollama": "^0.5.0",
+    "dotenv": "^17.4.2",
+    "ollama": "^0.6.3",
     "openai": "^4.47.0",
     "vectra": "^0.14.0",
-    "zod": "^3.22.0"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "vitest": "^1.5.0"
   },
   "publishConfig": {

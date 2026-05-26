@@ -61,6 +61,9 @@ export async function checkSkillUpdates(
 ): Promise<SkillUpdate[]> {
   const updates: SkillUpdate[] = [];
 
+  // Check directory exists before hitting the network
+  if (!fs.existsSync(skillsDir)) return updates;
+
   // Download the full skills index for version comparison
   let indexEntries: SkillIndexEntry[];
   try {
@@ -78,9 +81,6 @@ export async function checkSkillUpdates(
   for (const entry of indexEntries) {
     indexMap.set(entry.slug, entry);
   }
-
-  // Scan installed skills
-  if (!fs.existsSync(skillsDir)) return updates;
 
   const installedSlugs = fs.readdirSync(skillsDir).filter(
     (name) => fs.existsSync(path.join(skillsDir, name, 'SKILL.md')),

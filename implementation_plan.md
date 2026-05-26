@@ -150,7 +150,9 @@ AgentOctopus/
 │   ├── core/
 │   │   ├── src/
 │   │   │   ├── router.ts           # ✅ Intent embedding + skill selection
-│   │   │   ├── executor.ts         # ✅ Skill/MCP invocation engine
+│   │   │   ├── executor.ts         # ✅ Skill/MCP/sandbox/composed invocation
+│   │   │   ├── planner.ts          # ✅ Multi-hop intent decomposition
+│   │   │   ├── composer.ts         # ✅ Skill composition DAG executor
 │   │   │   └── llm-client.ts       # ✅ Pluggable LLM backend
 │   │   └── tests/
 │   │       ├── router.test.ts
@@ -160,7 +162,7 @@ AgentOctopus/
 │   ├── registry/
 │   │   ├── src/
 │   │   │   ├── registry.ts         # ✅ Load/search/CRUD for skill manifests
-│   │   │   ├── manifest-schema.ts  # ✅ Zod schema for SKILL.md frontmatter
+│   │   │   ├── manifest-schema.ts  # ✅ Zod schema (incl. sandbox + compose)
 │   │   │   └── rating.ts           # ✅ Rating store (file-based)
 │   │   └── tests/
 │   │       ├── registry.test.ts
@@ -171,17 +173,45 @@ AgentOctopus/
 │   │   ├── src/
 │   │   │   ├── http-adapter.ts     # ✅ Generic REST skill adapter
 │   │   │   ├── mcp-adapter.ts      # ✅ MCP stdio bridge (Phase 2)
-│   │   │   └── subprocess-adapter.ts # ✅ Local script execution
+│   │   │   ├── subprocess-adapter.ts # ✅ Local script execution
+│   │   │   └── sandbox/            # ✅ Phase 4b: Docker / SSH / OpenShell
+│   │   │       ├── docker-adapter.ts
+│   │   │       ├── ssh-adapter.ts
+│   │   │       └── openshell-adapter.ts
 │   │   └── tests/
 │   │       └── mcp-adapter.test.ts  # ✅ MCP adapter tests
 │   │
-│   └── gateway/                    # ✅ Phase 3 Complete
+│   ├── skills/
+│   │   ├── src/
+│   │   │   ├── schema.ts           # ✅ SKILL.md frontmatter Zod schema
+│   │   │   ├── composition/        # ✅ Phase 4b: composition schema + validation
+│   │   │   │   ├── schema.ts
+│   │   │   │   └── runner.ts
+│   │   │   └── evolution/          # ✅ Skill self-improvement system
+│   │   └── tests/
+│   │
+│   └── gateway/                    # ✅ Phase 3 + 4b Complete
 │       ├── src/
-│       │   ├── engine.ts           # ✅ Shared engine bootstrap
+│       │   ├── engine.ts           # ✅ Per-workspace engine bootstrap
 │       │   ├── session.ts          # ✅ Stateful session manager
-│       │   ├── slack.ts            # ✅ Slack bot adapter (@slack/bolt)
-│       │   ├── discord.ts          # ✅ Discord bot adapter (discord.js)
-│       │   ├── telegram.ts         # ✅ Telegram bot adapter (telegraf)
+│       │   ├── channels/           # ✅ Phase 4b: unified channel architecture
+│       │   │   ├── base-channel.ts
+│       │   │   ├── channel-handler.ts
+│       │   │   ├── slack-channel.ts
+│       │   │   ├── discord-channel.ts
+│       │   │   ├── telegram-channel.ts
+│       │   │   ├── webhook-channel.ts
+│       │   │   └── webchat-channel.ts
+│       │   ├── control-plane/      # ✅ Phase 4b: event bus + control plane
+│       │   │   ├── event-bus.ts
+│       │   │   └── control-plane.ts
+│       │   ├── multi-agent/        # ✅ Phase 4b: agent pool + routing
+│       │   │   ├── agent-instance.ts
+│       │   │   ├── agent-pool.ts
+│       │   │   └── agent-router.ts
+│       │   ├── security/           # ✅ Phase 4b: DM policy + pairing
+│       │   │   ├── dm-policy.ts
+│       │   │   └── pairing-store.ts
 │       │   ├── agent-protocol.ts   # ✅ Agent-to-agent HTTP protocol + security
 │       │   ├── auth-middleware.ts  # ✅ API key auth + tier management
 │       │   ├── rate-limiter.ts     # ✅ Sliding-window rate limiting
@@ -279,6 +309,22 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] Multi-hop routing: decompose complex requests into sub-tasks.
 - [x] LLM planner that generates an execution DAG.
 - [x] Confidence scoring; graceful "no matching skill" message.
+- [x] **Structured output passing** between planner steps (JSON-aware context).
+- [x] **Composite step detection** — planner recognizes `adapter: composed` skills.
+
+### Phase 4b — OpenClaw Architecture Extension ✅ Complete
+- [x] **Config schema** extended with `agents`, `sandbox`, `canvas`, `companion` sections.
+- [x] **Manifest schema** extended with `sandbox` and `compose` fields, `composed` adapter.
+- [x] **BaseChannel abstraction** — unified `ChannelAdapter` interface for all channels.
+- [x] **New channels**: WebSocket WebChat (`WebchatChannel`), generic HTTP Webhook (`WebhookChannel`).
+- [x] **ControlPlane** — typed event bus (`EventBus`) + agent pool (`AgentPool`) + control plane orchestrator.
+- [x] **Multi-agent routing** — `AgentRouter` maps `(channelType, accountId, peerId) → agentId`.
+- [x] **AgentInstance** — isolated engine per agent with separate workspace, registry, router, executor, sessions.
+- [x] **DM Security Policy** — `pairing` mode (default): unknown senders receive pairing code challenge; `open` mode for public bots.
+- [x] **Pairing store** — persisted paired peers in `~/.agentoctopus/pairing.json` with 10-min expiring codes.
+- [x] **Sandbox adapters** — `DockerAdapter` (container isolation), `SshAdapter` (remote execution), `OpenShellAdapter` (local pass-through).
+- [x] **SkillComposer** — executes `compose` DAGs with input/output mapping, conditional branching, and result synthesis.
+- [x] **Composition validation** — `validateComposition()` checks inputMapping references and `detectCycles()` guards self-references.
 
 ### Phase 5 — Developer Ecosystem ✅ Complete
 - [x] Web UI: enhanced chat interface with skills sidebar, dark/light mode, conversation clear, marketplace link.
@@ -293,6 +339,12 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] Audit logger — structured JSONL logging of all gateway requests.
 - [x] Self-service key registration endpoint (`POST /agent/register`).
 - [x] CORS configuration and admin key management endpoints.
+
+### Phase 6b — Gateway Control Plane ✅ Complete
+- [x] `EventBus` — typed pub/sub for `message-received`, `skill-executed`, `feedback-recorded`, `session-created/expired` events.
+- [x] `ControlPlane` — singleton orchestrator: starts agents, registers channels, routes events.
+- [x] Per-agent workspace isolation: `~/.agentoctopus/agents/<id>/workspace/skills/`.
+- [x] `getControlPlane()` / `resetControlPlane()` singleton pattern.
 
 ### Phase 8 — Bundled Skills & Skill Authoring ✅ Complete
 - [x] Four built-in skills (weather, translation, ip-lookup, x-search) bundled inside `@agentoctopus/cli` and copied to `~/.agentoctopus/skills/` during `octopus onboard`.
@@ -309,6 +361,21 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [ ] 支付宝/微信支付 integration for Chinese users.
 - [ ] Billing dashboard and `octopus billing` CLI command.
 - [ ] Webhook handlers for subscription lifecycle events.
+
+### Phase 9 — Live Canvas & Companion Apps (Planned)
+- [ ] `CanvasServer` — WebSocket upgrade handler for A2UI rendering.
+- [ ] `CanvasView` React component — renders agent-driven visual workspace.
+- [ ] `CompanionServer` — WebSocket server on port 3003 for macOS/iOS/Android nodes.
+- [ ] Device pairing with QR/code exchange.
+- [ ] Node capability registry and compute offload routing.
+
+### Phase 10 — CLI & Web UI Enhancements (Planned)
+- [ ] `octopus agent create <name>` — create isolated agent workspace.
+- [ ] `octopus agent list` / `octopus agent switch <name>` — manage agents.
+- [ ] `octopus channel add <type>` — bind channel to agent.
+- [ ] `octopus sandbox enable/disable <skill>` — toggle sandbox per skill.
+- [ ] `octopus compose <skill>` — run composed skill with step preview.
+- [ ] Web UI `/agents` dashboard, `/canvas` viewer, `/channels` config, `/skills/composer` builder.
 
 ---
 

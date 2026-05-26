@@ -4,6 +4,7 @@ import {
   getInstalledVersion,
   checkPackageUpdates,
   displayUpdateTable,
+  runGlobalInstall,
   _setExec,
   _resetExec,
   _setResolveVersion,
@@ -103,6 +104,38 @@ describe('checkPackageUpdates', () => {
     mockExec(() => { throw new Error('network error'); });
     const results = await checkPackageUpdates();
     expect(results).toHaveLength(0);
+  });
+});
+
+describe('runGlobalInstall', () => {
+  afterEach(() => {
+    _resetExec();
+  });
+
+  it('returns true when npm install succeeds', () => {
+    mockExec(() => '');
+    expect(runGlobalInstall()).toBe(true);
+  });
+
+  it('uses --force flag in the install command', () => {
+    let capturedCmd = '';
+    mockExec((cmd: string) => { capturedCmd = cmd; return ''; });
+    runGlobalInstall();
+    expect(capturedCmd).toContain('--force');
+  });
+
+  it('throws with npm error message on EEXIST failure', () => {
+    const err = Object.assign(new Error('npm failed'), {
+      stderr: 'npm error code EEXIST\nnpm error File exists: /usr/bin/octopus\n',
+    });
+    mockExec(() => { throw err; });
+    expect(() => runGlobalInstall()).toThrow('npm error code EEXIST');
+  });
+
+  it('throws with fallback message when stderr is empty', () => {
+    const err = new Error('spawn failed');
+    mockExec(() => { throw err; });
+    expect(() => runGlobalInstall()).toThrow('spawn failed');
   });
 });
 

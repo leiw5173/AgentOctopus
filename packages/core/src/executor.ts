@@ -1,12 +1,16 @@
 import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/registry';
-import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
+import { getRequiredEnvVars, getRequiredBins, getSkillEntry } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
-import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
-import { applySkillEnvOverrides } from '@agentoctopus/skills';
+import { HttpAdapter, McpAdapter, SubprocessAdapter, DockerAdapter, SshAdapter, OpenShellAdapter } from '@agentoctopus/adapters';
+import { applySkillEnvOverrides, installMissingBins } from '@agentoctopus/skills';
+import type { SkillEntry, SkillsConfig } from '@agentoctopus/skills';
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
 import { getConfig } from './config-resolver.js';
+import { recordExecutionSignal } from './evolution-hook.js';
+import { SkillComposer } from './composer.js';
+import type { Router } from './router.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -21,25 +25,6 @@ function buildSandboxedEnv(skill: LoadedSkill): NodeJS.ProcessEnv {
     if (process.env[v.key] !== undefined) safe[v.key] = process.env[v.key];
   }
   return safe;
-}
-
-/**
- * Build a lightweight adapter from LoadedSkill to a shape compatible with
- * applySkillEnvOverrides from @agentoctopus/skills.
- */
-function loadedSkillToEnvEntry(skill: LoadedSkill) {
-  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
-  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
-  return {
-    skill: { name: skill.manifest.name },
-    metadata: {
-      skillKey: (openclaw.skillKey as string) ?? undefined,
-      primaryEnv: (rawMeta.primaryEnv as string) ?? (openclaw.primaryEnv as string) ?? undefined,
-      always: (rawMeta.always as boolean) ?? undefined,
-      os: (rawMeta.os as string[]) ?? undefined,
-      requires: (rawMeta.requires as any) ?? undefined,
-    },
-  };
 }
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
@@ -132,24 +117,64 @@ export interface BinaryMissingResult {
   missing: string[];
 }
 
+export interface BinaryInstallableResult {
+  type: 'binary_installable';
+  skillName: string;
+  missing: string[];
+  installSpecs: import('@agentoctopus/skills').SkillInstallSpec[];
+}
+
+export interface BinaryInstallFailedResult {
+  type: 'binary_install_failed';
+  skillName: string;
+  missing: string[];
+  error: string;
+  manualInstructions: string[];
+}
+
 export class Executor {
   private http = new HttpAdapter();
   private mcp = new McpAdapter();
   private subprocess = new SubprocessAdapter();
+  private docker = new DockerAdapter();
+  private ssh?: SshAdapter;
+  private openshell = new OpenShellAdapter();
+  private composer?: SkillComposer;
 
-  constructor(private registry: SkillRegistry, private chatClient?: ChatClient) {}
+  constructor(
+    private registry: SkillRegistry,
+    private chatClient?: ChatClient,
+    private router?: Router,
+  ) {
+    // Lazy-init SSH adapter from config
+    const config = getConfig();
+    if (config.sandbox.ssh?.host && config.sandbox.ssh?.user) {
+      this.ssh = new SshAdapter({
+        host: config.sandbox.ssh.host,
+        user: config.sandbox.ssh.user,
+        keyPath: config.sandbox.ssh.keyPath,
+      });
+    }
+    if (this.router && this.chatClient) {
+      this.composer = new SkillComposer(this.registry, this.router, this, this.chatClient);
+    }
+  }
 
-  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult> {
-    const { debug = false } = opts;
+  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean; autoInstall?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult | BinaryInstallableResult | BinaryInstallFailedResult> {
+    const { debug = false, autoInstall = false } = opts;
 
     // Apply env overrides from skills config before credential check.
     // Overrides set configured apiKey/env vars into process.env so that
     // skills with credentials in octopus.json can pass the check below.
     const skillsConfig = getConfig().skills;
     const revertEnv = applySkillEnvOverrides(
-      [loadedSkillToEnvEntry(skill) as any],
-      skillsConfig as any,
+      [getSkillEntry(skill)],
+      skillsConfig as unknown as SkillsConfig,
     );
+
+    let adapterResult: AdapterResult | undefined;
+    let latencyMs: number = 0;
+    let tokenUsage: number = 0;
 
     try {
     // Check required credentials before invoking
@@ -168,7 +193,62 @@ export class Executor {
     const requiredBins = getRequiredBins(skill.manifest);
     const missingBins = requiredBins.filter(bin => !isBinAvailable(bin));
     if (missingBins.length > 0) {
-      return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
+      const entry = getSkillEntry(skill);
+      const installSpecs = entry.metadata?.install ?? [];
+
+      if (installSpecs.length === 0) {
+        return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
+      }
+
+      if (autoInstall) {
+        const installResult = await installMissingBins(installSpecs, missingBins, process.platform);
+        if (installResult.success) {
+          const stillMissing = missingBins.filter(bin => !isBinAvailable(bin));
+          if (stillMissing.length === 0) {
+            // binaries now available — fall through to normal execution
+          } else {
+            return {
+              type: 'binary_install_failed',
+              skillName: skill.manifest.name,
+              missing: stillMissing,
+              error: `Installed ${installResult.installed.join(', ')} but ${stillMissing.join(', ')} still missing`,
+              manualInstructions: installResult.manualInstructions,
+            };
+          }
+        } else {
+          return {
+            type: 'binary_install_failed',
+            skillName: skill.manifest.name,
+            missing: missingBins,
+            error: `Installation failed for: ${installResult.failed.map(f => f.bin).join(', ')}`,
+            manualInstructions: installResult.manualInstructions,
+          };
+        }
+      } else {
+        return {
+          type: 'binary_installable',
+          skillName: skill.manifest.name,
+          missing: missingBins,
+          installSpecs,
+        };
+      }
+    }
+
+    // Handle composed skills (skill chaining)
+    if (skill.manifest.adapter === 'composed') {
+      if (!this.composer) {
+        return {
+          skill,
+          adapterResult: { success: false, error: 'SkillComposer not available — router required for composed skills' },
+          formattedOutput: 'Error: SkillComposer not available — router required for composed skills',
+        };
+      }
+      const composeResult = await this.composer.executeChain(skill, input);
+      return {
+        skill,
+        adapterResult: { success: composeResult.success, rawText: composeResult.finalOutput, error: composeResult.error },
+        formattedOutput: composeResult.success ? composeResult.finalOutput : `Error: ${composeResult.error}`,
+      };
     }
 
     let adapter = this.pickAdapter(skill);
@@ -194,7 +274,6 @@ export class Executor {
     const startTime = Date.now();
     // Lazily load SKILL.md body from disk — only for the selected skill, not at startup
     const instructions = this.registry.readInstructions(skill);
-    let adapterResult: AdapterResult;
     try {
       // For subprocess skills, check if we should use LLM-guided execution
       if (adapter === this.subprocess && this.chatClient) {
@@ -206,7 +285,7 @@ export class Executor {
         adapterResult = await adapter.invoke(skill, input);
       }
     } catch (err) {
-      const latencyMs = Date.now() - startTime;
+      latencyMs = Date.now() - startTime;
       this.registry.recordInvocationMetrics(skill.manifest.name, {
         success: false,
         latencyMs,
@@ -214,7 +293,7 @@ export class Executor {
       });
       throw err;
     }
-    const latencyMs = Date.now() - startTime;
+    latencyMs = Date.now() - startTime;
 
     if (adapterResult.rawText) {
       dbg(debug, `Raw output (first 200 chars): "${adapterResult.rawText.slice(0, 200).trim()}"`);
@@ -225,7 +304,7 @@ export class Executor {
     dbg(debug, `Execution time: ${latencyMs}ms`);
 
     // Record invocation metrics in registry
-    const tokenUsage = typeof (adapterResult as any).tokenUsage === 'number' ? (adapterResult as any).tokenUsage : 0;
+    tokenUsage = typeof (adapterResult as any).tokenUsage === 'number' ? (adapterResult as any).tokenUsage : 0;
     this.registry.recordInvocationMetrics(skill.manifest.name, {
       success: adapterResult.success,
       latencyMs,
@@ -249,6 +328,19 @@ export class Executor {
     return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
     } finally {
       revertEnv();
+      try {
+        if (skill.dirPath && latencyMs > 0) {
+          recordExecutionSignal(
+            skill.dirPath,
+            adapterResult !== undefined ? adapterResult.success : false,
+            latencyMs,
+            tokenUsage,
+            adapterResult !== undefined ? (adapterResult.error ?? null) : null,
+          );
+        }
+      } catch {
+        // evolution signal recording must never affect execution
+      }
     }
   }
 
@@ -597,10 +689,26 @@ If you're not confident about the URL, say "Visit the provider's website" instea
   }
 
   private pickAdapter(skill: LoadedSkill) {
+    // Check sandbox override first
+    const sandboxBackend = skill.manifest.sandbox?.backend;
+    if (sandboxBackend && sandboxBackend !== 'none') {
+      switch (sandboxBackend) {
+        case 'docker':
+          return this.docker;
+        case 'ssh':
+          return this.ssh ?? this.subprocess;
+        case 'openshell':
+          return this.openshell;
+      }
+    }
+
     switch (skill.manifest.adapter) {
       case 'mcp':
         return this.mcp;
       case 'subprocess':
+        return this.subprocess;
+      case 'composed':
+        // Composed skills are handled at a higher level before pickAdapter
         return this.subprocess;
       case 'http':
       default:

@@ -53,6 +53,21 @@ export const SkillFrontmatterSchema = z.object({
   "command-dispatch": z.string().optional(),
   "command-tool": z.string().optional(),
   "command-arg-mode": z.string().optional(),
+  adapter: z.enum(["http", "mcp", "subprocess", "openai", "composed"]).optional(),
+  sandbox: z.object({
+    backend: z.enum(["docker", "ssh", "openshell", "none"]).optional(),
+    image: z.string().optional(),
+    memory: z.string().optional(),
+    timeout: z.number().int().optional(),
+  }).optional(),
+  compose: z.object({
+    steps: z.array(z.object({
+      skill: z.string(),
+      inputMapping: z.record(z.string(), z.string()).optional(),
+      outputAs: z.string().optional(),
+      condition: z.string().optional(),
+    })),
+  }).optional(),
   openclaw: OpenClawBlockSchema.optional(),
 }).passthrough();
 

@@ -7,6 +7,14 @@ import { saveConfigFile, saveEnvFile, getConfigPath, getEnvPath, getConfigDir, t
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+interface AgentOnboardConfig {
+  id: string;
+  name: string;
+  dmPolicy: 'pairing' | 'open';
+  sandboxEnabled: boolean;
+  sandboxBackend: 'docker' | 'ssh' | 'openshell' | 'none';
+}
+
 interface OnboardConfig {
   llmProvider: 'openai' | 'gemini' | 'ollama';
   llmModel: string;
@@ -25,6 +33,13 @@ interface OnboardConfig {
   cloudApiKey?: string;
   cloudGatewayUrl?: string;
   disabledSkills: string[];
+  enableEvolution: boolean;
+  agents: AgentOnboardConfig[];
+  sandboxDefaultBackend: 'docker' | 'ssh' | 'openshell' | 'none';
+  enableSlack: boolean;
+  enableDiscord: boolean;
+  enableTelegram: boolean;
+  enableWebhook: boolean;
 }
 
 interface DiscoveredSkill {
@@ -187,6 +202,50 @@ function saveOnboardConfig(config: OnboardConfig): void {
   // Deploy mode
   v2.deploy = { mode: (config.executionMode === 'cloud' ? 'cloud' : 'local') as 'local' | 'cloud', root: null };
 
+  // Agents
+  if (config.agents.length > 0) {
+    v2.agents = {
+      default: config.agents[0]!.id,
+      entries: config.agents.map((a) => ({
+        id: a.id,
+        name: a.name,
+        dmPolicy: a.dmPolicy,
+        sandbox: a.sandboxEnabled
+          ? { enabled: true, backend: a.sandboxBackend }
+          : { enabled: false, backend: 'none' as const },
+      })),
+    };
+  }
+
+  // Sandbox
+  if (config.sandboxDefaultBackend !== 'none') {
+    v2.sandbox = {
+      defaultBackend: config.sandboxDefaultBackend,
+      docker: config.sandboxDefaultBackend === 'docker' ? {
+        image: 'node:20-alpine',
+        memory: '512m',
+        network: 'none',
+      } : undefined,
+    };
+  }
+
+  // Webhook config
+  if (config.enableWebhook) {
+    (v2.gateway as any).webhookPort = 3005;
+    (v2.gateway as any).webhookPath = '/webhook';
+  }
+
+  // Evolution
+  v2.evolution = {
+    enabled: config.enableEvolution,
+    autoApplySafe: true,
+    signalThreshold: 10,
+    feedbackThreshold: 3,
+    staleDays: 30,
+    maxHistorySnapshots: 20,
+    scheduleCron: '0 3 * * *',
+  };
+
   envLines.push('');
   saveEnvFile(envLines.join('\n') + '\n');
   saveConfigFile(v2);
@@ -197,7 +256,7 @@ function saveOnboardConfig(config: OnboardConfig): void {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 export async function runOnboarding(_rootDir?: string): Promise<void> {
-  const totalSteps = 6;
+  const totalSteps = 9;
 
   printBanner();
 
@@ -249,6 +308,13 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
     embedSameProvider: true,
     executionMode: 'local',
     disabledSkills: [],
+    enableEvolution: false,
+    agents: [{ id: 'default', name: 'Default Agent', dmPolicy: 'pairing', sandboxEnabled: false, sandboxBackend: 'none' }],
+    sandboxDefaultBackend: 'none',
+    enableSlack: false,
+    enableDiscord: false,
+    enableTelegram: false,
+    enableWebhook: false,
   };
 
   // ── Step 1: LLM Provider ────────────────────────────────────────────────
@@ -454,9 +520,136 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
     // Collected credentials will be saved to .env at the end
   }
 
-  // ── Step 6: Review & Save ──────────────────────────────────────────────
+  // ── Step 5.5: Agents ────────────────────────────────────────────────────
+  printStep(6, totalSteps, 'Agents (Multi-Agent Setup)');
 
-  printStep(6, totalSteps, 'Review & Save');
+  const multiAgentEnabled = await confirm({
+    message: 'Enable multiple isolated agents?\n' +
+      chalk.gray('  Each agent has its own workspace, skills, and configuration.\n') +
+      chalk.gray('  You can route different channels to different agents.'),
+    default: false,
+  });
+
+  if (multiAgentEnabled) {
+    const agentCount = Number(await input({
+      message: 'How many agents do you want to create?',
+      default: '2',
+      validate: (v) => {
+        const n = Number(v);
+        return n >= 1 && n <= 10 ? true : 'Enter a number between 1 and 10';
+      },
+    }));
+
+    config.agents = [];
+    for (let i = 0; i < agentCount; i++) {
+      const agentId = await input({
+        message: `Agent ${i + 1} ID (lowercase, no spaces):`,
+        default: i === 0 ? 'default' : `agent-${i + 1}`,
+      });
+      const agentName = await input({
+        message: `Agent ${i + 1} display name:`,
+        default: agentId,
+      });
+      const dmPolicy = await select({
+        message: `Agent "${agentName}" DM security policy:`,
+        choices: [
+          { value: 'pairing' as const, name: '🔒  Pairing — unknown senders must pair first', description: 'Secure for private bots' },
+          { value: 'open' as const, name: '🔓  Open — accept all DMs', description: 'For public/community bots' },
+        ],
+      });
+      const sandboxEnabled = await confirm({
+        message: `Enable sandbox for agent "${agentName}"?`,
+        default: false,
+      });
+      const sandboxBackend = sandboxEnabled ? await select({
+        message: 'Sandbox backend:',
+        choices: [
+          { value: 'docker' as const, name: '🐳  Docker' },
+          { value: 'ssh' as const, name: '🔑  SSH (remote)' },
+          { value: 'openshell' as const, name: '💻  OpenShell (local)' },
+        ],
+      }) : 'none' as const;
+
+      config.agents.push({ id: agentId, name: agentName, dmPolicy, sandboxEnabled, sandboxBackend });
+    }
+
+    console.log(chalk.green(`\n  ✓ Created ${config.agents.length} agent(s).`));
+  } else {
+    console.log(chalk.gray('\n  Single default agent configured. You can add agents later with: ') + chalk.cyan('octopus agent create <name>'));
+  }
+
+  // ── Step 5.6: Sandbox ────────────────────────────────────────────────────
+  printStep(7, totalSteps, 'Sandbox (Skill Isolation)');
+
+  const sandboxEnabled = await confirm({
+    message: 'Enable sandbox execution for skills?\n' +
+      chalk.gray('  Sandboxed skills run in isolated containers or remote hosts.\n') +
+      chalk.gray('  Recommended for untrusted or resource-heavy skills.'),
+    default: false,
+  });
+
+  if (sandboxEnabled) {
+    config.sandboxDefaultBackend = await select({
+      message: 'Default sandbox backend:',
+      choices: [
+        { value: 'docker' as const, name: '🐳  Docker — isolated containers', description: 'Requires Docker daemon' },
+        { value: 'ssh' as const, name: '🔑  SSH — remote host execution', description: 'Requires SSH access to a remote host' },
+        { value: 'openshell' as const, name: '💻  OpenShell — local pass-through', description: 'No real isolation' },
+      ],
+    });
+
+    if (config.sandboxDefaultBackend === 'docker') {
+      console.log(chalk.gray('  Docker sandbox configured with image: node:20-alpine'));
+    } else if (config.sandboxDefaultBackend === 'ssh') {
+      console.log(chalk.yellow('  ⚠  Remember to configure ssh.host and ssh.user in ~/.agentoctopus/octopus.json'));
+    }
+  }
+
+  // ── Step 5.7: Channels ────────────────────────────────────────────────────
+  printStep(8, totalSteps, 'Channels (IM & Web)');
+
+  config.enableSlack = await confirm({
+    message: 'Enable Slack bot? (requires SLACK_BOT_TOKEN in .env)',
+    default: false,
+  });
+  config.enableDiscord = await confirm({
+    message: 'Enable Discord bot? (requires DISCORD_TOKEN in .env)',
+    default: false,
+  });
+  config.enableTelegram = await confirm({
+    message: 'Enable Telegram bot? (requires TELEGRAM_BOT_TOKEN in .env)',
+    default: false,
+  });
+  config.enableWebhook = await confirm({
+    message: 'Enable HTTP Webhook channel?',
+    default: false,
+  });
+
+  if (config.enableSlack || config.enableDiscord || config.enableTelegram || config.enableWebhook) {
+    console.log(chalk.green('\n  ✓ Channels configured.'));
+    console.log(chalk.gray('    Add bot tokens to ~/.agentoctopus/.env'));
+  }
+
+  // ── Step 5.8: Evolution ─────────────────────────────────────────────────
+  printStep(9, totalSteps, 'Skill Evolution');
+
+  config.enableEvolution = await confirm({
+    message: 'Enable AI-powered skill evolution?\n' +
+      chalk.gray('  When enabled, AI monitors skill performance and auto-improves underperforming skills.\n') +
+      chalk.gray('  Safe changes are applied automatically; risky changes require your approval.'),
+    default: true,
+  });
+
+  if (config.enableEvolution) {
+    console.log(chalk.green('\n  ✓ Evolution enabled.'));
+    console.log(chalk.gray('    Review pending changes anytime with: ') + chalk.cyan('octopus evolve --review'));
+  } else {
+    console.log(chalk.gray('\n  Evolution disabled. You can enable it later in ~/.agentoctopus/octopus.json'));
+  }
+
+  // ── Step 7: Review & Save ──────────────────────────────────────────────
+
+  printStep(7, totalSteps, 'Review & Save');
 
   console.log(chalk.white.bold('  Configuration Summary:'));
   console.log('');
@@ -474,6 +667,26 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
       console.log(`  ${chalk.gray('Disabled:')}         ${chalk.yellow(config.disabledSkills.join(', '))}`);
     }
   }
+
+  console.log(`  ${chalk.gray('Agents:')}          ${chalk.cyan(config.agents.length)}`);
+  for (const agent of config.agents) {
+    const sb = agent.sandboxEnabled ? ` [sandbox:${agent.sandboxBackend}]` : '';
+    console.log(`    ${chalk.cyan('•')} ${agent.name}${chalk.gray(` (${agent.id}, dm:${agent.dmPolicy})${sb}`)}`);
+  }
+
+  if (config.sandboxDefaultBackend !== 'none') {
+    console.log(`  ${chalk.gray('Sandbox:')}         ${chalk.cyan(config.sandboxDefaultBackend)}`);
+  }
+
+  const channels: string[] = [];
+  if (config.enableSlack) channels.push('Slack');
+  if (config.enableDiscord) channels.push('Discord');
+  if (config.enableTelegram) channels.push('Telegram');
+  if (config.enableWebhook) channels.push('Webhook');
+  channels.push('WebChat');
+  console.log(`  ${chalk.gray('Channels:')}        ${chalk.cyan(channels.join(', '))}`);
+
+  console.log(`  ${chalk.gray('Evolution:')}       ${config.enableEvolution ? chalk.green('enabled') : chalk.gray('disabled')}`);
 
   console.log('');
 

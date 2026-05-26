@@ -26,7 +26,7 @@ tags:
 ---
 ```
 
-Optional eligibility fields (declared declaratively, no router code changes needed):
+Optional fields:
 
 ```yaml
 os: [darwin, linux]
@@ -34,6 +34,25 @@ requires:
   bins: [curl]
   anyBins: [python3, python]
   env: [MY_API_KEY]
+
+# Sandbox isolation (optional)
+sandbox:
+  backend: docker
+  image: python:3.11-alpine
+  memory: 256m
+
+# Skill composition (optional)
+adapter: composed
+compose:
+  steps:
+    - skill: web-search
+      inputMapping:
+        query: "{{query}}"
+      outputAs: search_results
+    - skill: summarize
+      inputMapping:
+        text: search_results
+---
 ```
 
 ## Checklist

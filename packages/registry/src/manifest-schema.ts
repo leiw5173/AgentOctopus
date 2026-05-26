@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const AuthSchema = z.enum(['none', 'api_key', 'oauth', 'bearer']);
-export const AdapterSchema = z.enum(['http', 'mcp', 'subprocess', 'openai']);
+export const AdapterSchema = z.enum(['http', 'mcp', 'subprocess', 'openai', 'composed']);
 export const HostingSchema = z.enum(['cloud', 'local', 'both']);
 
 const CredentialSchema = z.object({
@@ -19,8 +19,8 @@ export const SkillManifestSchema = z.object({
   adapter: AdapterSchema.default('http'),
   hosting: HostingSchema.default('cloud'),
   auth: AuthSchema.default('none'),
-  input_schema: z.record(z.string()).optional(),
-  output_schema: z.record(z.string()).optional(),
+  input_schema: z.record(z.string(), z.string()).optional(),
+  output_schema: z.record(z.string(), z.string()).optional(),
   rating: z.number().min(0).max(5).default(3.0),
   invocations: z.number().int().min(0).default(0),
   enabled: z.boolean().default(true),
@@ -32,6 +32,22 @@ export const SkillManifestSchema = z.object({
   // optional LLM-based skill (no endpoint, uses system LLM)
   llm_powered: z.boolean().default(false),
   credentials: z.array(CredentialSchema).optional(),
+  // Sandbox configuration for isolated execution
+  sandbox: z.object({
+    backend: z.enum(['docker', 'ssh', 'openshell', 'none']).optional(),
+    image: z.string().optional(),
+    memory: z.string().optional(),
+    timeout: z.number().int().optional(),
+  }).optional(),
+  // Composition: skill chaining DAG
+  compose: z.object({
+    steps: z.array(z.object({
+      skill: z.string(),
+      inputMapping: z.record(z.string(), z.string()).optional(),
+      outputAs: z.string().optional(),
+      condition: z.string().optional(),
+    })),
+  }).optional(),
   // OpenClaw-specific metadata — used by the executor's env-var guard
   metadata: z
     .object({

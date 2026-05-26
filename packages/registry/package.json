@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/registry",
-  "version": "0.5.18",
+  "version": "0.7.0",
   "description": "AgentOctopus skill manifest loader and rating store",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,13 +18,13 @@
   },
   "dependencies": {
     "@agentoctopus/skills": "workspace:*",
-    "zod": "^3.22.0",
+    "zod": "^4.4.3",
     "gray-matter": "^4.0.3",
     "glob": "^13.0.6"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "vitest": "^1.5.0"
   },
   "publishConfig": {

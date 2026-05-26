@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/gateway",
-  "version": "0.5.18",
+  "version": "0.7.0",
   "description": "AgentOctopus gateways: Slack, Discord, Telegram bots and agent-to-agent HTTP protocol",
   "type": "module",
   "main": "./dist/index.js",
@@ -29,7 +29,7 @@
     "@agentoctopus/registry": "workspace:*",
     "@slack/bolt": "^3.19.0",
     "discord.js": "^14.15.0",
-    "dotenv": "^16.4.0",
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "telegraf": "^4.16.3",
     "uuid": "^14.0.0"
@@ -39,7 +39,7 @@
     "@types/node": "^25.6.0",
     "@types/uuid": "^10.0.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "vitest": "^1.5.0"
   },
   "publishConfig": {

@@ -15,12 +15,17 @@
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean"
   },
+  "pnpm": {
+    "patchedDependencies": {
+      "eslint-plugin-react@7.37.5": "patches/eslint-plugin-react@7.37.5.patch"
+    }
+  },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
     "@types/node": "^25.6.0",
     "concurrently": "^9.2.1",
     "tsx": "^4.7.0",
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "vitest": "^1.5.0"
   },
   "license": "Apache-2.0"
