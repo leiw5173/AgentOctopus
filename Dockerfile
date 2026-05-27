@@ -8,6 +8,7 @@ RUN corepack enable
 
 # Copy workspace configuration first for layer caching
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY patches/ patches/
 COPY packages/registry/package.json packages/registry/
 COPY packages/adapters/package.json packages/adapters/
 COPY packages/core/package.json packages/core/

@@ -46,13 +46,17 @@ Penalties:
 
 ### 5. Keyword boost
 
-Skills whose names match query tokens get boosted into the candidate set even if cosine similarity missed them. Up to 5 name-matched skills are added.
+Skills whose names match query tokens get boosted into the candidate set even if cosine similarity missed them. Up to 5 name-matched skills are added. **Exact skill name matches outrank compound name matches** — a query for "weather" prefers the `weather` skill over `weather-dashboard` or `weather-alerts`.
 
-### 6. LLM re-rank
+### 6. Session context
+
+When a query includes a `sessionId`, the router loads the previous turn's skill and applies a **prevSkill boost** to encourage follow-up queries to stay in the same domain. The reranker also receives conversation history context, enabling accurate routing for follow-ups like "how about London?" after an initial weather query.
+
+### 7. LLM re-rank
 
 Top candidates are sent to the LLM with a prompt that includes "none" as a valid answer. If "none" is returned or re-rank fails, `route()` returns an empty array.
 
-### 7. Fallback
+### 8. Fallback
 
 When `route()` returns `[]`, callers (web API, agent-protocol, IM bots) fall back to answering directly with the chat LLM.
 

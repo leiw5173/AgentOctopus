@@ -232,7 +232,7 @@ describe('installFromIndex', () => {
     expect(fs.existsSync(path.join(skillDir, 'SKILL.md'))).toBe(true);
     expect(fs.existsSync(path.join(skillDir, '_meta.json'))).toBe(true);
     expect(fs.existsSync(path.join(skillDir, 'scripts', 'invoke.js'))).toBe(false);
-    expect(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8')).toBe(entry.skillMd);
+    expect(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8')).toBe('---\nversion: 1.0.0\nname: test-skill\n---\n\n# Test');
     expect(fs.readFileSync(path.join(skillDir, '_meta.json'), 'utf8')).toBe(entry.metaJson);
   });
 

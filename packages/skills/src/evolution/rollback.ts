@@ -1,21 +1,20 @@
 import fs from 'fs';
 import path from 'path';
 
+// Monotonic counter guarantees correct sort order even when multiple snapshots
+// are created within the same millisecond.
+let globalSeq = 0;
+
 export function shadowCopy(skillFilePath: string, evolutionDir: string, maxHistorySnapshots: number): void {
   const historyDir = path.join(evolutionDir, 'history');
   fs.mkdirSync(historyDir, { recursive: true });
 
   if (!fs.existsSync(skillFilePath)) return;
 
-  // Use timestamp + monotonic sequence so filenames are unique and sort chronologically.
-  // Format: YYYY-MM-DDTHH-MM-SS-mmm-NNNN.md (mmm = ms, NNNN = zero-padded sequence within this ms)
-  const ts = new Date().toISOString().replace(/[:]/g, '-').replace('.', '-').replace(/Z$/, '');
-  let snapshotPath = path.join(historyDir, `${ts}-0000.md`);
-  let seq = 0;
-  while (fs.existsSync(snapshotPath)) {
-    seq++;
-    snapshotPath = path.join(historyDir, `${ts}-${String(seq).padStart(4, '0')}.md`);
-  }
+  // Use a zero-padded global sequence number so filenames always sort in
+  // creation order, regardless of clock resolution or millisecond collisions.
+  globalSeq++;
+  const snapshotPath = path.join(historyDir, `${String(globalSeq).padStart(8, '0')}.md`);
   fs.copyFileSync(skillFilePath, snapshotPath);
 
   // Prune old snapshots (oldest first)

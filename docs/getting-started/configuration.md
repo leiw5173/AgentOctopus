@@ -132,6 +132,41 @@ Optional — omit for LLM-only routing (all eligible skills go directly to LLM r
 | `rating.feedbackSharing` | boolean | `true` | Enable feedback sharing |
 | `rating.gistId` | string \| null | `null` | GitHub Gist ID for rating sync |
 
+### Multi-agent config
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `agents.default` | string | `"default"` | Default agent ID for unrouted requests |
+| `agents.entries[].id` | string | (required) | Unique agent identifier |
+| `agents.entries[].name` | string | same as `id` | Human-readable name |
+| `agents.entries[].model` | object | (inherited) | Per-agent LLM config override |
+| `agents.entries[].workspace` | string | auto | Agent workspace directory |
+| `agents.entries[].dmPolicy` | `"pairing" \| "open"` | `"pairing"` | DM security policy |
+| `agents.entries[].sandbox.enabled` | boolean | `false` | Enable sandbox for this agent |
+| `agents.entries[].sandbox.backend` | `"docker" \| "ssh" \| "openshell" \| "none"` | `"none"` | Sandbox backend |
+
+### Sandbox (global defaults)
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `sandbox.defaultBackend` | `"docker" \| "ssh" \| "openshell" \| "none"` | `"none"` | Default sandbox backend |
+| `sandbox.docker.image` | string | `"node:20-alpine"` | Default Docker image |
+| `sandbox.docker.memory` | string | `"512m"` | Memory limit |
+| `sandbox.docker.network` | `"bridge" \| "none" \| "host"` | `"none"` | Container network mode |
+| `sandbox.ssh.host` | string | — | SSH remote host |
+| `sandbox.ssh.user` | string | — | SSH remote user |
+| `sandbox.ssh.keyPath` | string | — | SSH private key path |
+
+### Canvas & Companion (future)
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `canvas.enabled` | boolean | `false` | Enable Live Canvas / A2UI |
+| `canvas.port` | number | `3003` | Canvas WebSocket port |
+| `companion.enabled` | boolean | `false` | Enable companion app protocol |
+| `companion.port` | number | `3004` | Companion WebSocket port |
+| `companion.heartbeatIntervalMs` | number | `30000` | Companion heartbeat interval |
+
 ### IM bot ports
 
 | Field | Type | Default | Description |

@@ -279,6 +279,28 @@ export async function installSkill(
 
   extractZip(zipBuffer, skillDir);
 
+  // Sync skillMd version with actual installed version to avoid loop updates on registry-side mismatch
+  const skillMdPath = path.join(skillDir, 'SKILL.md');
+  if (fs.existsSync(skillMdPath)) {
+    try {
+      let content = fs.readFileSync(skillMdPath, 'utf8');
+      const frontmatterMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (frontmatterMatch) {
+        const frontmatter = frontmatterMatch[1];
+        const hasCarriageReturn = frontmatterMatch[0].includes('\r\n');
+        const newline = hasCarriageReturn ? '\r\n' : '\n';
+        if (frontmatter.match(/^version:\s*/m)) {
+          content = content.replace(/^version:\s*['"]?([^'"\r\n]+)['"]?/m, `version: ${version}`);
+        } else {
+          content = content.replace(/^---\r?\n/, `---${newline}version: ${version}${newline}`);
+        }
+        fs.writeFileSync(skillMdPath, content, 'utf8');
+      }
+    } catch {
+      // non-fatal
+    }
+  }
+
   // 5. Write origin metadata
   const originFile = path.join(skillDir, '.clawhub-origin.json');
   fs.writeFileSync(
@@ -539,6 +561,8 @@ export function installFromIndex(
     if (entry.files) {
       for (const [relPath, content] of Object.entries(entry.files)) {
         if (typeof content !== 'string') continue;
+        const normPath = relPath.replace(/\\/g, '/').toLowerCase();
+        if (normPath === 'skill.md' || normPath === '_meta.json') continue;
         const filePath = path.join(skillDir, relPath);
         if (!fs.existsSync(filePath)) {
           fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -550,7 +574,19 @@ export function installFromIndex(
 
     // Also write SKILL.md and _meta.json if they don't exist
     if (!fs.existsSync(path.join(skillDir, 'SKILL.md')) && entry.skillMd) {
-      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
+      let skillMd = entry.skillMd;
+      const frontmatterMatch = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (frontmatterMatch) {
+        const frontmatter = frontmatterMatch[1];
+        const hasCarriageReturn = frontmatterMatch[0].includes('\r\n');
+        const newline = hasCarriageReturn ? '\r\n' : '\n';
+        if (frontmatter.match(/^version:\s*/m)) {
+          skillMd = skillMd.replace(/^version:\s*['"]?([^'"\r\n]+)['"]?/m, `version: ${entry.version}`);
+        } else {
+          skillMd = skillMd.replace(/^---\r?\n/, `---${newline}version: ${entry.version}${newline}`);
+        }
+      }
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillMd, 'utf8');
     }
     if (!fs.existsSync(path.join(skillDir, '_meta.json')) && entry.metaJson) {
       fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson, 'utf8');
@@ -567,7 +603,20 @@ export function installFromIndex(
 
   fs.mkdirSync(skillDir, { recursive: true });
   if (!entry.skillMd) throw new Error(`Skill "${entry.slug}" has no SKILL.md content in the index`);
-  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), entry.skillMd, 'utf8');
+  
+  let skillMd = entry.skillMd;
+  const frontmatterMatch = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (frontmatterMatch) {
+    const frontmatter = frontmatterMatch[1];
+    const hasCarriageReturn = frontmatterMatch[0].includes('\r\n');
+    const newline = hasCarriageReturn ? '\r\n' : '\n';
+    if (frontmatter.match(/^version:\s*/m)) {
+      skillMd = skillMd.replace(/^version:\s*['"]?([^'"\r\n]+)['"]?/m, `version: ${entry.version}`);
+    } else {
+      skillMd = skillMd.replace(/^---\r?\n/, `---${newline}version: ${entry.version}${newline}`);
+    }
+  }
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillMd, 'utf8');
   fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson ?? '', 'utf8');
 
   // Write all scripts and make them executable
@@ -584,6 +633,8 @@ export function installFromIndex(
   if (entry.files) {
     for (const [relPath, content] of Object.entries(entry.files)) {
       if (typeof content !== 'string') continue;
+      const normPath = relPath.replace(/\\/g, '/').toLowerCase();
+      if (normPath === 'skill.md' || normPath === '_meta.json') continue;
       const filePath = path.join(skillDir, relPath);
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, content, 'utf8');

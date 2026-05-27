@@ -1,14 +1,29 @@
 /** CJK character range (Chinese, Japanese, Korean) */
 export const CJK_RANGE = /[　-鿿가-힯豈-﫿]/;
 
+/** English stop words that should not be used as query tokens */
+const STOP_WORDS = new Set([
+  'what', 'when', 'where', 'which', 'who', 'whom', 'why', 'how',
+  'the', 'this', 'that', 'these', 'those',
+  'and', 'but', 'nor', 'for', 'yet', 'with',
+  'are', 'was', 'were', 'been', 'being',
+  'have', 'has', 'had', 'does', 'did',
+  'will', 'would', 'shall', 'should', 'may', 'might', 'must', 'can', 'could',
+  'not', 'than', 'then', 'also', 'just', 'only', 'very',
+  'from', 'into', 'onto', 'upon', 'within',
+  'its', 'hers', 'his', 'mine', 'ours', 'yours', 'theirs',
+]);
+
 /**
- * Extract meaningful query tokens. For Latin text, splits on word boundaries
- * and filters short words (3+ chars). For CJK text, keeps individual characters.
+ * Extract meaningful query tokens. For Latin text, splits on word boundaries,
+ * filters stop words, and keeps words with 3+ chars. For CJK text, keeps
+ * individual characters.
  */
 export function extractQueryTokens(query: string): string[] {
   const lower = query.toLowerCase();
   const tokens: string[] = [];
-  const latinWords = lower.match(/[a-z]{3,}/g) ?? [];
+  const latinWords = (lower.match(/[a-z]{3,}/g) ?? [])
+    .filter(w => !STOP_WORDS.has(w));
   tokens.push(...latinWords);
   const cjkChars = lower.match(/[　-鿿가-힯豈-﫿]/g) ?? [];
   tokens.push(...cjkChars);
@@ -37,12 +52,17 @@ export function scoreKeywordMatch(tokens: string[], skill: SearchableSkill): num
   let score = 0;
   for (const token of tokens) {
     if (CJK_RANGE.test(token)) {
-      if (name.includes(token)) score += 2;
+      if (name === token) score += 4;
+      else if (name.includes(token)) score += 2;
       else if (desc.includes(token)) score += 1;
       else if (tags.includes(token)) score += 1;
     } else {
-      const pattern = new RegExp(`\\b${token}`, 'i');
-      if (pattern.test(name)) score += 2;
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const prefixPattern = new RegExp(`^${escaped}\\b`, 'i');
+      const pattern = new RegExp(`\\b${escaped}`, 'i');
+      if (name === token) score += 4;
+      else if (prefixPattern.test(name)) score += 3;
+      else if (pattern.test(name)) score += 2;
       else if (pattern.test(desc)) score += 1;
       else if (pattern.test(tags)) score += 1;
     }

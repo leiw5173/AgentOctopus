@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { glob } from 'glob';
-import { loadSkillsFromDir, type SkillEntry, extractQueryTokens, scoreKeywordMatch } from '@agentoctopus/skills';
+import { loadSkillsFromDir, type SkillEntry, type SkillSource, extractQueryTokens, scoreKeywordMatch } from '@agentoctopus/skills';
 import { type SkillManifest, type SkillCredential } from './manifest-schema.js';
 import { RatingStore } from './rating.js';
 import type { TaskType } from './rating-dimensions.js';
@@ -17,10 +17,56 @@ function skillEntryToLoadedSkill(
   ratingStore: RatingStore,
 ): LoadedSkill {
   const fm = entry.frontmatter;
+  // Map top-level `env` from community SKILL.md frontmatter to metadata.openclaw.env
+  // so that getRequiredEnvVars() can detect them during the pre-flight credential check.
+  // Community skills use `env: [- ZHIPU_API_KEY]` instead of `credentials:` or `metadata.openclaw.env:`.
+  // Also handles `metadata.clawdbot.requires.env` (legacy format).
+  const flatEnv = fm.env as string[] | undefined;
+  const existingMetadata = fm.metadata as SkillManifest['metadata'] ?? {};
+  const existingOpenclaw = existingMetadata.openclaw ?? {};
+  const existingMetaEnv = existingOpenclaw.env;
+
+  // Collect env vars from all sources: frontmatter `env`, clawdbot.requires.env
+  const clawdbotEnv = (existingMetadata as Record<string, unknown>).clawdbot as Record<string, unknown> | undefined;
+  const clawdbotRequires = clawdbotEnv?.requires as Record<string, unknown> | undefined;
+  const clawdbotEnvVars = (clawdbotRequires?.env as string[] | undefined) ?? [];
+  const allFlatEnv = [...(flatEnv ?? []), ...clawdbotEnvVars.filter(e => !(flatEnv ?? []).includes(e as string))];
+
+  // Merge collected env vars into metadata.openclaw.env
+  let mergedEnv: string[] | undefined;
+  if (allFlatEnv.length > 0) {
+    if (Array.isArray(existingMetaEnv)) {
+      const combined = [...allFlatEnv, ...existingMetaEnv.filter(e => !allFlatEnv.includes(e as string))];
+      mergedEnv = combined;
+    } else if (existingMetaEnv && typeof existingMetaEnv === 'object') {
+      // Object format: merge flat keys into required array
+      const obj = existingMetaEnv as { required?: { name?: string; label?: string }[]; optional?: { name?: string; label?: string }[] };
+      const existingRequiredNames = (obj.required ?? []).map(e => e.name).filter(Boolean) as string[];
+      const additionalRequired = allFlatEnv.filter(k => !existingRequiredNames.includes(k)).map(k => ({ name: k }));
+      mergedEnv = undefined; // keep object format
+      const mergedObj = {
+        ...obj,
+        required: [...(obj.required ?? []), ...additionalRequired],
+      };
+      (existingOpenclaw as Record<string, unknown>).env = mergedObj;
+    } else {
+      mergedEnv = allFlatEnv;
+    }
+  }
+
+  if (mergedEnv) {
+    (existingOpenclaw as Record<string, unknown>).env = mergedEnv;
+  }
+
+  const metadata: SkillManifest['metadata'] = {
+    ...existingMetadata,
+    openclaw: existingOpenclaw,
+  };
+
   const manifest: SkillManifest = {
     name: entry.skill.name,
     description: entry.skill.description,
-    tags: Array.isArray(fm.tags) ? (fm.tags as string[]) : [],
+    tags: (entry.skill.tags?.length ?? 0) > 0 ? entry.skill.tags : (Array.isArray(fm.tags) ? (fm.tags as string[]) : []),
     version: entry.skill.version,
     adapter: (fm.adapter as SkillManifest['adapter']) ?? 'http',
     hosting: (fm.hosting as SkillManifest['hosting']) ?? 'cloud',
@@ -36,7 +82,9 @@ function skillEntryToLoadedSkill(
     tokenCostTarget: fm.tokenCostTarget as number | undefined,
     llm_powered: (fm.llm_powered as boolean) ?? false,
     credentials: fm.credentials as SkillCredential[] | undefined,
-    metadata: fm.metadata as SkillManifest['metadata'],
+    metadata,
+    sandbox: fm.sandbox as SkillManifest["sandbox"] ?? undefined,
+    compose: fm.compose as SkillManifest["compose"] ?? undefined,
   };
 
   // Merge persisted rating and invocation count over manifest defaults
@@ -52,6 +100,7 @@ function skillEntryToLoadedSkill(
     rating: manifest.rating,
     routingScore: ratingStore.getRoutingScore(manifest.name, manifest.taskType),
     negativeFeedbackCount: ratingStore.getOrCreate(manifest.name).recentFeedback.filter(f => !f.positive).length,
+    entry,
   };
 }
 
@@ -61,6 +110,58 @@ export interface LoadedSkill {
   rating: number;
   routingScore?: number;
   negativeFeedbackCount?: number;
+  /** Original SkillEntry parsed from @agentoctopus/skills — may be missing for cache-restored skills. */
+  entry?: SkillEntry;
+}
+
+/**
+ * Return the original SkillEntry for a LoadedSkill.
+ * If the skill was restored from cache (entry missing), build a minimal
+ * fallback from the manifest so downstream consumers never crash.
+ */
+export function getSkillEntry(skill: LoadedSkill): SkillEntry {
+  if (skill.entry) return skill.entry;
+
+  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
+  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
+
+  // Lazily read instructions from disk when the original SkillEntry is missing
+  // (e.g. skill was restored from cache). This prevents downstream consumers
+  // like SubprocessAdapter from failing to locate scripts.
+  let lazyInstructions = '';
+  try {
+    const skillMdPath = path.join(skill.dirPath, 'SKILL.md');
+    if (fs.existsSync(skillMdPath)) {
+      const raw = fs.readFileSync(skillMdPath, 'utf-8');
+      const match = raw.match(/^---[\s\S]*?---\s*([\s\S]*)$/);
+      lazyInstructions = (match ? match[1] : raw).trim();
+    }
+  } catch {
+    // Keep empty on read failure — downstream already handles missing instructions
+  }
+
+  return {
+    skill: {
+      name: skill.manifest.name,
+      description: skill.manifest.description,
+      version: skill.manifest.version,
+      dirPath: skill.dirPath,
+      source: ((rawMeta.source as string) ?? (openclaw ? 'clawhub' : 'user')) as SkillSource,
+      tags: skill.manifest.tags,
+      instructions: lazyInstructions,
+      frontmatter: {},
+    },
+    frontmatter: skill.manifest.metadata ?? {},
+    metadata: {
+      skillKey: (openclaw.skillKey as string) ?? skill.manifest.name,
+      always: (rawMeta.always as boolean) ?? undefined,
+      os: (rawMeta.os as string[]) ?? undefined,
+      requires: (rawMeta.requires as any) ?? undefined,
+      primaryEnv: (rawMeta.primaryEnv as string) ?? (openclaw.primaryEnv as string) ?? undefined,
+      install: (rawMeta.install as any[]) ?? (openclaw.install as any[]) ?? undefined,
+    },
+    invocation: { userInvocable: true, disableModelInvocation: false },
+  };
 }
 
 export class SkillRegistry {
@@ -129,6 +230,7 @@ export class SkillRegistry {
                 dirPath: s.dirPath,
                 rating: manifest.rating,
                 routingScore: this.ratingStore.getRoutingScore(manifest.name, manifest.taskType),
+                entry: s.entry,
               });
               restored++;
             } catch { /* skip corrupt entries */ }
@@ -163,6 +265,7 @@ export class SkillRegistry {
       const serialized = Array.from(this.skills.values()).map(s => ({
         manifest: s.manifest,
         dirPath: s.dirPath,
+        entry: s.entry,
       }));
       fs.writeFileSync(this.cachePath(), JSON.stringify({ hash, skills: serialized }));
     } catch { /* cache write failure is non-fatal */ }
