@@ -1,5 +1,27 @@
 # @agentoctopus/cli
 
+## 0.8.0
+
+### Patch Changes
+
+- bbad3b9: Bump TypeScript 5.9→6.0 and Zod 3→4 with required tsconfig and API fixes
+
+  - Add `"types": ["node"]` to root tsconfig.json (TS 6.0 no longer auto-includes @types/node)
+  - Migrate `z.record(V)` → `z.record(z.string(), V)` for Zod 4 compatibility
+
+- Updated dependencies [858f227]
+- Updated dependencies [858f227]
+- Updated dependencies [858f227]
+- Updated dependencies [858f227]
+- Updated dependencies [858f227]
+- Updated dependencies [bbad3b9]
+- Updated dependencies [858f227]
+- Updated dependencies [ac3a715]
+  - @agentoctopus/core@0.8.0
+  - @agentoctopus/skills@0.8.0
+  - @agentoctopus/gateway@0.8.0
+  - @agentoctopus/registry@0.8.0
+
 ## 0.7.0
 
 ### Minor Changes
