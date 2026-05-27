@@ -7,12 +7,12 @@ import os from 'os';
 import fs from 'fs';
 import readline from 'readline';
 
-import { SkillRegistry } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
+import { SkillRegistry, getRequiredEnvVars } from '@agentoctopus/registry';
+import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult, extractCredentialErrors, getInstallPref, saveInstallPref } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, fetchSkillMeta } from './clawhub.js';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
-import { loadConfig, getConfig, getEnvPath } from '@agentoctopus/core';
+import { loadConfig, getConfig, getEnvPath, getConfigPath } from '@agentoctopus/core';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
 import { connectOpenClaw } from './connect.js';
 import { checkPackageUpdates, displayUpdateTable, runGlobalInstall } from './update.js';
@@ -122,7 +122,13 @@ program
     const port = config.gateway.port;
 
     console.log(chalk.bold('\n🐙 Starting AgentOctopus gateway\n'));
-    console.log(chalk.gray(`  Agent gateway: http://localhost:${port}/agent/health`));
+    console.log(chalk.gray(`  Control Plane:   http://localhost:${port}/agent/health`));
+    console.log(chalk.gray(`  Agent Gateway:   http://localhost:${port}/agent/ask`));
+    console.log(chalk.gray(`  WebChat (WS):    ws://localhost:${(config as any).canvas?.port ?? 3006}`));
+    if (process.env.SLACK_BOT_TOKEN) console.log(chalk.gray('  Slack:           enabled'));
+    if (process.env.DISCORD_TOKEN) console.log(chalk.gray('  Discord:         enabled'));
+    if (process.env.TELEGRAM_BOT_TOKEN) console.log(chalk.gray('  Telegram:        enabled'));
+    if ((config as any).gateway?.webhookPort) console.log(chalk.gray(`  Webhook:         http://localhost:${(config as any).gateway.webhookPort}${(config as any).gateway.webhookPath ?? '/webhook'}`));
     console.log(chalk.gray('  Press Ctrl+C to stop\n'));
 
     try {
@@ -196,35 +202,39 @@ function resolveSkillsDir(configValue: string): string {
   return configValue;
 }
 
+async function listSkills() {
+  const spinner = ora('Loading registry...').start();
+  try {
+    const { registry } = await bootstrap();
+    const skills = registry.getAll();
+    spinner.stop();
+
+    console.log(chalk.bold('\n🐙 AgentOctopus — Available Skills\n'));
+
+    if (skills.length === 0) {
+      console.log(chalk.gray('  No skills found in registry.'));
+      return;
+    }
+
+    skills.sort((a, b) => b.rating - a.rating);
+
+    skills.forEach((s) => {
+      const { manifest, rating } = s;
+      const stars = '⭐'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
+      console.log(`  ${chalk.cyan.bold(manifest.name)} ${chalk.yellow(stars)} (${rating.toFixed(1)})`);
+      console.log(`  ${chalk.gray(manifest.description)}`);
+      console.log(`  Adapter: ${manifest.adapter} | Uses: ${manifest.invocations}\n`);
+    });
+  } catch (err) {
+    spinner.fail(`Failed to load registry: ${err}`);
+  }
+}
+
 program
   .command('list')
   .description('List all available skills')
   .action(async () => {
-    const spinner = ora('Loading registry...').start();
-    try {
-      const { registry } = await bootstrap();
-      const skills = registry.getAll();
-      spinner.stop();
-
-      console.log(chalk.bold('\n🐙 AgentOctopus — Available Skills\n'));
-
-      if (skills.length === 0) {
-        console.log(chalk.gray('  No skills found in registry.'));
-        return;
-      }
-
-      skills.sort((a, b) => b.rating - a.rating);
-
-      skills.forEach((s) => {
-        const { manifest, rating } = s;
-        const stars = '⭐'.repeat(Math.round(rating)) + '☆'.repeat(5 - Math.round(rating));
-        console.log(`  ${chalk.cyan.bold(manifest.name)} ${chalk.yellow(stars)} (${rating.toFixed(1)})`);
-        console.log(`  ${chalk.gray(manifest.description)}`);
-        console.log(`  Adapter: ${manifest.adapter} | Uses: ${manifest.invocations}\n`);
-      });
-    } catch (err) {
-      spinner.fail(`Failed to load registry: ${err}`);
-    }
+    await listSkills();
   });
 
 program
@@ -301,7 +311,7 @@ program
 
       spinner.start(`Executing ${skill.manifest.name}...`);
       try {
-        const result = await engine.executor.execute(skill, input, { debug: !!options.debug });
+        let result = await engine.executor.execute(skill, input, { debug: !!options.debug });
         const t3 = Date.now();
 
         if (options.debug) {
@@ -311,23 +321,77 @@ program
         }
 
         if ('type' in result && result.type === 'credential_missing') {
-          spinner.fail(`${result.skillName} requires unconfigured API keys`);
-          const guideSpinner = ora('Generating setup guide...').start();
-          const missingKeys = result.missing.map(v => v.key);
-          const guide = await engine.executor.generateCredentialGuide(
-            result.skillName,
-            skill.manifest.description,
-            missingKeys,
-          );
-          guideSpinner.stop();
+          spinner.fail(chalk.red(`Skill execution failed: missing credentials.`));
+          console.log(chalk.red(`\n✘ Skill "${result.skillName}" requires environment variables that are not set:\n`));
+          const homepage = skill.manifest.metadata?.openclaw?.homepage || skill.manifest.metadata?.homepage;
+          for (const v of result.missing) {
+            let hint = v.label || '';
+            if (!hint && homepage) {
+              hint = `get yours at ${homepage}`;
+            }
+            const hintStr = hint ? `  — ${hint}` : '';
+            console.log(`  ${chalk.bold(v.key)}${hintStr}`);
+          }
           console.log();
-          console.log(chalk.yellow(guide.split('\n').map(l => `  ${l}`).join('\n')));
-          console.log();
+          const primaryKey = result.missing[0]?.key || 'KEY';
+          console.log(chalk.cyan(`Run: octopus config set ${primaryKey} <your-value>\n`));
           failedResults.push({ authGuidance: undefined, credentialError: true });
           if (i < candidates.length - 1) {
             console.log(chalk.yellow(`↻ Trying next skill...\n`));
           }
           continue;
+        }
+
+        if ('type' in result && result.type === 'binary_installable') {
+          const biaResult = result as BinaryInstallableResult;
+          const missing = biaResult.missing as string[];
+          const allAlways = missing.every(b => getInstallPref(b) === 'always');
+          const anyNever = missing.some(b => getInstallPref(b) === 'never');
+          spinner.stop();
+
+          if (anyNever) {
+            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
+            continue;
+          }
+
+          let shouldInstall = allAlways;
+          let rememberPref: 'always' | 'never' | null = null;
+
+          if (!shouldInstall) {
+            console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+            const choice = await promptSelect('Install missing tools?', [
+              { label: 'Yes, install now', value: 'yes' },
+              { label: 'Yes, and always install automatically', value: 'always' },
+              { label: 'No, try another skill', value: 'no' },
+              { label: 'Never install automatically', value: 'never' },
+            ]);
+            if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
+            else if (choice === 'yes') { shouldInstall = true; }
+            else if (choice === 'never') { rememberPref = 'never'; }
+          }
+
+          if (rememberPref) saveInstallPref(missing, rememberPref);
+
+          if (!shouldInstall) {
+            if (i < candidates.length - 1) console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
+            continue;
+          }
+
+          spinner.start(`Installing ${missing.join(', ')}...`);
+          result = await engine.executor.execute(skill, input, { debug: !!options.debug, autoInstall: true });
+
+          if ('type' in result && result.type === 'binary_install_failed') {
+            const biafResult = result as BinaryInstallFailedResult;
+            spinner.fail(`Failed to install required tools for ${biafResult.skillName}`);
+            console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
+            (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
+            console.error();
+            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
+            continue;
+          }
+
+          spinner.start('Finalizing...');
         }
 
         if ('type' in result && result.type === 'binary_missing') {
@@ -406,24 +470,43 @@ program
           break;
         }
 
-        // Execution failed — show friendly, actionable error messages
-        const errMsg = execResult.adapterResult.error ?? 'Unknown error';
-        spinner.fail(`${skill.manifest.name} execution failed\n`);
-        if (/Permission denied/i.test(errMsg) && /scripts\//.test(errMsg)) {
-          // Script file missing execute bit
-          console.error(chalk.red('  Script is not executable.') + chalk.gray(' Fix with:'));
-          console.error(chalk.cyan(`  chmod +x ~/.agentoctopus/skills/${skill.manifest.name}/scripts/*`));
-        } else if (/uses local scripts/i.test(errMsg)) {
-          // http-adapter skill whose SKILL.md only describes local scripts
-          console.error(chalk.red('  Skill requires local scripts not installed on this machine.'));
-          console.error(chalk.yellow(`  To install: octopus add ${skill.manifest.name} --force`));
+        // Execution failed — check if the root cause is missing credentials
+        const requiredEnvVars = getRequiredEnvVars(skill.manifest);
+        const missingEnvVars = requiredEnvVars.filter(v => !process.env[v.key]);
+
+        if (missingEnvVars.length > 0) {
+          // The skill declared required env vars that aren't set — treat as credential_missing
+          // even though execution reached the adapter (e.g. missing script because skill wasn't fully installed)
+          spinner.fail(chalk.red(`${skill.manifest.name} failed: missing API key\n`));
+          const guideSpinner = ora('Generating setup guide...').start();
+          const guide = await engine.executor.generateCredentialGuide(
+            skill.manifest.name,
+            skill.manifest.description,
+            missingEnvVars.map(v => v.key),
+          );
+          guideSpinner.stop();
+          console.log(chalk.yellow(guide.split('\n').map(l => `  ${l}`).join('\n')));
+          console.log();
+          failedResults.push({ authGuidance: undefined, credentialError: true });
         } else {
-          console.error(chalk.red('  Error:'), errMsg.split('\n')[0]);
-          if (options.debug && errMsg.includes('\n')) {
-            console.error(chalk.gray(errMsg.split('\n').slice(1).join('\n')));
+          // Show friendly, actionable error messages
+          const errMsg = execResult.adapterResult.error ?? 'Unknown error';
+          if (/Permission denied/i.test(errMsg) && /scripts\//.test(errMsg)) {
+            // Script file missing execute bit
+            console.error(chalk.red('  Script is not executable.') + chalk.gray(' Fix with:'));
+            console.error(chalk.cyan(`  chmod +x ~/.agentoctopus/skills/${skill.manifest.name}/scripts/*`));
+          } else if (/uses local scripts/i.test(errMsg)) {
+            // http-adapter skill whose SKILL.md only describes local scripts
+            console.error(chalk.red('  Skill requires local scripts not installed on this machine.'));
+            console.error(chalk.yellow(`  To install: octopus add ${skill.manifest.name} --force`));
+          } else {
+            console.error(chalk.red('  Error:'), errMsg.split('\n')[0]);
+            if (options.debug && errMsg.includes('\n')) {
+              console.error(chalk.gray(errMsg.split('\n').slice(1).join('\n')));
+            }
           }
+          failedResults.push({ authGuidance: execResult.authGuidance, credentialError: false });
         }
-        failedResults.push({ authGuidance: execResult.authGuidance, credentialError: false });
         if (i < candidates.length - 1) {
           console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
         }
@@ -579,18 +662,58 @@ program
       const input = { query: pick.query, text: pick.query };
       const execSpinner = ora(`Executing ${pick.skill.manifest.name}...`).start();
       try {
-        const result = await executor.execute(pick.skill, input);
+        let result = await executor.execute(pick.skill, input);
         execSpinner.stop();
 
         if ('type' in result && result.type === 'credential_missing') {
-          console.log(chalk.red(`\n${pick.skill.manifest.name} requires unconfigured API keys.`));
-          const missingKeys = result.missing.map((v: { key: string }) => v.key);
-          const guide = await executor.generateCredentialGuide(
-            pick.skill.manifest.name,
-            pick.skill.manifest.description,
-            missingKeys,
-          );
-          console.log(chalk.yellow(guide.split('\n').map((l: string) => `  ${l}`).join('\n')));
+          console.log(chalk.red(`\n✘ Skill "${result.skillName}" requires environment variables that are not set:\n`));
+          const homepage = pick.skill.manifest.metadata?.openclaw?.homepage || pick.skill.manifest.metadata?.homepage;
+          for (const v of result.missing) {
+            let hint = v.label || '';
+            if (!hint && homepage) {
+              hint = `get yours at ${homepage}`;
+            }
+            const hintStr = hint ? `  — ${hint}` : '';
+            console.log(`  ${chalk.bold(v.key)}${hintStr}`);
+          }
+          console.log();
+          const primaryKey = result.missing[0]?.key || 'KEY';
+          console.log(chalk.cyan(`Run: octopus config set ${primaryKey} <your-value>\n`));
+        } else if ('type' in result && result.type === 'binary_installable') {
+          const biaResult = result as BinaryInstallableResult;
+          const missing = biaResult.missing as string[];
+          const allAlways = missing.every(b => getInstallPref(b) === 'always');
+          const anyNever = missing.some(b => getInstallPref(b) === 'never');
+
+          if (anyNever) {
+            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+          } else {
+            let shouldInstall = allAlways;
+            let rememberPref: 'always' | 'never' | null = null;
+            if (!shouldInstall) {
+              console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
+              const choice = await promptSelect('Install missing tools?', [
+                { label: 'Yes, install now', value: 'yes' },
+                { label: 'Yes, and always install automatically', value: 'always' },
+                { label: 'No', value: 'no' },
+                { label: 'Never install automatically', value: 'never' },
+              ]);
+              if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
+              else if (choice === 'yes') { shouldInstall = true; }
+              else if (choice === 'never') { rememberPref = 'never'; }
+            }
+            if (rememberPref) saveInstallPref(missing, rememberPref);
+            if (shouldInstall) {
+              const installSpinner = ora(`Installing ${missing.join(', ')}...`).start();
+              result = await executor.execute(pick.skill, input, { autoInstall: true });
+              installSpinner.stop();
+              if ('type' in result && result.type === 'binary_install_failed') {
+                const biafResult = result as BinaryInstallFailedResult;
+                console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
+                (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
+              }
+            }
+          }
         } else if ('type' in result && result.type === 'binary_missing') {
           const tools = (result.missing as string[]).map((b: string) => `  • ${b}`).join('\n');
           console.log(chalk.red(`\n${pick.skill.manifest.name} requires missing tools:`));
@@ -861,7 +984,7 @@ skillCmd
   .command('list')
   .description('List all available skills')
   .action(async () => {
-    await program.parseAsync(['', '', 'list'], { from: 'user' });
+    await listSkills();
   });
 
 skillCmd
@@ -963,6 +1086,27 @@ configCmd
     fs.writeFileSync(envPath, newLines.join('\n'), 'utf8');
     // Export into the current process so follow-up commands in the same session see it
     process.env[key] = value;
+
+    // ALSO WRITE TO octopus.json!
+    try {
+      const configPath = getConfigPath();
+      let parsed: any = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        } catch {
+          // ignore
+        }
+      }
+      parsed.version = parsed.version || 2;
+      parsed.credentials = parsed.credentials || {};
+      parsed.credentials[key] = value;
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+    } catch (err) {
+      console.warn(`[Config CLI] Failed to write key to octopus.json: ${err}`);
+    }
+
     console.log(chalk.green(`  ✔ ${key} saved to ${envPath}`));
   });
 
@@ -988,6 +1132,27 @@ configCmd
     console.log(`  ${chalk.cyan('Gateway')}:   port ${c.gateway.port}`);
     console.log(`  ${chalk.cyan('Registry')}:  ${c.registry.skillsDir}`);
     console.log(`  ${chalk.cyan('Timing')}:    ${c.execution.timing ? 'on' : 'off'}`);
+
+    if (c.credentials && Object.keys(c.credentials).length > 0) {
+      console.log(`\n  ${chalk.cyan('Credentials')}:`);
+      for (const [key, value] of Object.entries(c.credentials)) {
+        console.log(`    ${chalk.cyan(key)}:      ${mask(value)}`);
+      }
+    }
+
+    if (c.agents.entries && c.agents.entries.length > 0) {
+      console.log(`\n  ${chalk.cyan('Agents')}:`);
+      for (const agent of c.agents.entries) {
+        const isDefault = agent.id === c.agents.default;
+        const sb = agent.sandbox?.enabled ? chalk.gray(` [${agent.sandbox.backend}]`) : '';
+        console.log(`    ${isDefault ? chalk.yellow('★') : ' '} ${chalk.cyan(agent.id)} — ${agent.name}${sb} ${chalk.gray(`(dm:${agent.dmPolicy})`)}`);
+      }
+    }
+
+    if (c.sandbox.defaultBackend !== 'none') {
+      console.log(`\n  ${chalk.cyan('Sandbox')}:   ${c.sandbox.defaultBackend}`);
+    }
+
     console.log();
   });
 
@@ -1025,6 +1190,140 @@ program
       console.error(chalk.red(`Evolve failed: ${err}`));
       process.exitCode = 1;
     }
+  });
+
+// ── octopus agent <subcommand> ─────────────────────────────────────────────
+const agentCmd = program
+  .command('agent')
+  .description('Manage agents — create, list, switch, remove');
+
+agentCmd
+  .command('list')
+  .description('List all configured agents')
+  .action(async () => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    console.log(chalk.bold('\n🐙 AgentOctopus — Agents\n'));
+
+    if (!c.agents.entries || c.agents.entries.length === 0) {
+      console.log(chalk.gray('  No agents configured.'));
+      return;
+    }
+
+    const defaultId = c.agents.default;
+    for (const agent of c.agents.entries) {
+      const isDefault = agent.id === defaultId;
+      const sb = agent.sandbox?.enabled ? chalk.gray(` [sandbox:${agent.sandbox.backend}]`) : '';
+      const dm = chalk.gray(` dm:${agent.dmPolicy}`);
+      const star = isDefault ? chalk.yellow(' ★ default') : '';
+      console.log(`  ${chalk.cyan.bold(agent.id)}${star}`);
+      console.log(`    ${chalk.gray('Name:')} ${agent.name}${dm}${sb}`);
+      if (agent.workspace) {
+        console.log(`    ${chalk.gray('Workspace:')} ${agent.workspace}`);
+      }
+      console.log();
+    }
+  });
+
+agentCmd
+  .command('create <id>')
+  .description('Create a new agent')
+  .option('--name <name>', 'Agent display name')
+  .option('--dm-policy <policy>', 'DM policy (pairing or open)', 'pairing')
+  .option('--sandbox <backend>', 'Sandbox backend (docker, ssh, openshell, none)', 'none')
+  .option('--model <model>', 'Per-agent LLM model override')
+  .action(async (id: string, options: { name?: string; dmPolicy?: string; sandbox?: string; model?: string }) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    const existing = c.agents.entries?.find((a) => a.id === id);
+    if (existing) {
+      console.log(chalk.red(`\n  Agent "${id}" already exists.`));
+      return;
+    }
+
+    const newAgent = {
+      id,
+      name: options.name || id,
+      dmPolicy: (options.dmPolicy === 'open' ? 'open' : 'pairing') as 'pairing' | 'open',
+      sandbox: options.sandbox && options.sandbox !== 'none'
+        ? { enabled: true, backend: options.sandbox as any }
+        : { enabled: false, backend: 'none' as const },
+      model: options.model ? { model: options.model } : undefined,
+    };
+
+    const entries = [...(c.agents.entries || []), newAgent];
+    const updatedConfig = {
+      ...c,
+      agents: { ...c.agents, entries },
+    };
+
+    // Save back to config file
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents = updatedConfig.agents;
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Agent "${newAgent.name}" (${id}) created.`));
+    console.log(chalk.gray(`    DM Policy: ${newAgent.dmPolicy}`));
+    if (newAgent.sandbox?.enabled) {
+      console.log(chalk.gray(`    Sandbox: ${newAgent.sandbox.backend}`));
+    }
+    console.log(chalk.gray(`    Workspace: ~/.agentoctopus/agents/${id}/workspace`));
+  });
+
+agentCmd
+  .command('switch <id>')
+  .description('Set the default agent')
+  .action(async (id: string) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    const exists = c.agents.entries?.some((a) => a.id === id);
+    if (!exists) {
+      console.log(chalk.red(`\n  Agent "${id}" not found.`));
+      return;
+    }
+
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents = parsed.agents || {};
+    parsed.agents.default = id;
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Default agent switched to "${id}".`));
+  });
+
+agentCmd
+  .command('remove <id>')
+  .description('Remove an agent')
+  .action(async (id: string) => {
+    const onboarded = await ensureOnboarded();
+    if (!onboarded) return;
+
+    const c = loadConfig();
+    if (!c.agents.entries?.some((a) => a.id === id)) {
+      console.log(chalk.red(`\n  Agent "${id}" not found.`));
+      return;
+    }
+
+    const configPath = getConfigPath();
+    const raw = fs.readFileSync(configPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    parsed.agents.entries = (parsed.agents.entries || []).filter((a: any) => a.id !== id);
+    if (parsed.agents.default === id) {
+      parsed.agents.default = parsed.agents.entries[0]?.id || 'default';
+    }
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+
+    console.log(chalk.green(`\n  ✔ Agent "${id}" removed.`));
+    console.log(chalk.gray(`    New default: ${parsed.agents.default}`));
   });
 
 program.parse();

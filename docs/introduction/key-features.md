@@ -33,6 +33,10 @@ AgentOctopus works as:
 - AI-assisted skill creation with `octopus skill create`
 - Marketplace for publishing and discovering skills
 
+## Self-evolving skills
+
+Skills automatically improve over time based on execution signals and user feedback. The evolution system analyzes skill performance, proposes targeted fixes via LLM, and applies safe changes automatically — with shadow-copy rollback for safety. Use `octopus evolve --check` to see status.
+
 ## Session management
 
 Per-user sessions with 30-minute TTL and 50-message history. Supports follow-up queries in context. See [Sessions](../core-concepts/sessions.md).

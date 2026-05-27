@@ -38,16 +38,16 @@ describe('scoreKeywordMatch', () => {
     tags: ['weather', 'api', 'forecast'],
   };
 
-  it('scores exact name prefix match highest', () => {
+  it('scores name prefix match highest', () => {
     const tokens = extractQueryTokens('weather');
     const score = scoreKeywordMatch(tokens, skill);
-    expect(score).toBe(2); // name match
+    expect(score).toBe(3); // name prefix match ("weather" prefix of "weather-forecast")
   });
 
-  it('scores partial name prefix match', () => {
+  it('scores partial name word-boundary match', () => {
     const tokens = extractQueryTokens('forecast');
     const score = scoreKeywordMatch(tokens, skill);
-    expect(score).toBe(2); // "forecast" matches word boundary start of "weather-forecast"
+    expect(score).toBe(2); // "forecast" matches word boundary in "weather-forecast"
   });
 
   it('scores description match lower', () => {
@@ -65,7 +65,23 @@ describe('scoreKeywordMatch', () => {
   it('scores multiple tokens cumulatively', () => {
     const tokens = extractQueryTokens('weather conditions');
     const score = scoreKeywordMatch(tokens, skill);
-    expect(score).toBe(3); // name (2) + description (1)
+    expect(score).toBe(4); // name prefix (3) + description (1)
+  });
+
+  it('scores exact skill name higher than compound name match', () => {
+    const tokens = extractQueryTokens('weather');
+    const exactSkill: SearchableSkill = {
+      name: 'weather',
+      description: 'Get weather forecasts and current conditions',
+      tags: ['weather'],
+    };
+    const compoundSkill: SearchableSkill = {
+      name: 'soaring-weather',
+      description: 'Soaring forecast with thermal weather conditions',
+      tags: ['weather'],
+    };
+
+    expect(scoreKeywordMatch(tokens, exactSkill)).toBeGreaterThan(scoreKeywordMatch(tokens, compoundSkill));
   });
 
   it('returns 0 for no match', () => {

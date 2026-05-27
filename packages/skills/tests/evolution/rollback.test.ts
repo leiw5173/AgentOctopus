@@ -26,8 +26,7 @@ describe('shadowCopy', () => {
     const historyDir = path.join(evolutionDir, 'history');
     const files = fs.readdirSync(historyDir);
     expect(files).toHaveLength(1);
-    expect(files[0]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}/);
-    expect(files[0]).toMatch(/\.md$/);
+    expect(files[0]).toMatch(/^\d{8}\.md$/);
 
     const snapshot = fs.readFileSync(path.join(historyDir, files[0]), 'utf8');
     expect(snapshot).toBe('# Original content\n');

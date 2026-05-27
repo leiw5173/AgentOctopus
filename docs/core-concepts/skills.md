@@ -67,6 +67,54 @@ Run: octopus config set COMMONS_API_KEY <your-key>
 | `http` | POST to an API endpoint | External REST APIs |
 | `mcp` | stdio-based Model Context Protocol | MCP-compatible tools |
 | `subprocess` | Run a local Node.js script | Local scripts, free APIs |
+| `composed` | Execute a chain of sub-skills | Multi-step workflows |
+
+### Composed skills (skill chaining)
+
+Skills can declare a `compose` block to chain other skills into an execution DAG:
+
+```yaml
+---
+name: research-and-summarize
+adapter: composed
+compose:
+  steps:
+    - skill: web-search
+      inputMapping:
+        query: "{{query}}"
+      outputAs: search_results
+    - skill: summarize
+      inputMapping:
+        text: search_results
+      outputAs: summary
+---
+```
+
+Each step can optionally have a `condition` (evaluated by LLM) to enable conditional branching.
+
+## Sandbox
+
+Skills can request isolated execution via the `sandbox` frontmatter field:
+
+```yaml
+---
+name: untrusted-code-runner
+adapter: subprocess
+sandbox:
+  backend: docker
+  image: python:3.11-alpine
+  memory: 256m
+---
+```
+
+Sandbox backends:
+
+| Backend | Isolation level | Use case |
+|---|---|---|
+| `docker` | Container (network-off, memory-limited) | Untrusted or resource-heavy skills |
+| `ssh` | Remote host execution | Offload to dedicated compute |
+| `openshell` | Local pass-through | Fallback / trusted environment |
+| `none` | No isolation | Default |
 
 ## Bundled skills
 

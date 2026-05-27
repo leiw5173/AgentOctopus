@@ -87,6 +87,31 @@ Search local skills (same as `octopus search`).
 
 Publish a skill (same as `octopus publish`).
 
+## Evolution
+
+### `octopus evolve`
+
+AI-powered skill evolution — analyze, propose, review, and rollback.
+
+**Options:**
+
+- `--check` — show evolution status for all skills (default when no option given)
+- `--propose <skill>` — manually trigger LLM-driven analysis for a specific skill
+- `--review` — review pending risky proposals
+- `--log <skill>` — show snapshot history for a skill
+- `--rollback <skill>` — roll back a skill to a snapshot
+- `--to <n>` — snapshot index for rollback (from `--log`)
+
+**Examples:**
+
+```bash
+octopus evolve                          # show status for all skills
+octopus evolve --propose weather        # analyze weather skill
+octopus evolve --review                 # review pending proposals
+octopus evolve --log weather            # show snapshot history
+octopus evolve --rollback weather --to 2  # roll back to snapshot #2
+```
+
 ## Sync
 
 ### `octopus sync`

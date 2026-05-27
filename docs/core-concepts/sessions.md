@@ -9,6 +9,10 @@ AgentOctopus maintains per-user conversation sessions so follow-up queries can r
 - **History**: last 50 messages per session
 - **Cleanup**: expired sessions are removed automatically
 
+## Multi-agent sessions
+
+Each agent has its own isolated `SessionManager`. Sessions never leak between agents — even if two agents share the same channel, their conversation histories are completely separate.
+
 ## Usage
 
 Sessions are managed automatically. When a query includes a `sessionId`, the router continues that conversation. Without a session ID, a new session is created.
@@ -36,10 +40,19 @@ curl -X POST http://localhost:3002/agent/ask \
 curl -X POST http://localhost:3002/agent/ask \
   -H 'Content-Type: application/json' \
   -d '{"query": "how about London", "sessionId": "abc-123"}'
+
+# Route to a specific agent
+curl -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "...", "agentId": "work"}'
 ```
+
+## Session-aware routing
+
+When a query includes a `sessionId`, the router loads the previous turn's skill and applies a **prevSkill boost**, encouraging follow-up queries to stay in the same domain. The reranker also receives conversation history, enabling accurate routing for follow-ups like "how about London?" after an initial weather query.
 
 ## IM bot sessions
 
-Slack, Discord, and Telegram bots maintain sessions per user/channel automatically. No session ID management needed — the bot infers the session from the message context.
+Slack, Discord, Telegram, WebChat, and Webhook bots maintain sessions per user/channel automatically. No session ID management needed — the bot infers the session from the message context.
 
-See also: [Routing](routing.md) | [REST API](../api-reference/rest-api.md) | [IM Bots](../integrations/im-bots.md)
+See also: [Routing](routing.md) | [REST API](../api-reference/rest-api.md) | [IM Bots](../integrations/im-bots.md) | [Configuration](../getting-started/configuration.md)

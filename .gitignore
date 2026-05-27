@@ -40,6 +40,7 @@ Thumbs.db
 
 # IDE
 .vscode/
+.agents/
 .idea/
 *.swp
 *.swo
@@ -69,6 +70,9 @@ skills-index.json.gz
 
 # Superpowers docs
 docs/superpowers/
+
+# CodeGraph index
+.codegraph/
 
 # Python virtual env
 .venv/

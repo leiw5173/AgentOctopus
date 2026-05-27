@@ -17,6 +17,18 @@ User: "Translate hello to French"
   "Bonjour"
 ```
 
+## Key Features
+
+| Feature | Description |
+|---|---|
+| **Smart Routing** | Embedding similarity + keyword matching + LLM re-rank with rating-aware scoring |
+| **Multi-Agent** | Isolate agents with separate workspaces, models, and skill registries |
+| **Multi-Channel** | CLI, REST API, Slack, Discord, Telegram, WebSocket WebChat, generic Webhooks |
+| **Skill Composition** | Chain skills into execution DAGs with input/output mapping |
+| **Sandbox Execution** | Run skills in Docker, SSH, or OpenShell for isolation |
+| **DM Security** | Pairing mode for unknown direct-message senders |
+| **Self-Evolving** | Skills auto-improve based on execution signals and user feedback |
+
 ## Quick start
 
 ```bash
@@ -48,6 +60,7 @@ octopus ask "translate hello to French"
 octopus list       # show installed skills
 octopus search "weather"    # search local skills by name, description, and tags
 octopus search "weather" --run  # search and interactively pick a skill to run
+octopus evolve                  # show evolution status for all skills
 ```
 
 [![CI](https://github.com/leiw5173/AgentOctopus/actions/workflows/ci.yml/badge.svg)](https://github.com/leiw5173/AgentOctopus/actions/workflows/ci.yml)
@@ -56,7 +69,7 @@ From source:
 
 ```bash
 pnpm install && pnpm build
-pnpm test          # 235+ tests across 8 packages
+pnpm test          # 313+ tests across 8 packages
 ```
 
 ### Publishing

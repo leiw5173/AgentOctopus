@@ -10,6 +10,7 @@
   - [Skills](core-concepts/skills.md)
   - [Rating System](core-concepts/ratings.md)
   - [Sessions](core-concepts/sessions.md)
+  - [Skill Evolution](core-concepts/evolution.md)
 - [Integrations](integrations/openclaw.md)
   - [Claude Code](integrations/claude-code.md)
   - [Hermes](integrations/hermes.md)

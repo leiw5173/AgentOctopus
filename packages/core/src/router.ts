@@ -1,6 +1,7 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
-import { getRequiredEnvVars, getRequiredBins } from '@agentoctopus/registry';
+import { getRequiredEnvVars, getRequiredBins, getSkillEntry } from '@agentoctopus/registry';
 import { shouldIncludeSkill, extractQueryTokens, scoreKeywordMatch, CJK_RANGE, type SkillEligibilityContext } from '@agentoctopus/skills';
+import type { SkillsConfig } from '@agentoctopus/skills';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { getConfig } from './config-resolver.js';
@@ -62,35 +63,6 @@ interface VectorEntry {
 interface EmbedCacheFile {
   model: string;
   skills: Record<string, { hash: string; embedding: number[] }>;
-}
-
-/**
- * Build a lightweight adapter from LoadedSkill to a shape compatible with
- * shouldIncludeSkill from @agentoctopus/skills. Only populates fields that
- * shouldIncludeSkill (and its callees) actually access.
- */
-function loadedSkillToEligibilityEntry(skill: LoadedSkill) {
-  const rawMeta = (skill.manifest.metadata ?? {}) as Record<string, unknown>;
-  const openclaw = (rawMeta.openclaw ?? {}) as Record<string, unknown>;
-
-  return {
-    skill: {
-      name: skill.manifest.name,
-      source: (rawMeta.source as string) ??
-        (rawMeta.openclaw ? 'clawhub' : 'user'),
-    },
-    metadata: {
-      skillKey: (openclaw.skillKey as string) ?? undefined,
-      always: (rawMeta.always as boolean) ?? undefined,
-      os: (rawMeta.os as string[]) ?? undefined,
-      requires: (rawMeta.requires as {
-        bins?: string[];
-        anyBins?: string[];
-        env?: string[];
-        config?: string[];
-      }) ?? undefined,
-    },
-  };
 }
 
 function parseRerankDecision(response: string, candidates: RoutingResultCandidate[]): string | 'none' {
@@ -223,8 +195,8 @@ export class Router {
    * Route a query to the best skill.
    * Flow: translate → eligibility filter → embed query → cosine × routingScore → top K → LLM rerank
    */
-  async route(query: string, topK = 20, opts: { debug?: boolean } = {}): Promise<RoutingResult[]> {
-    const { debug = false } = opts;
+  async route(query: string, topK = 20, opts: { debug?: boolean; previousSkill?: string } = {}): Promise<RoutingResult[]> {
+    const { debug = false, previousSkill } = opts;
     if (this.index.length === 0) return [];
 
     // For non-Latin queries: merge translation + intent extraction into a single LLM call.
@@ -283,12 +255,31 @@ export class Router {
     const eligible: VectorEntry[] = [];
     for (const entry of this.index) {
       const pass = shouldIncludeSkill({
-        entry: loadedSkillToEligibilityEntry(entry.skill) as any,
-        config: skillsConfig as any,
+        entry: getSkillEntry(entry.skill),
+        config: skillsConfig as unknown as SkillsConfig,
         eligibility,
       });
-      dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → ${pass ? 'PASS' : 'SKIP'}`);
-      if (pass) eligible.push(entry);
+      if (!pass) {
+        dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → SKIP`);
+        continue;
+      }
+
+      // Filter out agent-only skills that cannot execute in CLI context.
+      // Agent-only skills have `allowed-tools` in their frontmatter but no
+      // endpoint, no scripts/, and no invoke.js — they are designed for
+      // agent-level tool calling (MCP/OpenClaw), not standalone execution.
+      const fm = getSkillEntry(entry.skill).frontmatter;
+      if (fm?.['allowed-tools'] && !entry.skill.manifest.endpoint) {
+        const scriptsDir = entry.skill.dirPath ? path.join(entry.skill.dirPath, 'scripts') : '';
+        const hasScripts = scriptsDir && fs.existsSync(scriptsDir) && fs.readdirSync(scriptsDir).length > 0;
+        if (!hasScripts) {
+          dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → SKIP (agent-only, no executable scripts or endpoint)`);
+          continue;
+        }
+      }
+
+      dbg(debug, `shouldIncludeSkill: ${entry.skill.manifest.name} → PASS`);
+      eligible.push(entry);
     }
     if (eligible.length === 0) return [];
 
@@ -309,7 +300,7 @@ export class Router {
           .filter(e => e.embedding.length > 0)
           .map(({ skill, embedding }) => {
             const cosine = cosineSimilarity(queryEmbedding, embedding);
-            const routingScore = Math.max(RELIABILITY_FLOOR, skill.routingScore ?? (skill.rating / 5));
+            const routingScore = Math.max(RELIABILITY_FLOOR, skill.routingScore || (skill.rating / 5));
             const negCount = skill.negativeFeedbackCount ?? 0;
             const penalty = negCount * FAILURE_PENALTY;
             const catchAllPenalty = isCatchAllSkill(skill) ? CATCHALL_PENALTY * 0.1 : 0;
@@ -352,27 +343,56 @@ export class Router {
 
     candidates = this.penalizeUnconfiguredSkills(candidates);
 
+    // When a previous skill is provided (session follow-up), ensure it appears
+    // in the candidate list so the reranker can choose to reuse it.
+    if (previousSkill) {
+      const alreadyIn = candidates.some(c => c.skill.manifest.name.toLowerCase() === previousSkill.toLowerCase());
+      dbg(debug, `previousSkill=${previousSkill}, alreadyInCandidates=${alreadyIn}`);
+      if (!alreadyIn) {
+        const prevEntry = this.index.find(e => e.skill.manifest.name.toLowerCase() === previousSkill.toLowerCase());
+        if (prevEntry) {
+          const medianScore = candidates.length > 0
+            ? candidates.map(c => c.score).sort((a, b) => a - b)[Math.floor(candidates.length / 2)]
+            : 0.5;
+          candidates.push({ skill: prevEntry.skill, score: medianScore });
+          dbg(debug, `Boosted previousSkill "${previousSkill}" into candidates with score=${medianScore.toFixed(3)}`);
+        } else {
+          dbg(debug, `previousSkill "${previousSkill}" not found in index — cannot boost`);
+        }
+      }
+    }
+
     // LLM rerank
     const candidateList = candidates
       .map((c, i) => {
         const neg = c.skill.negativeFeedbackCount ?? 0;
-        const ratingNote = neg > 0 ? ` [⚠ ${neg} negative feedback${neg > 1 ? 's' : ''}]` : '';
+        const flags: string[] = [];
+        if (neg > 0) flags.push(`⚠ ${neg} negative`);
+        const missingBins = getRequiredBins(c.skill.manifest).filter(b => !isBinAvailable(b));
+        const missingCreds = getRequiredEnvVars(c.skill.manifest).filter(v => !process.env[v.key]);
+        if (missingBins.length > 0) flags.push(`❌ missing tools: ${missingBins.join(', ')}`);
+        if (missingCreds.length > 0) flags.push(`🔑 needs API keys`);
+        const flagNote = flags.length > 0 ? ` [${flags.join(' | ')}]` : '';
         let desc = c.skill.manifest.description;
         if (desc.length > 120) desc = desc.slice(0, 120) + '…';
-        return `${i + 1}. ${c.skill.manifest.name}: ${desc}${ratingNote}`;
+        return `${i + 1}. ${c.skill.manifest.name} (score: ${c.score.toFixed(2)})${flagNote}: ${desc}`;
       })
       .join('\n');
 
     const systemPrompt = `You are a routing assistant. Given a user request and a list of candidate skills, pick the single best skill that SPECIFICALLY handles the user's request. Follow these rules:
 
 1. Match the skill's PRIMARY purpose to the user's intent — ignore skills that only tangentially relate.
-2. "URL shortening" ≠ "web hosting" ≠ "link sharing". Be precise about what the skill does.
+2. Skills marked with ❌ are MISSING required tools and CANNOT RUN — avoid them unless no alternative exists.
 3. Skills marked with ⚠ have received negative user feedback — strongly prefer alternatives.
-4. Skills with very broad descriptions ("any request", "any task") are LESS likely to be correct — prefer specific skills.
-5. Respond "none" if no skill is a genuine match for what the user is asking.
+4. Skills with very broad descriptions ("any request", "any task", "any query") are LESS likely to be correct — prefer specific, purpose-built skills.
+5. When multiple skills relate to the same topic (e.g. YouTube), pick the one whose description most precisely matches the user's action (e.g. "extract transcript/subtitles" → transcript skill, NOT notification/analysis).
+6. For translation requests, prefer skills that describe themselves as translation/language-translation tools — NOT language tutors, dictionaries, or greeting skills.
+7. Prefer skills with higher scores — they have better performance and reliability.
+8. Respond "none" if no skill is a genuine match for what the user is asking.
 
 Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
-    const userMessage = `User request: "${query}"\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
+    const prevCtx = previousSkill ? `\nPrevious skill used in this conversation: ${previousSkill}. If the user's request is a follow-up (e.g. "what about X?", "and Paris?"), strongly prefer reusing this skill or a closely related one.` : '';
+    const userMessage = `User request: "${query}"${prevCtx}\n\nCandidates:\n${candidateList}\n\nBest skill (or "none" if no skill fits):`;
 
     let bestSkillName: string;
     try {
@@ -396,15 +416,17 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
 
     if (bestSkillName === 'none') return [];
 
-    // Return top candidates ranked by score, with the LLM's pick first
+    // The reranker picks the best skill based on semantic understanding of
+    // descriptions; embedding scores handle initial filtering. When the reranker
+    // selects a specific skill, prefer it over the raw embedding ranking — but
+    // keep remaining candidates sorted by score for fallback ordering.
     const ranked = candidates.slice().sort((a, b) => b.score - a.score);
-    const best = ranked.find(
-      (c) => c.skill.manifest.name.toLowerCase() === bestSkillName,
-    );
+    const rerankerPick = candidates.find(c => c.skill.manifest.name.toLowerCase() === bestSkillName);
+    const best = rerankerPick ?? ranked[0];
     if (!best) return [];
 
-    // Move the LLM's pick to the front, then remaining by score
-    const rest = ranked.filter(c => c.skill.manifest.name.toLowerCase() !== bestSkillName);
+    // Return best first, then remaining candidates by embedding score
+    const rest = ranked.filter(c => c !== best);
     const ordered = [best, ...rest];
 
     return ordered.map(c => ({
@@ -423,7 +445,7 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
     return candidates.map(entry => {
       const missingCreds = getRequiredEnvVars(entry.skill.manifest).filter(v => !process.env[v.key]);
       const missingBins = getRequiredBins(entry.skill.manifest).filter(b => !isBinAvailable(b));
-      const penalty = (missingCreds.length > 0 ? 0.25 : 0) + (missingBins.length > 0 ? 0.25 : 0);
+      const penalty = (missingCreds.length > 0 ? 0.25 : 0) + (missingBins.length > 0 ? 1.5 : 0);
       if (penalty === 0) return entry;
       return { ...entry, score: Math.max(0, entry.score - penalty) };
     });
@@ -440,7 +462,7 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
         description: skill.manifest.description,
         tags: skill.manifest.tags,
       });
-      const routingScore = skill.routingScore ?? (skill.rating / 5);
+      const routingScore = skill.routingScore || (skill.rating / 5);
       const ratingBoost = routingScore * RATING_WEIGHT;
       const negCount = skill.negativeFeedbackCount ?? 0;
       const penalty = negCount * FAILURE_PENALTY;

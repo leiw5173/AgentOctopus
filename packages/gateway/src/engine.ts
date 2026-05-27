@@ -66,7 +66,7 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   await router.buildIndex(registry.getAll());
 
   const chatClient = createChatClient(rerankConfig);
-  const executor = new Executor(registry, chatClient);
+  const executor = new Executor(registry, chatClient, router);
 
   _engine = { registry, router, executor, chatClient };
   return _engine;

@@ -11,6 +11,7 @@ export interface PlanStep {
   dependsOn: string[];       // IDs of steps that must complete first
   skill?: string;            // resolved skill name (null if direct LLM)
   useDirectLLM: boolean;     // true = answer with chat LLM, no skill
+  isComposite?: boolean;     // true = this step is a composed skill chain
 }
 
 export interface ExecutionPlan {
@@ -90,6 +91,14 @@ For multi-step with dependency:
       steps = [{ id: '1', query, dependsOn: [], useDirectLLM: false }];
     }
 
+    // Post-process: mark composite steps (skills with adapter === 'composed')
+    for (const step of steps) {
+      const matchedSkill = skills.find((s) => s.manifest.name.toLowerCase() === (step.skill ?? '').toLowerCase());
+      if (matchedSkill?.manifest.adapter === 'composed') {
+        step.isComposite = true;
+      }
+    }
+
     return {
       originalQuery: query,
       steps,
@@ -156,12 +165,22 @@ For multi-step with dependency:
     step: PlanStep,
     priorResults: Map<string, PlanStepResult>,
   ): Promise<PlanStepResult> {
-    // Substitute dependency outputs into the query
+    // Substitute dependency outputs into the query (structured JSON if available)
     let resolvedQuery = step.query;
+    const structuredContext: Record<string, unknown> = {};
     for (const depId of step.dependsOn) {
       const depResult = priorResults.get(depId);
       if (depResult) {
         resolvedQuery += `\n\n[Context from previous step: ${depResult.output}]`;
+        // Attempt to parse structured JSON output for downstream mapping
+        try {
+          const parsed = JSON.parse(depResult.output.trim());
+          if (typeof parsed === 'object' && parsed !== null) {
+            Object.assign(structuredContext, parsed);
+          }
+        } catch {
+          // not JSON — use text context only
+        }
       }
     }
 

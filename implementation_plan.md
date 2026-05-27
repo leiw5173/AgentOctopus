@@ -150,7 +150,9 @@ AgentOctopus/
 │   ├── core/
 │   │   ├── src/
 │   │   │   ├── router.ts           # ✅ Intent embedding + skill selection
-│   │   │   ├── executor.ts         # ✅ Skill/MCP invocation engine
+│   │   │   ├── executor.ts         # ✅ Skill/MCP/sandbox/composed invocation
+│   │   │   ├── planner.ts          # ✅ Multi-hop intent decomposition
+│   │   │   ├── composer.ts         # ✅ Skill composition DAG executor
 │   │   │   └── llm-client.ts       # ✅ Pluggable LLM backend
 │   │   └── tests/
 │   │       ├── router.test.ts
@@ -160,7 +162,7 @@ AgentOctopus/
 │   ├── registry/
 │   │   ├── src/
 │   │   │   ├── registry.ts         # ✅ Load/search/CRUD for skill manifests
-│   │   │   ├── manifest-schema.ts  # ✅ Zod schema for SKILL.md frontmatter
+│   │   │   ├── manifest-schema.ts  # ✅ Zod schema (incl. sandbox + compose)
 │   │   │   └── rating.ts           # ✅ Rating store (file-based)
 │   │   └── tests/
 │   │       ├── registry.test.ts
@@ -171,17 +173,45 @@ AgentOctopus/
 │   │   ├── src/
 │   │   │   ├── http-adapter.ts     # ✅ Generic REST skill adapter
 │   │   │   ├── mcp-adapter.ts      # ✅ MCP stdio bridge (Phase 2)
-│   │   │   └── subprocess-adapter.ts # ✅ Local script execution
+│   │   │   ├── subprocess-adapter.ts # ✅ Local script execution
+│   │   │   └── sandbox/            # ✅ Phase 4b: Docker / SSH / OpenShell
+│   │   │       ├── docker-adapter.ts
+│   │   │       ├── ssh-adapter.ts
+│   │   │       └── openshell-adapter.ts
 │   │   └── tests/
 │   │       └── mcp-adapter.test.ts  # ✅ MCP adapter tests
 │   │
-│   └── gateway/                    # ✅ Phase 3 Complete
+│   ├── skills/
+│   │   ├── src/
+│   │   │   ├── schema.ts           # ✅ SKILL.md frontmatter Zod schema
+│   │   │   ├── composition/        # ✅ Phase 4b: composition schema + validation
+│   │   │   │   ├── schema.ts
+│   │   │   │   └── runner.ts
+│   │   │   └── evolution/          # ✅ Skill self-improvement system
+│   │   └── tests/
+│   │
+│   └── gateway/                    # ✅ Phase 3 + 4b Complete
 │       ├── src/
-│       │   ├── engine.ts           # ✅ Shared engine bootstrap
+│       │   ├── engine.ts           # ✅ Per-workspace engine bootstrap
 │       │   ├── session.ts          # ✅ Stateful session manager
-│       │   ├── slack.ts            # ✅ Slack bot adapter (@slack/bolt)
-│       │   ├── discord.ts          # ✅ Discord bot adapter (discord.js)
-│       │   ├── telegram.ts         # ✅ Telegram bot adapter (telegraf)
+│       │   ├── channels/           # ✅ Phase 4b: unified channel architecture
+│       │   │   ├── base-channel.ts
+│       │   │   ├── channel-handler.ts
+│       │   │   ├── slack-channel.ts
+│       │   │   ├── discord-channel.ts
+│       │   │   ├── telegram-channel.ts
+│       │   │   ├── webhook-channel.ts
+│       │   │   └── webchat-channel.ts
+│       │   ├── control-plane/      # ✅ Phase 4b: event bus + control plane
+│       │   │   ├── event-bus.ts
+│       │   │   └── control-plane.ts
+│       │   ├── multi-agent/        # ✅ Phase 4b: agent pool + routing
+│       │   │   ├── agent-instance.ts
+│       │   │   ├── agent-pool.ts
+│       │   │   └── agent-router.ts
+│       │   ├── security/           # ✅ Phase 4b: DM policy + pairing
+│       │   │   ├── dm-policy.ts
+│       │   │   └── pairing-store.ts
 │       │   ├── agent-protocol.ts   # ✅ Agent-to-agent HTTP protocol + security
 │       │   ├── auth-middleware.ts  # ✅ API key auth + tier management
 │       │   ├── rate-limiter.ts     # ✅ Sliding-window rate limiting
@@ -279,6 +309,22 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] Multi-hop routing: decompose complex requests into sub-tasks.
 - [x] LLM planner that generates an execution DAG.
 - [x] Confidence scoring; graceful "no matching skill" message.
+- [x] **Structured output passing** between planner steps (JSON-aware context).
+- [x] **Composite step detection** — planner recognizes `adapter: composed` skills.
+
+### Phase 4b — OpenClaw Architecture Extension ✅ Complete
+- [x] **Config schema** extended with `agents`, `sandbox`, `canvas`, `companion` sections.
+- [x] **Manifest schema** extended with `sandbox` and `compose` fields, `composed` adapter.
+- [x] **BaseChannel abstraction** — unified `ChannelAdapter` interface for all channels.
+- [x] **New channels**: WebSocket WebChat (`WebchatChannel`), generic HTTP Webhook (`WebhookChannel`).
+- [x] **ControlPlane** — typed event bus (`EventBus`) + agent pool (`AgentPool`) + control plane orchestrator.
+- [x] **Multi-agent routing** — `AgentRouter` maps `(channelType, accountId, peerId) → agentId`.
+- [x] **AgentInstance** — isolated engine per agent with separate workspace, registry, router, executor, sessions.
+- [x] **DM Security Policy** — `pairing` mode (default): unknown senders receive pairing code challenge; `open` mode for public bots.
+- [x] **Pairing store** — persisted paired peers in `~/.agentoctopus/pairing.json` with 10-min expiring codes.
+- [x] **Sandbox adapters** — `DockerAdapter` (container isolation), `SshAdapter` (remote execution), `OpenShellAdapter` (local pass-through).
+- [x] **SkillComposer** — executes `compose` DAGs with input/output mapping, conditional branching, and result synthesis.
+- [x] **Composition validation** — `validateComposition()` checks inputMapping references and `detectCycles()` guards self-references.
 
 ### Phase 5 — Developer Ecosystem ✅ Complete
 - [x] Web UI: enhanced chat interface with skills sidebar, dark/light mode, conversation clear, marketplace link.
@@ -293,6 +339,12 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] Audit logger — structured JSONL logging of all gateway requests.
 - [x] Self-service key registration endpoint (`POST /agent/register`).
 - [x] CORS configuration and admin key management endpoints.
+
+### Phase 6b — Gateway Control Plane ✅ Complete
+- [x] `EventBus` — typed pub/sub for `message-received`, `skill-executed`, `feedback-recorded`, `session-created/expired` events.
+- [x] `ControlPlane` — singleton orchestrator: starts agents, registers channels, routes events.
+- [x] Per-agent workspace isolation: `~/.agentoctopus/agents/<id>/workspace/skills/`.
+- [x] `getControlPlane()` / `resetControlPlane()` singleton pattern.
 
 ### Phase 8 — Bundled Skills & Skill Authoring ✅ Complete
 - [x] Four built-in skills (weather, translation, ip-lookup, x-search) bundled inside `@agentoctopus/cli` and copied to `~/.agentoctopus/skills/` during `octopus onboard`.
@@ -310,6 +362,71 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [ ] Billing dashboard and `octopus billing` CLI command.
 - [ ] Webhook handlers for subscription lifecycle events.
 
+### Phase 15 — Live Canvas & Companion Apps (Planned)
+- [ ] `CanvasServer` — WebSocket upgrade handler for A2UI rendering.
+- [ ] `CanvasView` React component — renders agent-driven visual workspace.
+- [ ] `CompanionServer` — WebSocket server on port 3003 for macOS/iOS/Android nodes.
+- [ ] Device pairing with QR/code exchange.
+- [ ] Node capability registry and compute offload routing.
+
+### Phase 9 — Update & Debug ✅ Complete
+- [x] `octopus update --check` — display installed vs. latest versions for all @agentoctopus packages.
+- [x] `octopus sync --check` — check for skill updates without installing.
+- [x] `octopus sync --cloud-url <url>` — three-phase sync (version check → awesome install → cloud sync).
+- [x] Debug mode (`--debug`) — inline routing internals, cosine scores, reranker I/O, timing.
+- [x] Credential guidance — pre-execution (`requires.env`) and runtime error detection with LLM-generated setup guides.
+
+### Phase 10 — CLI & Web UI Enhancements ⏳ Partial
+- [x] `octopus agent list` — list all configured agents.
+- [ ] `octopus agent create <name>` — create isolated agent workspace.
+- [ ] `octopus agent switch <name>` — manage agents.
+- [ ] `octopus channel add <type>` — bind channel to agent.
+- [ ] `octopus sandbox enable/disable <skill>` — toggle sandbox per skill.
+- [ ] `octopus compose <skill>` — run composed skill with step preview.
+- [ ] Web UI `/agents` dashboard, `/canvas` viewer, `/channels` config, `/skills/composer` builder.
+
+### Phase 11 — Skill Evolution ✅ Complete
+- [x] `packages/skills/src/evolution/` — full evolution subsystem (analyzer, applier, collector, rollback, scheduler, types).
+- [x] `octopus evolve --check` — show evolution status for all skills.
+- [x] `octopus evolve --propose <skill>` — manually trigger LLM-driven analysis for a specific skill.
+- [x] `octopus evolve --review` — review pending risky proposals.
+- [x] `octopus evolve --log <skill>` — show snapshot history for a skill.
+- [x] `octopus evolve --rollback <skill>` — roll back a skill to a snapshot.
+- [x] Shadow-copy rollback system — safe rollback with monotonic snapshot sequence numbers.
+- [x] Stale skill cold-sweep scheduler — auto-detect and propose fixes for underperforming skills.
+- [x] Evolution opt-in question added to `octopus onboard` wizard.
+
+### Phase 12 — OpenClaw Skill Routing & Feedback ✅ Complete
+- [x] Routing accuracy — exact skill name match outranks compound names.
+- [x] Keyword-only routing improvements — better skill selection when embedding keys are omitted.
+- [x] Session context for follow-up queries — `prevSkill` boost and reranker context route follow-ups correctly.
+- [x] ClawHub install spec extraction — extract install specs from `metadata.openclaw.install` format.
+- [x] Subprocess adapter auto-chmod — scripts made executable before execution.
+- [x] Reranker selection respected — router uses configured reranker model, not hardcoded default.
+
+### Phase 13 — OpenClaw Architecture Extension ✅ Complete
+- [x] Multi-agent configuration — multiple agents with separate workspaces, models, and skill registries.
+- [x] Agent-specific skill isolation — skills scoped per agent workspace.
+- [x] Webhook channel (`WebhookChannel`) — generic HTTP webhook adapter with secret verification.
+- [x] WebSocket WebChat channel (`WebchatChannel`) — real-time WebSocket chat interface.
+- [x] Docker sandbox execution — skills run in isolated Docker containers.
+- [x] Skill composition — `compose` DAG with input/output mapping and conditional branching.
+- [x] DM pairing policy — pairing mode (challenge unknown senders) and open mode.
+- [x] ControlPlane event bus — typed pub/sub emitting `skill-executed`, `feedback-recorded`, `session-created/expired` events.
+- [x] Planner structured output passing — multi-hop queries pass JSON between steps.
+- [x] Planner composite step detection — composed skills recognized by planner.
+- [x] All 12 Phase 13 tests verified and passing.
+
+### Phase 14 — Binary Auto-Install ✅ Complete
+- [x] Binary install detection — executor returns `binary_installable` when skill declares `requires.bins` and `metadata.openclaw.install`.
+- [x] Interactive CLI install prompt — `octopus ask` shows 4 options: install now, always install, try next skill, never install.
+- [x] Install preference persistence — `skills.installPrefs` saved to `~/.agentoctopus/octopus.json`.
+- [x] REST API `autoInstall=true` — gateway auto-installs missing binaries when requested.
+- [x] REST API `binary_installable` response — returns missing binaries and install specs.
+- [x] Chat channel two-phase install — IM bots prompt for confirmation before installing.
+
+### Phase 7 — Payment & Billing (Planned)
+
 ---
 
 ## Verification Plan
@@ -321,12 +438,14 @@ OLLAMA_BASE_URL=http://localhost:11434
 pnpm test
 
 # Results (all green):
-# packages/registry  — 9 tests  ✅
-# packages/adapters  — 3 tests  ✅  (incl. mcp-adapter)
-# packages/core      — 14 tests ✅  (router, executor, planner, integration)
-# apps/cli           — 3 tests  ✅
-# apps/web           — 6 tests  ✅  (POST /api/ask + /api/feedback)
-# packages/gateway   — 11 tests ✅  (session, agent-protocol, engine, security)
+# packages/skills     — 123 tests ✅  (schema, evolution, search, install)
+# packages/registry   — 47 tests  ✅
+# packages/adapters   — 3 tests   ✅  (incl. mcp-adapter)
+# packages/core       — 65 tests  ✅  (router, executor, planner, integration)
+# apps/cli            — 57 tests  ✅  (commands, evolve, connect, onboard)
+# apps/web            — 6 tests   ✅  (POST /api/ask + /api/feedback)
+# packages/gateway    — 11 tests  ✅  (session, agent-protocol, engine, security)
+# Total: 313+ tests
 ```
 
 ### Manual CLI Verification (Phase 1 ✅)

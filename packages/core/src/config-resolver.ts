@@ -7,7 +7,8 @@ import {
   RerankConfigSchema, GatewayConfigSchema, RegistryConfigSchema,
   ExecutionConfigSchema, DeployConfigSchema, AuthConfigSchema,
   RatingConfigSchema, SlackConfigSchema, SkillsConfigSchema,
-  EvolutionConfigSchema,
+  EvolutionConfigSchema, AgentsConfigSchema, SandboxConfigSchema,
+  CanvasConfigSchema, CompanionConfigSchema,
   type ResolvedConfig, type OctopusConfigV2,
 } from './config-types.js';
 
@@ -95,6 +96,7 @@ export function loadConfig(): ResolvedConfig {
   const parsed = OctopusConfigV2Schema.parse(configObj) as unknown as Record<string, Record<string, unknown> | undefined>;
 
   const resolved: ResolvedConfig = {
+    credentials: resolveAllEnvRefs((parsed.credentials ?? {}) as Record<string, string>),
     llm: resolveAllEnvRefs(mergeSection(LLMConfigSchema, parsed.llm)),
     embed: resolveAllEnvRefs(mergeSection(EmbedConfigSchema, parsed.embed)),
     rerank: resolveAllEnvRefs(mergeSection(RerankConfigSchema, parsed.rerank)),
@@ -107,6 +109,10 @@ export function loadConfig(): ResolvedConfig {
     slack: resolveAllEnvRefs(mergeSection(SlackConfigSchema, parsed.slack)),
     skills: resolveAllEnvRefs(mergeSection(SkillsConfigSchema, parsed.skills)),
     evolution: resolveAllEnvRefs(mergeSection(EvolutionConfigSchema, parsed.evolution)),
+    agents: resolveAllEnvRefs(mergeSection(AgentsConfigSchema, parsed.agents)),
+    sandbox: resolveAllEnvRefs(mergeSection(SandboxConfigSchema, parsed.sandbox)),
+    canvas: resolveAllEnvRefs(mergeSection(CanvasConfigSchema, parsed.canvas)),
+    companion: resolveAllEnvRefs(mergeSection(CompanionConfigSchema, parsed.companion)),
   };
 
   if (raw && raw.version !== 2) {
@@ -137,4 +143,36 @@ export function saveConfigFile(config: OctopusConfigV2): void {
 export function saveEnvFile(content: string): void {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   fs.writeFileSync(getEnvPath(), content, 'utf8');
+}
+
+export function getInstallPref(bin: string): 'always' | 'never' | 'prompt' {
+  const config = getConfig();
+  return (config.skills.installPrefs?.[bin] as 'always' | 'never' | 'prompt') ?? 'prompt';
+}
+
+export function saveInstallPref(bins: string[], preference: 'always' | 'never'): void {
+  const rawPath = getConfigPath();
+  let raw: Record<string, unknown> = {};
+  if (fs.existsSync(rawPath)) {
+    try { raw = JSON.parse(fs.readFileSync(rawPath, 'utf8')); } catch { /* ignore */ }
+  }
+
+  if (!raw.skills || typeof raw.skills !== 'object') {
+    raw.skills = {};
+  }
+  const skills = raw.skills as Record<string, unknown>;
+  if (!skills.installPrefs || typeof skills.installPrefs !== 'object') {
+    skills.installPrefs = {};
+  }
+  const prefs = skills.installPrefs as Record<string, string>;
+
+  for (const bin of bins) {
+    prefs[bin] = preference;
+  }
+
+  fs.mkdirSync(path.dirname(rawPath), { recursive: true });
+  fs.writeFileSync(rawPath, JSON.stringify(raw, null, 2), 'utf8');
+
+  // Invalidate in-memory cache so next getConfig() sees the update
+  resetConfig();
 }

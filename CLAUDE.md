@@ -83,7 +83,7 @@ When adding a new skill or changing how an existing skill routes:
 ```bash
 pnpm install          # install all workspace dependencies
 pnpm build            # build all packages (order: skills → registry → adapters → core → gateway → apps)
-pnpm test             # run all 235+ tests across all workspaces
+pnpm test             # run all 313+ tests across all workspaces
 pnpm dev              # watch mode for all packages in parallel
 
 # Scoped commands
@@ -99,6 +99,13 @@ node apps/cli/dist/index.js list
 node apps/cli/dist/index.js ask "What's the weather in Tokyo?"
 node apps/cli/dist/index.js search "weather"      # search local skills with scored ranking
 node apps/cli/dist/index.js search "weather" --run  # search and interactively pick a skill to run
+
+# CLI evolution commands (must build first)
+node apps/cli/dist/index.js evolve                  # show evolution status for all skills
+node apps/cli/dist/index.js evolve --propose weather # analyze weather skill for improvements
+node apps/cli/dist/index.js evolve --review          # review pending risky proposals
+node apps/cli/dist/index.js evolve --log weather     # show snapshot history
+node apps/cli/dist/index.js evolve --rollback weather --to 2  # roll back to snapshot #2
 
 # CLI update commands (must build first)
 node apps/cli/dist/index.js update          # check and install latest @agentoctopus packages
@@ -145,13 +152,13 @@ User query
 | Package | Key files | Role |
 |---|---|---|
 | `packages/agentoctopus` | `index.ts` | Umbrella re-export of all sub-packages |
-| `packages/skills` | `types.ts`, `schema.ts`, `frontmatter.ts`, `config.ts`, `local-loader.ts`, `workspace.ts`, `snapshot.ts`, `install.ts`, `clawhub-install.ts`, `command-specs.ts`, `env-overrides.ts` | SKILL.md loading/parsing, eligibility pipeline, install system, env overrides, prompt snapshot building |
+| `packages/skills` | `types.ts`, `schema.ts`, `frontmatter.ts`, `config.ts`, `local-loader.ts`, `workspace.ts`, `snapshot.ts`, `install.ts`, `clawhub-install.ts`, `command-specs.ts`, `env-overrides.ts`, `evolution/` | SKILL.md loading/parsing, eligibility pipeline, install system, env overrides, prompt snapshot building, skill self-improvement system |
 | `packages/registry` | `registry.ts`, `rating.ts`, `rating-dimensions.ts` | Delegates SKILL.md loading to `@agentoctopus/skills`, persists ratings/invocations to `registry/ratings.json` |
 | `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution — uses `@agentoctopus/skills` for eligibility and env overrides |
 | `packages/adapters` | `http-adapter.ts`, `mcp-adapter.ts`, `subprocess-adapter.ts` | Three execution strategies — HTTP POST, MCP stdio, Node subprocess |
-| `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API |
+| `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts`, `control-plane/`, `channels/`, `security/` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API, event bus, Webhook/WebChat channels, DM pairing |
 | `apps/web` | `src/app/api/ask/route.ts`, `src/app/page.tsx` | Next.js REST API + chat demo UI |
-| `apps/cli` | `src/index.ts`, `src/update.ts`, `src/sync-skills.ts`, `src/clawhub.ts` | Commander CLI (`list`, `ask`, `update`, `sync`, `onboard`, `skill`) — ClawHub re-exports from `@agentoctopus/skills` |
+| `apps/cli` | `src/index.ts`, `src/update.ts`, `src/sync-skills.ts`, `src/clawhub.ts`, `src/evolve.ts`, `src/connect.ts` | Commander CLI (`list`, `ask`, `update`, `sync`, `onboard`, `skill`, `evolve`, `connect`, `agent`) — ClawHub re-exports from `@agentoctopus/skills` |
 
 ### Routing logic (critical to understand)
 
@@ -188,6 +195,8 @@ Current real skills (all free APIs, no keys):
 - **translation** — MyMemory API
 - **ip-lookup** — ip-api.com (requires actual IP/domain in query)
 
+The evolution system (`packages/skills/src/evolution/`) enables skills to self-improve based on execution signals and user feedback. It runs as a background scheduler and can be triggered manually via `octopus evolve`. Evolution is opt-in (`evolution.enabled` in `octopus.json`).
+
 ### Environment
 
 Configuration is loaded from `~/.agentoctopus/octopus.json` (v2 format) with `${ENV_VAR}` secrets resolved from `~/.agentoctopus/.env`. See `packages/core/src/config-resolver.ts`.
@@ -198,7 +207,8 @@ Key config sections:
 - `rerank` — model
 - `deploy` — mode ("local" | "cloud"), root
 - `gateway` — port, corsOrigins, cloudUrl, syncOnStartup
-- `skills` — allowBundled, entries (per-skill apiKey/env/config), load (extraDirs, watch), limits
+- `skills` — allowBundled, entries (per-skill apiKey/env/config), load (extraDirs, watch), limits, installPrefs
+- `evolution` — enabled (opt-in skill self-improvement)
 
 Embedding and re-ranking can use a different provider/endpoint than the main LLM. The web `initOctopus()` in `apps/web/src/app/api/ask/route.ts` is a singleton — restart the server after changing skills or config.
 
