@@ -1,5 +1,24 @@
 # @agentoctopus/registry
 
+## 0.8.0
+
+### Patch Changes
+
+- 858f227: Fix install spec extraction from ClawHub skill metadata.openclaw.install
+- bbad3b9: Bump TypeScript 5.9→6.0 and Zod 3→4 with required tsconfig and API fixes
+
+  - Add `"types": ["node"]` to root tsconfig.json (TS 6.0 no longer auto-includes @types/node)
+  - Migrate `z.record(V)` → `z.record(z.string(), V)` for Zod 4 compatibility
+
+- ac3a715: fix(registry): pass maxCandidates: Infinity to loadSkillsFromDir so all skills are loaded instead of being capped at 300
+  fix(core): handle non-array tags in skillToText before .join() to prevent gateway startup crash
+  docs: fix TEST_INSTRUCTIONS.md Phase 3 test commands — correct import path and repo root
+- Updated dependencies [858f227]
+- Updated dependencies [858f227]
+- Updated dependencies [858f227]
+- Updated dependencies [bbad3b9]
+  - @agentoctopus/skills@0.8.0
+
 ## 0.7.0
 
 ### Patch Changes
