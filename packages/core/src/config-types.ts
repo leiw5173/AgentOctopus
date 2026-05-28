@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const LLMConfigSchema = z.object({
-  provider: z.enum(['openai', 'gemini', 'ollama']).default('openai'),
+  provider: z.enum(['openai', 'gemini', 'ollama', 'anthropic']).default('openai'),
   model: z.string().default('gpt-4o'),
   apiKey: z.string().default(''),
   baseUrl: z.string().default('https://api.openai.com/v1'),
@@ -9,7 +9,7 @@ export const LLMConfigSchema = z.object({
 export type LLMConfigSection = z.infer<typeof LLMConfigSchema>;
 
 export const EmbedConfigSchema = z.object({
-  provider: z.enum(['openai', 'gemini', 'ollama']).default('openai'),
+  provider: z.enum(['openai', 'gemini', 'ollama', 'anthropic']).default('openai'),
   model: z.string().default('text-embedding-3-small'),
   apiKey: z.string().default(''),
   baseUrl: z.string().default(''),
