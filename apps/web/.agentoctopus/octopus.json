@@ -16,8 +16,8 @@
     "model": "deepseek-v4-flash"
   },
   "registry": {
-    "skillsDir": ".agentoctopus/skills",
-    "ratingsPath": ".agentoctopus/ratings.json",
+    "skillsDir": "skills",
+    "ratingsPath": "ratings.json",
     "noCache": true
   }
 }

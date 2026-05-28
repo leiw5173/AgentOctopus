@@ -27,6 +27,7 @@ vi.mock('@agentoctopus/core', () => ({
     chat: vi.fn().mockResolvedValue('mock direct answer')
   }),
   loadConfig: mockLoadConfig,
+  getConfigDir: vi.fn().mockReturnValue('/test/.agentoctopus'),
 }));
 
 // Mock @agentoctopus/registry

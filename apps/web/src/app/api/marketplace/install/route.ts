@@ -1,8 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { resolveAppPath } from '../../registry-config';
-import { loadConfig } from '@agentoctopus/core';
+import { loadConfig, getConfigDir } from '@agentoctopus/core';
 
 const MARKETPLACE_DIR = path.resolve(process.cwd(), '../../registry/marketplace');
 const MARKETPLACE_INDEX = path.join(MARKETPLACE_DIR, 'index.json');
@@ -25,7 +24,10 @@ export async function POST(req: Request) {
     }
 
     const config = loadConfig();
-    const skillsDir = resolveAppPath(config.registry.skillsDir);
+    const configDir = getConfigDir();
+    const skillsDir = path.isAbsolute(config.registry.skillsDir)
+      ? config.registry.skillsDir
+      : path.resolve(configDir, config.registry.skillsDir);
 
     // Copy to local registry
     const targetDir = path.join(skillsDir, slug);
