@@ -59,6 +59,48 @@ describe('ConfigResolver', () => {
     expect(config.deploy.mode).toBe('local');
   });
 
+  it('uses deployment environment variables when no config files exist', () => {
+    fs.rmSync(path.join(TEST_HOME, '.agentoctopus'), { recursive: true, force: true });
+    process.env.LLM_PROVIDER = 'openai';
+    process.env.LLM_MODEL = 'gpt-4.1';
+    process.env.LLM_API_KEY = 'sk-llm';
+    process.env.LLM_BASE_URL = 'https://llm.example/v1';
+    process.env.EMBED_PROVIDER = 'openai';
+    process.env.EMBED_MODEL = 'text-embedding-3-large';
+    process.env.EMBED_API_KEY = 'sk-embed';
+    process.env.EMBED_BASE_URL = 'https://embed.example/v1';
+    process.env.RERANK_MODEL = 'gpt-4.1-mini';
+
+    const config = loadConfig();
+
+    expect(config.llm).toEqual({
+      provider: 'openai',
+      model: 'gpt-4.1',
+      apiKey: 'sk-llm',
+      baseUrl: 'https://llm.example/v1',
+    });
+    expect(config.embed).toEqual({
+      provider: 'openai',
+      model: 'text-embedding-3-large',
+      apiKey: 'sk-embed',
+      baseUrl: 'https://embed.example/v1',
+    });
+    expect(config.rerank.model).toBe('gpt-4.1-mini');
+  });
+
+  it('falls back to provider-specific OpenAI environment variables', () => {
+    fs.rmSync(path.join(TEST_HOME, '.agentoctopus'), { recursive: true, force: true });
+    process.env.OPENAI_API_KEY = 'sk-openai';
+    process.env.OPENAI_BASE_URL = 'https://openai.example/v1';
+
+    const config = loadConfig();
+
+    expect(config.llm.apiKey).toBe('sk-openai');
+    expect(config.llm.baseUrl).toBe('https://openai.example/v1');
+    expect(config.embed.apiKey).toBe('sk-openai');
+    expect(config.embed.baseUrl).toBe('https://openai.example/v1');
+  });
+
   it('resolves ${VAR} references from .env', () => {
     fs.writeFileSync(
       path.join(TEST_HOME, '.agentoctopus', '.env'),

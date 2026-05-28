@@ -39,6 +39,61 @@ function mergeSection<T>(schema: { parse(i: unknown): T }, partial: Record<strin
   return schema.parse(partial && Object.keys(partial).length > 0 ? partial : {});
 }
 
+function envString(key: string): string | undefined {
+  const value = process.env[key];
+  return value && value.trim() !== '' ? value : undefined;
+}
+
+function envProvider(key: string): 'openai' | 'gemini' | 'ollama' | 'anthropic' | undefined {
+  const value = envString(key);
+  return value === 'openai' || value === 'gemini' || value === 'ollama' || value === 'anthropic'
+    ? value
+    : undefined;
+}
+
+function applyEnvConfig(resolved: ResolvedConfig): ResolvedConfig {
+  const llmProvider = envProvider('LLM_PROVIDER') ?? resolved.llm.provider;
+  const embedProvider = envProvider('EMBED_PROVIDER') ?? resolved.embed.provider;
+  const llmApiKey = envString('LLM_API_KEY')
+    ?? (llmProvider === 'openai' ? envString('OPENAI_API_KEY') : undefined)
+    ?? (llmProvider === 'gemini' ? envString('GEMINI_API_KEY') : undefined)
+    ?? resolved.llm.apiKey;
+  const llmBaseUrl = envString('LLM_BASE_URL')
+    ?? (llmProvider === 'openai' ? envString('OPENAI_BASE_URL') : undefined)
+    ?? resolved.llm.baseUrl;
+  const embedApiKey = envString('EMBED_API_KEY')
+    ?? (embedProvider === 'openai' ? envString('OPENAI_API_KEY') : undefined)
+    ?? (embedProvider === 'gemini' ? envString('GEMINI_API_KEY') : undefined)
+    ?? llmApiKey
+    ?? resolved.embed.apiKey;
+  const embedBaseUrl = envString('EMBED_BASE_URL')
+    ?? (embedProvider === 'openai' ? envString('OPENAI_BASE_URL') : undefined)
+    ?? llmBaseUrl
+    ?? resolved.embed.baseUrl;
+
+  return {
+    ...resolved,
+    llm: {
+      ...resolved.llm,
+      provider: llmProvider,
+      model: envString('LLM_MODEL') ?? resolved.llm.model,
+      apiKey: llmApiKey,
+      baseUrl: llmBaseUrl,
+    },
+    embed: {
+      ...resolved.embed,
+      provider: embedProvider,
+      model: envString('EMBED_MODEL') ?? resolved.embed.model,
+      apiKey: embedApiKey,
+      baseUrl: embedBaseUrl,
+    },
+    rerank: {
+      ...resolved.rerank,
+      model: envString('RERANK_MODEL') ?? resolved.rerank.model,
+    },
+  };
+}
+
 function migrateV1ToV2(raw: Record<string, unknown>): OctopusConfigV2 {
   const creds = (raw.credentials as Record<string, string>) ?? {};
   const envLines: string[] = ['# AgentOctopus — migrated from octopus.json v1'];
@@ -95,7 +150,7 @@ export function loadConfig(): ResolvedConfig {
 
   const parsed = OctopusConfigV2Schema.parse(configObj) as unknown as Record<string, Record<string, unknown> | undefined>;
 
-  const resolved: ResolvedConfig = {
+  const resolved: ResolvedConfig = applyEnvConfig({
     credentials: resolveAllEnvRefs((parsed.credentials ?? {}) as Record<string, string>),
     llm: resolveAllEnvRefs(mergeSection(LLMConfigSchema, parsed.llm)),
     embed: resolveAllEnvRefs(mergeSection(EmbedConfigSchema, parsed.embed)),
@@ -113,7 +168,7 @@ export function loadConfig(): ResolvedConfig {
     sandbox: resolveAllEnvRefs(mergeSection(SandboxConfigSchema, parsed.sandbox)),
     canvas: resolveAllEnvRefs(mergeSection(CanvasConfigSchema, parsed.canvas)),
     companion: resolveAllEnvRefs(mergeSection(CompanionConfigSchema, parsed.companion)),
-  };
+  });
 
   if (raw && raw.version !== 2) {
     try { saveConfigFile(configObj as unknown as OctopusConfigV2); } catch { /* non-fatal */ }
