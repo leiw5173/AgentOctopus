@@ -1,16 +1,13 @@
 import { NextResponse } from 'next/server';
-import { SkillRegistry } from '@agentoctopus/registry';
-import path from 'path';
-
-const registry = new SkillRegistry(
-  path.resolve(process.cwd(), '../../registry/skills'),
-  path.resolve(process.cwd(), '../../registry/ratings.json')
-);
+import type { SkillRegistry } from '@agentoctopus/registry';
+import { createConfiguredRegistry } from '../registry-config';
 
 let loaded = false;
+let registry: SkillRegistry;
 
 async function ensureLoaded() {
   if (!loaded) {
+    registry = createConfiguredRegistry();
     await registry.load();
     loaded = true;
   }

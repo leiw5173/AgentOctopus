@@ -1,6 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { POST as askPost } from '../src/app/api/ask/route.js';
 import { POST as feedbackPost } from '../src/app/api/feedback/route.js';
+
+const { mockLoadConfig, mockSkillRegistry } = vi.hoisted(() => ({
+  mockLoadConfig: vi.fn(),
+  mockSkillRegistry: vi.fn(),
+}));
 
 // Mock @agentoctopus/core
 vi.mock('@agentoctopus/core', () => ({
@@ -21,7 +26,23 @@ vi.mock('@agentoctopus/core', () => ({
   createChatClient: vi.fn().mockReturnValue({
     chat: vi.fn().mockResolvedValue('mock direct answer')
   }),
-  loadConfig: vi.fn().mockReturnValue({
+  loadConfig: mockLoadConfig,
+}));
+
+// Mock @agentoctopus/registry
+vi.mock('@agentoctopus/registry', () => ({
+  SkillRegistry: mockSkillRegistry.mockImplementation(() => ({
+    load: vi.fn(),
+    getAll: vi.fn().mockReturnValue([]),
+    getByName: vi.fn().mockImplementation((name: string) =>
+      name === 'test-skill' ? { manifest: { name: 'test-skill' }, rating: 4.6 } : undefined
+    ),
+    recordFeedback: vi.fn()
+  }))
+}));
+
+beforeEach(() => {
+  mockLoadConfig.mockReturnValue({
     llm: { provider: 'openai' as const, model: 'gpt-4o', apiKey: '', baseUrl: 'https://api.openai.com/v1' },
     embed: { provider: 'openai' as const, model: 'text-embedding-3-small', apiKey: '', baseUrl: '' },
     rerank: { model: 'gpt-4o-mini' },
@@ -32,20 +53,9 @@ vi.mock('@agentoctopus/core', () => ({
     auth: { enabled: true, apiKeysPath: null as string | null, rateLimitEnabled: true },
     rating: { feedbackSharing: true, gistId: null as string | null },
     slack: { port: 3001 },
-  }),
-}));
-
-// Mock @agentoctopus/registry
-vi.mock('@agentoctopus/registry', () => ({
-  SkillRegistry: vi.fn().mockImplementation(() => ({
-    load: vi.fn(),
-    getAll: vi.fn().mockReturnValue([]),
-    getByName: vi.fn().mockImplementation((name: string) =>
-      name === 'test-skill' ? { manifest: { name: 'test-skill' }, rating: 4.6 } : undefined
-    ),
-    recordFeedback: vi.fn()
-  }))
-}));
+  });
+  mockSkillRegistry.mockClear();
+});
 
 // ── /api/ask ────────────────────────────────────────────────────────────────
 
@@ -74,6 +84,7 @@ describe('POST /api/ask', () => {
     expect(data.confidence).toBe(0.99);
     expect(data.response).toBe('mock API output');
   });
+
 });
 
 // ── /api/feedback ────────────────────────────────────────────────────────────

@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "llm": {
+    "provider": "openai",
+    "model": "deepseek-v4-flash",
+    "apiKey": "${LLM_API_KEY}",
+    "baseUrl": "https://opencode.ai/zen/go/v1"
+  },
+  "embed": {
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "apiKey": "${EMBED_API_KEY}",
+    "baseUrl": "https://api.chatanywhere.org/v1"
+  },
+  "rerank": {
+    "model": "deepseek-v4-flash"
+  },
+  "registry": {
+    "skillsDir": ".agentoctopus/skills",
+    "ratingsPath": ".agentoctopus/ratings.json",
+    "noCache": true
+  }
+}

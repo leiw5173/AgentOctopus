@@ -12,10 +12,36 @@ import {
   type ResolvedConfig, type OctopusConfigV2,
 } from './config-types.js';
 
-const CONFIG_DIR = path.join(os.homedir(), '.agentoctopus');
-const CONFIG_PATH = path.join(CONFIG_DIR, 'octopus.json');
+const DEFAULT_CONFIG_DIR = path.join(os.homedir(), '.agentoctopus');
 
 let _config: ResolvedConfig | null = null;
+
+function findProjectConfigDir(): string | null {
+  const webAppCandidate = path.join(process.cwd(), 'apps', 'web', '.agentoctopus');
+  if (fs.existsSync(path.join(webAppCandidate, 'octopus.json'))) return webAppCandidate;
+
+  let current = process.cwd();
+  while (true) {
+    const candidate = path.join(current, '.agentoctopus');
+    if (fs.existsSync(path.join(candidate, 'octopus.json'))) return candidate;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function getConfigDirInternal(): string {
+  const defaultConfigPath = path.join(DEFAULT_CONFIG_DIR, 'octopus.json');
+  return envString('AGENTOCTOPUS_CONFIG_DIR')
+    ?? envString('AGENTOCTOPUS_HOME')
+    ?? (fs.existsSync(defaultConfigPath) ? DEFAULT_CONFIG_DIR : undefined)
+    ?? findProjectConfigDir()
+    ?? DEFAULT_CONFIG_DIR;
+}
+
+function getConfigPathInternal(): string {
+  return path.join(getConfigDirInternal(), 'octopus.json');
+}
 
 function resolveEnvRef(value: string): string {
   const m = value.match(/^\$\{([A-Z_][A-Z0-9_]*)\}$/);
@@ -117,8 +143,9 @@ function migrateV1ToV2(raw: Record<string, unknown>): OctopusConfigV2 {
   if (typeof raw.maxRetries === 'number') v2.execution = { ...v2.execution, maxRetries: raw.maxRetries };
 
   if (envLines.length > 1) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CONFIG_DIR, '.env'), envLines.join('\n') + '\n', 'utf8');
+    const configDir = getConfigDirInternal();
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, '.env'), envLines.join('\n') + '\n', 'utf8');
   }
   return v2;
 }
@@ -126,15 +153,17 @@ function migrateV1ToV2(raw: Record<string, unknown>): OctopusConfigV2 {
 export function loadConfig(): ResolvedConfig {
   if (_config) return _config;
 
-  const envPath = path.join(CONFIG_DIR, '.env');
+  const configDir = getConfigDirInternal();
+  const configPath = getConfigPathInternal();
+  const envPath = path.join(configDir, '.env');
   if (fs.existsSync(envPath)) {
     dotenv.config({ path: envPath, override: false });
   }
 
   let raw: Record<string, unknown> | null = null;
-  if (fs.existsSync(CONFIG_PATH)) {
-    try { raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch {
-      console.warn(`[ConfigResolver] Failed to parse ${CONFIG_PATH}, using defaults.`);
+  if (fs.existsSync(configPath)) {
+    try { raw = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {
+      console.warn(`[ConfigResolver] Failed to parse ${configPath}, using defaults.`);
     }
   }
 
@@ -186,17 +215,19 @@ export function resetConfig(): void {
   _config = null;
 }
 
-export function getConfigDir(): string { return CONFIG_DIR; }
-export function getConfigPath(): string { return CONFIG_PATH; }
-export function getEnvPath(): string { return path.join(CONFIG_DIR, '.env'); }
+export function getConfigDir(): string { return getConfigDirInternal(); }
+export function getConfigPath(): string { return getConfigPathInternal(); }
+export function getEnvPath(): string { return path.join(getConfigDirInternal(), '.env'); }
 
 export function saveConfigFile(config: OctopusConfigV2): void {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+  const configPath = getConfigPathInternal();
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
 }
 
 export function saveEnvFile(content: string): void {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const configDir = getConfigDirInternal();
+  fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(getEnvPath(), content, 'utf8');
 }
 

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { Router, Executor, createChatClient, loadConfig, type CredentialMissingResult, type BinaryMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult } from '@agentoctopus/core';
-import { SkillRegistry } from '@agentoctopus/registry';
-import path from 'path';
+import type { SkillRegistry } from '@agentoctopus/registry';
+import { createConfiguredRegistry } from '../registry-config';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
@@ -19,14 +19,9 @@ function isBinaryInstallFailed(result: unknown): result is BinaryInstallFailedRe
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_install_failed';
 }
 
-// Singleton initialization for production (can be expanded for persistence)
-const registry = new SkillRegistry(
-  path.resolve(process.cwd(), '../../registry/skills'),
-  path.resolve(process.cwd(), '../../registry/ratings.json')
-);
-
 // We keep a simple memo to avoid rebuilding index on every request
 let isInitialized = false;
+let registry: SkillRegistry;
 let router: Router;
 let executor: Executor;
 let chatClient: ReturnType<typeof createChatClient>;
@@ -34,6 +29,7 @@ let chatClient: ReturnType<typeof createChatClient>;
 async function initOctopus() {
   if (!isInitialized) {
     const config = loadConfig();
+    registry = createConfiguredRegistry();
 
     await registry.load();
 

@@ -32,6 +32,7 @@ beforeEach(() => {
   envSnapshot = { ...process.env };
   if (fs.existsSync(TEST_HOME)) fs.rmSync(TEST_HOME, { recursive: true, force: true });
   fs.mkdirSync(path.join(TEST_HOME, '.agentoctopus'), { recursive: true });
+  process.env.AGENTOCTOPUS_CONFIG_DIR = path.join(TEST_HOME, '.agentoctopus');
 });
 
 afterEach(() => {

@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { resolveAppPath } from '../../registry-config';
+import { loadConfig } from '@agentoctopus/core';
 
 const MARKETPLACE_DIR = path.resolve(process.cwd(), '../../registry/marketplace');
-const SKILLS_DIR = path.resolve(process.cwd(), '../../registry/skills');
 const MARKETPLACE_INDEX = path.join(MARKETPLACE_DIR, 'index.json');
 
 /**
@@ -23,8 +24,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Skill "${slug}" not found in marketplace` }, { status: 404 });
     }
 
+    const config = loadConfig();
+    const skillsDir = resolveAppPath(config.registry.skillsDir);
+
     // Copy to local registry
-    const targetDir = path.join(SKILLS_DIR, slug);
+    const targetDir = path.join(skillsDir, slug);
     fs.mkdirSync(targetDir, { recursive: true });
 
     const files = fs.readdirSync(sourceDir);
