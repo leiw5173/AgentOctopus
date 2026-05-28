@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Registry skills - too many files (4343 skills, 309MB)
+# Only keep built-in skills needed for the web app
+registry/skills/*
+!registry/skills/weather/
+!registry/skills/translation/
+!registry/skills/ip-lookup/
+
+# Git
+.git/
+.gitignore
+
+# Build outputs
+**/dist/
+**/.next/
+**/out/
+
+# Logs
+logs/
+*.log
+
+# Test files
+**/tests/
+**/*.test.ts
+**/*.test.tsx
+
+# Documentation (not needed for deployment)
+docs/
+*.md
+!README.md
+
+# Misc
+.env*
+!.env.production
+.vercel/
+.scratch/
+*.swp
+*.swo
+.DS_Store
+
+# Changesets
+.changesets/
+.changeset/
+
+# CLI app - needed by packages/agentoctopus umbrella package build
+# apps/cli/
+
+# Patches - needed by pnpm install (referenced in pnpm-lock.yaml)
+# patches/

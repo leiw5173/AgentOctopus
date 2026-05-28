@@ -1,7 +1,7 @@
 import { type LoadedSkill, getRequiredEnvVars } from '@agentoctopus/registry';
 
 export interface LLMConfig {
-  provider: 'openai' | 'gemini' | 'ollama';
+  provider: 'openai' | 'gemini' | 'ollama' | 'anthropic';
   model: string;
   apiKey?: string;
   baseUrl?: string;
@@ -18,6 +18,7 @@ export interface ChatClient {
 export function createChatClient(config: LLMConfig): ChatClient {
   switch (config.provider) {
     case 'openai': return new OpenAIChatClient(config);
+    case 'anthropic': return new AnthropicChatClient(config);
     case 'gemini': return new GeminiChatClient(config);
     case 'ollama': return new OllamaChatClient(config);
     default: throw new Error(`Unknown chat provider: ${config.provider}`);
@@ -27,6 +28,7 @@ export function createChatClient(config: LLMConfig): ChatClient {
 export function createEmbedClient(config: LLMConfig): EmbedClient {
   switch (config.provider) {
     case 'openai': return new OpenAIEmbedClient(config);
+    case 'anthropic': return new AnthropicEmbedClient(config);
     case 'gemini': return new GeminiEmbedClient(config);
     case 'ollama': return new OllamaEmbedClient(config);
     default: throw new Error(`Unknown embed provider: ${config.provider}`);
@@ -101,6 +103,50 @@ class OllamaEmbedClient implements EmbedClient {
     const client = new Ollama({ host: this.config.baseUrl });
     const response = await client.embeddings({ model: this.config.model, prompt: text });
     return response.embedding;
+  }
+}
+
+class AnthropicChatClient implements ChatClient {
+  constructor(private config: LLMConfig) {}
+  async chat(systemPrompt: string, userMessage: string): Promise<string> {
+    // Use fetch to avoid dependency on @anthropic-ai/sdk
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': this.config.apiKey ?? '',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: this.config.model,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      }),
+    });
+    const data = (await response.json()) as { content?: Array<{ type: string; text?: string }> };
+    const content = data.content?.[0];
+    return content && content.type === 'text' ? content.text ?? '' : '';
+  }
+}
+
+class AnthropicEmbedClient implements EmbedClient {
+  constructor(private config: LLMConfig) {}
+  async embed(text: string): Promise<number[]> {
+    // Anthropic doesn't have a native embeddings API, use OpenAI-compatible endpoint
+    const response = await fetch(`${this.config.baseUrl ?? 'https://api.openai.com/v1'}/embeddings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.apiKey ?? ''}`,
+      },
+      body: JSON.stringify({
+        model: this.config.model || 'text-embedding-3-small',
+        input: text,
+      }),
+    });
+    const data = (await response.json()) as { data?: Array<{ embedding: number[] }> };
+    return data.data?.[0]?.embedding ?? [];
   }
 }
 

@@ -1,0 +1,65 @@
+name: agentoctopus-web
+
+# Vercel deployment configuration for AgentOctopus web frontend
+# Set these environment variables in the Vercel dashboard:
+# Project Settings → Environment Variables
+
+build:
+  env:
+    # Node environment
+    NODE_ENV: production
+
+    # LLM Configuration (Required)
+    # Supported providers: openai, gemini, ollama
+    LLM_PROVIDER: openai
+    LLM_MODEL: gpt-4o
+    LLM_API_KEY: your-api-key-here
+    LLM_BASE_URL: https://api.openai.com/v1
+
+    # Embedding Configuration (Required)
+    EMBED_PROVIDER: openai
+    EMBED_MODEL: text-embedding-3-small
+    EMBED_API_KEY: your-embedding-api-key-here  # Can be same as LLM_API_KEY
+    EMBED_BASE_URL: https://api.openai.com/v1
+
+    # Re-ranking Configuration (Required)
+    RERANK_MODEL: gpt-4o-mini
+
+    # Gateway Configuration (Optional)
+    GATEWAY_PORT: "3000"
+    GATEWAY_CORS_ORIGINS: '*'
+    GATEWAY_CLOUD_URL: ''
+    GATEWAY_SYNC_ON_STARTUP: "false"
+
+    # Registry Configuration (Optional - defaults shown)
+    # Skills directory is set at build time via vercel.json
+    REGISTRY_SKILLS_DIR: ./registry/skills
+    REGISTRY_RATINGS_PATH: ./registry/ratings.json
+    REGISTRY_NO_CACHE: "false"
+
+    # Execution Configuration (Optional)
+    EXECUTION_TIMEOUT_MS: "30000"
+    EXECUTION_MAX_RETRIES: "3"
+    EXECUTION_TIMING: "false"
+
+    # Auth Configuration (Optional)
+    AUTH_ENABLED: "true"
+    AUTH_API_KEYS_PATH: ''
+    AUTH_RATE_LIMIT_ENABLED: "true"
+
+    # Rating Configuration (Optional)
+    RATING_FEEDBACK_SHARING: "true"
+    RATING_GIST_ID: ''
+    RATING_DEVICE_ID: ''
+
+    # Skills Configuration (Optional)
+    # Comma-separated list of bundled skills to allow
+    SKILLS_ALLOW_BUNDLED: weather,translation,ip-lookup
+
+    # Evolution Configuration (Optional)
+    EVOLUTION_ENABLED: "false"
+    EVOLUTION_AUTO_APPLY_SAFE: "true"
+    EVOLUTION_SIGNAL_THRESHOLD: "10"
+    EVOLUTION_FEEDBACK_THRESHOLD: "3"
+    EVOLUTION_STALE_DAYS: "30"
+    EVOLUTION_SCHEDULE_CRON: "0 3 * * *"
