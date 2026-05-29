@@ -141,13 +141,17 @@ export class RatingStore {
   }
 
   private save(): void {
-    const dir = path.dirname(this.ratingsPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    try {
+      const dir = path.dirname(this.ratingsPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const tmp = `${this.ratingsPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(this.store, null, 2), 'utf-8');
+      fs.renameSync(tmp, this.ratingsPath);
+    } catch {
+      // Read-only filesystem (e.g. Vercel serverless) — skip persistence
     }
-    const tmp = `${this.ratingsPath}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.store, null, 2), 'utf-8');
-    fs.renameSync(tmp, this.ratingsPath);
   }
 
   getOrCreate(skillName: string, initialQuality = 3.0): RatingEntry {
