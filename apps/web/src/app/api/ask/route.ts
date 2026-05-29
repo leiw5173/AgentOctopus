@@ -175,7 +175,7 @@ export async function POST(req: Request) {
       rating: null,
       skillsAttempted,
       fallbackReason: `All ${skillsAttempted.length} skill(s) failed`,
-      executionErrors,
+      ...(process.env.NODE_ENV !== 'production' ? { executionErrors } : {}),
       response: answer,
     });
   } catch (error: unknown) {
