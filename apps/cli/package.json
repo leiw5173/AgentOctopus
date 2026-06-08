@@ -33,7 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "tsx": "^4.7.0",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vitest": "^1.5.0"
   },
