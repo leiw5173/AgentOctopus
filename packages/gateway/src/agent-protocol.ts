@@ -324,7 +324,7 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
   // ── Author: Skill Feedback ────────────────────────────────────────────
 
   router.get('/skills/:name/feedback', (req: Request, res: Response) => {
-    const { name } = req.params;
+    const name = typeof req.params.name === 'string' ? req.params.name : req.params.name![0];
     const skill = engine.registry.getByName(name);
     if (!skill) {
       res.status(404).json({ error: `Skill "${name}" not found` });
