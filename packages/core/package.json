@@ -29,7 +29,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.0.1",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^1.5.0"
   },
   "publishConfig": {
