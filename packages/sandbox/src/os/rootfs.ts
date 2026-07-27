@@ -283,7 +283,7 @@ async function extractArtifact(opts: ExtractOptions): Promise<void> {
     // Use spawn (not execFile) so stdout is a raw stream — execFile buffers
     // stdout internally and corrupts the pipe.
     await new Promise<void>((resolvePromise, rejectPromise) => {
-      const zstd = spawn('zstd', ['-dc', artifactPath]);
+      const zstd = spawn('zstd', ['-dc', '--', artifactPath]);
       const tar = spawn('tar', [
         '-xf', '-',
         '-C', destDir,
@@ -461,16 +461,27 @@ async function verifyElfClosure(root: string, manifest: RuntimeArtifactManifest)
 export interface VerifyRuntimeArtifactOptions {
   artifactPath: string;
   manifestPath: string;
+  /**
+   * Destination directory for extraction. The artifact is extracted ONCE into
+   * this directory and the tree allowlist + ELF dependency-closure checks run
+   * against THAT tree (the same bytes that were just written, never a second
+   * unverified read from disk). The directory must already exist.
+   *
+   * If omitted, a fresh 0700 tmp dir is created, verified, and removed before
+   * return — suitable for "verify-only" callers that do not need the tree.
+   */
+  destDir?: string;
 }
 
 /**
- * Verify the manifest and compressed artifact, then extract and verify the
- * full tree and ELF dependency closure. Returns the validated manifest.
- * Throws `RootfsError` on any failure.
+ * Verify the manifest and compressed artifact, then extract ONCE into
+ * `destDir` (or a throwaway tmp dir when omitted) and run the tree allowlist
+ * walk + ELF dependency-closure check against that exact extracted tree.
+ * Returns the validated manifest. Throws `RootfsError` on any failure.
  *
- * Note: extraction is performed into a temporary directory that is removed
- * before this function returns. Callers that need the extracted tree should
- * use `assembleRootfs()`.
+ * The compressed-bytes SHA-256 is verified BEFORE any extraction. There is
+ * no second unverified read of the artifact — the tree that gets verified
+ * is the tree that gets returned (or, in the throwaway case, discarded).
  */
 export async function verifyRuntimeArtifact(
   opts: VerifyRuntimeArtifactOptions,
@@ -481,7 +492,7 @@ export async function verifyRuntimeArtifact(
   });
   const manifest = parseManifest(raw);
 
-  // Phase 2: stream SHA-256 over the compressed artifact before extraction.
+  // Phase 2: stream SHA-256 over the compressed artifact BEFORE extraction.
   const digest = await sha256File(opts.artifactPath).catch((err) => {
     throw new RootfsError(`cannot read artifact: ${(err as Error).message}`);
   });
@@ -491,14 +502,20 @@ export async function verifyRuntimeArtifact(
     );
   }
 
-  // Phase 3: extract into a fresh 0700 dir and verify the tree.
-  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'oct-rootfs-verify-'));
-  try {
-    await extractArtifact({ artifactPath: opts.artifactPath, destDir: tmpRoot });
-    await verifyTree(tmpRoot, manifest);
-    await verifyElfClosure(tmpRoot, manifest);
-  } finally {
-    await rm(tmpRoot, { recursive: true, force: true });
+  // Phase 3: extract ONCE into the target dir and verify THAT tree in place.
+  if (opts.destDir !== undefined) {
+    await extractArtifact({ artifactPath: opts.artifactPath, destDir: opts.destDir });
+    await verifyTree(opts.destDir, manifest);
+    await verifyElfClosure(opts.destDir, manifest);
+  } else {
+    const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'oct-rootfs-verify-'));
+    try {
+      await extractArtifact({ artifactPath: opts.artifactPath, destDir: tmpRoot });
+      await verifyTree(tmpRoot, manifest);
+      await verifyElfClosure(tmpRoot, manifest);
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true });
+    }
   }
 
   return manifest;
@@ -513,18 +530,15 @@ export interface AssembleRootfsOptions {
 }
 
 /**
- * Extract the verified runtime into a private staging directory under
- * `workDir`, create only the mount-target paths, and return the layout.
- * Fails closed and removes partial staging on any error.
+ * Create the private staging dir, extract the verified runtime into it ONCE,
+ * verify the extracted tree in place, create only the mount-target paths,
+ * and return the layout. Fails closed and removes partial staging on any
+ * error. The tree that is verified is the tree that is returned — there is
+ * no TOCTOU window between digest check and use.
  */
 export async function assembleRootfs(opts: AssembleRootfsOptions): Promise<RootfsLayout> {
-  // Verify first (this also exercises the full tree/ELF checks).
-  const manifest = await verifyRuntimeArtifact({
-    artifactPath: opts.runtimeArtifactPath,
-    manifestPath: opts.runtimeManifestPath,
-  });
-
-  // Create the staging root inside workDir with 0700.
+  // Create the staging root inside workDir with 0700 BEFORE verification so
+  // the verifier can extract directly into it.
   const root = await mkdtemp(path.join(opts.workDir, 'rootfs-'));
   await chmod(root, 0o700);
 
@@ -542,14 +556,20 @@ export async function assembleRootfs(opts: AssembleRootfsOptions): Promise<Rootf
       path.join(root, 'dev'),
     ];
     for (const t of targets) {
-      try { await execFileAsync('umount', [t]); } catch { /* not mounted */ }
+      try { await execFileAsync('umount', ['--', t]); } catch { /* not mounted */ }
     }
     await rm(root, { recursive: true, force: true });
   };
 
   try {
-    // Extract the verified runtime into the staging root.
-    await extractArtifact({ artifactPath: opts.runtimeArtifactPath, destDir: root });
+    // Extract ONCE into the staging root and verify THAT tree. The manifest
+    // returned here is the one the layout's inRoot.node is taken from, so the
+    // layout is bound to the exact bytes that were hashed + extracted.
+    const manifest = await verifyRuntimeArtifact({
+      artifactPath: opts.runtimeArtifactPath,
+      manifestPath: opts.runtimeManifestPath,
+      destDir: root,
+    });
 
     // Create mount targets only — no mounting, no copying.
     await mkdir(path.join(root, 'skill'), { recursive: true, mode: 0o755 });

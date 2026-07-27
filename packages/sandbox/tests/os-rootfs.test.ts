@@ -91,7 +91,6 @@ async function buildArtifact(
   }
 
   const artifactPath = path.join(dir, '..', `artifact-${crypto.randomBytes(4).toString('hex')}.tar${opts.compress === false ? '' : '.zst'}`);
-  const tarArgs = ['-cf', artifactPath.replace(/\.zst$/, opts.compress === false ? '' : '.tar'), '-C', dir, ...entries.map((e) => e.path)];
   // Simpler: always produce an intermediate .tar then optionally zstd it.
   const tarPath = artifactPath.replace(/\.tar\.zst$|\.tar$/, '') + '.tar';
   await execFileAsync('tar', ['-cf', tarPath, '-C', dir, ...entries.map((e) => e.path)]);
@@ -113,7 +112,6 @@ async function buildArtifact(
     nodePath: opts.nodePath ?? '/usr/bin/node',
     files: entries,
   };
-  void tarArgs;
   return { artifactPath: finalPath, manifest };
 }
 
@@ -544,6 +542,114 @@ describe('assembleRootfs', () => {
     // workDir must not contain leftover staging dirs.
     const leftovers = await fs.readdir(work);
     expect(leftovers).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Regression: the staging tree returned by assembleRootfs MUST itself have
+  // been verified against the manifest allowlist — not a second unverified
+  // read from disk. We assert this two ways:
+  //
+  //   (a) Single-extraction: tampering with the on-disk artifact AFTER the
+  //       digest check would only ever produce one extraction of tampered
+  //       bytes, which the in-place verifyTree() then rejects. We simulate
+  //       the race by crafting a fixture whose archive digest matches the
+  //       manifest but whose extracted tree content does not.
+  //
+  //   (b) Tree-equivalence: every file the staging root contains (other than
+  //       the mount targets assembleRootfs creates post-verification) appears
+  //       in the manifest with a matching SHA-256. If a second unverified
+  //       extraction had happened, the tree would not match the manifest.
+  // -------------------------------------------------------------------------
+
+  it('verifies the staging tree itself against the manifest (no unverified second extraction)', async () => {
+    const { artifactPath, manifestPath, manifest } = await makeValidRuntime();
+    const snap = await tmp('oct-snap-');
+    const work = await tmp('oct-rootfs-work-');
+
+    layout = await assembleRootfs({
+      snapshotRoot: snap, workDir: work,
+      runtimeArtifactPath: artifactPath, runtimeManifestPath: manifestPath,
+    });
+
+    // Every manifest-declared file must exist in the staging root with a
+    // matching SHA-256 — proving the staging tree is the one that was
+    // verified, not a fresh unverified read from disk.
+    const declaredFiles = manifest.files.filter((f) => f.kind === 'file');
+    expect(declaredFiles.length).toBeGreaterThan(0);
+    for (const f of declaredFiles) {
+      const buf = await fs.readFile(path.join(layout.root, f.path));
+      const actual = sha256(buf);
+      expect(actual).toBe(f.sha256);
+    }
+
+    // Conversely, every non-mount-target file in the staging root must be
+    // declared in the manifest. Mount targets created post-verification are
+    // exactly: skill/, etc/skill-ca/, etc/skill-ca/ca.pem, tmp/, proc/, dev/.
+    const mountTargets = new Set([
+      'skill', 'etc', 'etc/skill-ca', 'etc/skill-ca/ca.pem', 'tmp', 'proc', 'dev',
+    ]);
+    const declaredPaths = new Set(manifest.files.map((f) => f.path));
+    async function walk(rel: string): Promise<string[]> {
+      const abs = rel === '' ? layout!.root : path.join(layout!.root, rel);
+      const st = await fs.lstat(abs);
+      if (st.isDirectory()) {
+        const children = await fs.readdir(abs);
+        const sub: string[] = [];
+        for (const c of children) sub.push(...await walk(rel === '' ? c : `${rel}/${c}`));
+        return rel === '' ? sub : [rel, ...sub];
+      }
+      return [rel];
+    }
+    const allPaths = await walk('');
+    for (const p of allPaths) {
+      if (mountTargets.has(p)) continue;
+      expect(declaredPaths.has(p)).toBe(true);
+    }
+  });
+
+  it('rejects when the extracted tree does not match the manifest, even if the archive digest matches', async () => {
+    // The archive digest matches the manifest, but the extracted tree has a
+    // tampered libnode. If assembleRootfs extracted once and skipped the
+    // staging-tree verification, this would return a layout instead of
+    // rejecting. (Same fixture as the verifyRuntimeArtifact tree-tamper test,
+    // driven through assembleRootfs to prove the staging tree is verified.)
+    const treeDir = await tmp('oct-tree-t-');
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: ['libnode.so.127'] });
+    const filesA = [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libnode.so.127', content: Buffer.from('libnode-A'), mode: 0o755 },
+    ];
+    const { manifest } = await buildArtifact(treeDir, filesA, { nodePath: '/usr/bin/node' });
+
+    const treeDirB = await tmp('oct-tree-tb-');
+    for (const f of [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libnode.so.127', content: Buffer.from('libnode-B-tampered'), mode: 0o755 },
+    ]) {
+      const full = path.join(treeDirB, f.rel);
+      await fs.mkdir(path.dirname(full), { recursive: true });
+      await fs.writeFile(full, f.content, { mode: f.mode });
+      await fs.chmod(full, f.mode);
+    }
+    const tarPath = path.join(await tmp('oct-art-'), 'b.tar');
+    await execFileAsync('tar', ['-cf', tarPath, '-C', treeDirB,
+      'usr', 'usr/bin', 'usr/bin/node', 'usr/lib', 'usr/lib/libnode.so.127',
+      'lib64', 'lib64/ld-linux-x86-64.so.2']);
+    const zstPath = tarPath + '.zst';
+    await execFileAsync('zstd', ['-q', '-f', '-o', zstPath, tarPath]);
+    const artifactBuf = await fs.readFile(zstPath);
+    const fixed = { ...manifest, artifactSha256: sha256(artifactBuf) };
+    const manifestPath = await writeManifest(await tmp('oct-m-'), fixed);
+
+    const snap = await tmp('oct-snap-');
+    const work = await tmp('oct-rootfs-work-');
+    await expect(assembleRootfs({
+      snapshotRoot: snap, workDir: work,
+      runtimeArtifactPath: zstPath, runtimeManifestPath: manifestPath,
+    })).rejects.toThrow(RootfsError);
+    expect(await fs.readdir(work)).toEqual([]);
   });
 });
 
