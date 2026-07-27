@@ -74,6 +74,9 @@ docs/superpowers/
 # CodeGraph index
 .codegraph/
 
+# Sandbox reproducible runtime artifacts (built by packages/sandbox/scripts/)
+packages/sandbox/runtime/
+
 # Python virtual env
 .venv/
 

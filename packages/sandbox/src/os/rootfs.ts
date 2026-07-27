@@ -183,6 +183,7 @@ async function sha256Buffer(buf: Buffer): Promise<string> {
 const ELF_MAGIC = 0x7f;
 const ELFCLASS64 = 2;
 const ELFDATA2LSB = 1;
+const PT_LOAD = 1;
 const PT_INTERP = 3;
 const PT_DYNAMIC = 2;
 const DT_NEEDED = 1;
@@ -193,6 +194,27 @@ const DT_STRSZ = 10;
 interface ElfInfo {
   interpreter: string | null;
   needed: string[];
+}
+
+interface LoadSegment {
+  vaddr: number;
+  offset: number;
+  filesz: number;
+}
+
+/**
+ * Translate an ELF virtual address to a file offset using the PT_LOAD
+ * segments. In a real ET_DYN binary (e.g. a distro `node`), `DT_STRTAB` and
+ * other dynamic entries hold virtual addresses, not file offsets. Fails
+ * closed: an address not covered by any PT_LOAD segment throws — never guess.
+ */
+function vaddrToOffset(segments: LoadSegment[], vaddr: number): number {
+  for (const s of segments) {
+    if (vaddr >= s.vaddr && vaddr < s.vaddr + s.filesz) {
+      return s.offset + (vaddr - s.vaddr);
+    }
+  }
+  throw new RootfsError(`ELF virtual address 0x${vaddr.toString(16)} is not covered by any PT_LOAD segment`);
 }
 
 function parseElf64(buf: Buffer): ElfInfo {
@@ -211,15 +233,20 @@ function parseElf64(buf: Buffer): ElfInfo {
   let interpreter: string | null = null;
   let dynOff = 0;
   let dynFilesz = 0;
+  const loads: LoadSegment[] = [];
 
   for (let i = 0; i < e_phnum; i++) {
     const ph = e_phoff + i * e_phentsize;
     if (ph + e_phentsize > buf.length) throw new RootfsError('node ELF program header out of bounds');
     const p_type = buf.readUInt32LE(ph);
     const p_offset = Number(buf.readBigUInt64LE(ph + 8));
+    const p_vaddr = Number(buf.readBigUInt64LE(ph + 16));
     const p_filesz = Number(buf.readBigUInt64LE(ph + 32));
 
-    if (p_type === PT_INTERP) {
+    if (p_type === PT_LOAD) {
+      if (p_offset + p_filesz > buf.length) throw new RootfsError('PT_LOAD out of bounds');
+      loads.push({ vaddr: p_vaddr, offset: p_offset, filesz: p_filesz });
+    } else if (p_type === PT_INTERP) {
       if (p_offset + p_filesz > buf.length) throw new RootfsError('PT_INTERP out of bounds');
       interpreter = buf.toString('utf8', p_offset, p_offset + p_filesz).replace(/\0+$/, '');
     } else if (p_type === PT_DYNAMIC) {
@@ -243,19 +270,35 @@ function parseElf64(buf: Buffer): ElfInfo {
       else if (tag === BigInt(DT_STRSZ)) strsz = Number(val);
       else if (tag === BigInt(DT_NEEDED)) strOffsets.push(Number(val));
     }
-    // In a real ET_DYN binary DT_STRTAB holds a virtual address, not a file
-    // offset. For the minimal runtime tree we produce and consume, the ELF is
-    // crafted so that DT_STRTAB holds a file offset (the same convention the
-    // build script uses). If DT_STRTAB looks like a vaddr (>= file size) we
-    // fall back to treating DT_NEEDED values as file offsets directly.
+    // DT_STRTAB semantics: a value that already points inside the file at a
+    // NUL-prefixed string table is treated as a file offset (the synthetic
+    // fixture convention used by the test-suite ELFs, which carry no PT_LOAD
+    // segments). Everything else is a virtual address that MUST be translated
+    // through the PT_LOAD segments; an address no PT_LOAD covers fails
+    // closed — we never guess.
+    let resolvedStrtab: number | null = null;
+    if (strtabOff !== 0) {
+      if (strtabOff < buf.length && buf[strtabOff] === 0) {
+        resolvedStrtab = strtabOff; // file-offset convention (synthetic fixtures)
+      } else {
+        resolvedStrtab = vaddrToOffset(loads, strtabOff);
+        if (resolvedStrtab >= buf.length) throw new RootfsError('DT_STRTAB translated file offset out of bounds');
+      }
+    }
     for (const so of strOffsets) {
-      let abs = strtabOff + so;
-      if (strtabOff >= buf.length) abs = so; // DT_STRTAB is a vaddr; treat d_val as file offset
+      // When DT_STRTAB is absent (minimal synthetic ELFs), DT_NEEDED d_val
+      // already holds an absolute file offset into the string table — the
+      // fixture convention that predates real-ELF support. Real linkers
+      // always emit DT_STRTAB.
+      const base = resolvedStrtab ?? 0;
+      const abs = base + so;
       if (abs >= buf.length) throw new RootfsError('DT_NEEDED string offset out of bounds');
       let end = abs;
       while (end < buf.length && buf[end] !== 0) end++;
+      if (end === buf.length) throw new RootfsError('DT_NEEDED string is not NUL-terminated within the file');
+      if (strsz > 0 && so >= strsz) throw new RootfsError('DT_NEEDED string offset exceeds DT_STRSZ');
       const name = buf.toString('utf8', abs, end);
-      if (strsz > 0 && name.length === 0) throw new RootfsError('DT_NEEDED resolved to empty soname');
+      if (name.length === 0) throw new RootfsError('DT_NEEDED resolved to empty soname');
       needed.push(name);
     }
   }

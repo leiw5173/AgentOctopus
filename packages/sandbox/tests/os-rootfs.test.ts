@@ -127,6 +127,7 @@ async function writeManifest(dir: string, manifest: unknown): Promise<string> {
 
 const PT_INTERP = 3;
 const PT_DYNAMIC = 2;
+const PT_LOAD = 1;
 const DT_NEEDED = 1;
 const DT_NULL = 0;
 
@@ -205,6 +206,127 @@ function buildElf64(opts: { interp?: string; needed?: string[] }): Buffer {
   buf.writeBigUInt64LE(0n, dynOff + needed.length * dynEnt + 8);
 
   strtab.copy(buf, strtabOff);
+  return buf;
+}
+
+/**
+ * A realistic ET_DYN ELF64 in which DT_STRTAB holds a VIRTUAL ADDRESS (as
+ * produced by a real Linux linker for distro `node`), so the parser must
+ * translate it through the PT_LOAD segment to reach the string table's file
+ * offset. Layout: one PT_LOAD covering the whole file, based at `loadVaddr`,
+ * followed by PT_INTERP and PT_DYNAMIC program headers.
+ *
+ * `strtabVaddrOverride` builds a corrupt binary whose DT_STRTAB vaddr is not
+ * covered by any PT_LOAD segment (parser must fail closed).
+ */
+function buildElf64PtLoad(opts: {
+  interp?: string;
+  needed: string[];
+  loadVaddr?: number;
+  strtabVaddrOverride?: number;
+}): Buffer {
+  const interp = opts.interp ?? '/lib64/ld-linux-x86-64.so.2';
+  const loadVaddr = opts.loadVaddr ?? 0x400000;
+  const interpBytes = Buffer.from(interp + '\0', 'utf8');
+  const strtabPieces: Buffer[] = [];
+  const strOffsets: number[] = [];
+  let strOff = 1; // leading NUL
+  for (const n of opts.needed) {
+    strOffsets.push(strOff);
+    const b = Buffer.from(n + '\0', 'utf8');
+    strtabPieces.push(b);
+    strOff += b.length;
+  }
+  const strtab = Buffer.concat([Buffer.from([0]), ...strtabPieces]);
+
+  const ehdrSize = 64;
+  const phdrSize = 56;
+  const nPhdr = 3; // PT_LOAD + PT_INTERP + PT_DYNAMIC
+  const phdrsEnd = ehdrSize + phdrSize * nPhdr;
+  const interpOff = phdrsEnd;
+  const dynOff = interpOff + interpBytes.length;
+  const dynEnt = 16;
+  // DT_STRTAB + DT_STRSZ + one per DT_NEEDED + DT_NULL
+  const nDyn = opts.needed.length + 3;
+  const strtabFileOff = dynOff + dynEnt * nDyn;
+  const total = strtabFileOff + strtab.length;
+
+  // Real linkers place the string table at a vaddr derived from the load
+  // bias: vaddr = loadVaddr + fileOff for a segment whose p_vaddr maps the
+  // whole file at loadVaddr.
+  const strtabVaddr = opts.strtabVaddrOverride ?? loadVaddr + strtabFileOff;
+
+  const buf = Buffer.alloc(total);
+
+  // ELF header
+  buf.writeUInt8(0x7f, 0); buf.write('ELF', 1, 'ascii');
+  buf.writeUInt8(2, 4);  // ELFCLASS64
+  buf.writeUInt8(1, 5);  // ELFDATA2LSB
+  buf.writeUInt8(1, 6);  // EV_CURRENT
+  buf.writeUInt8(0, 7);  // System V ABI
+  buf.writeUInt16LE(3, 16);      // e_type = ET_DYN
+  buf.writeUInt16LE(0x3e, 18);   // e_machine = x86_64
+  buf.writeUInt32LE(1, 20);      // e_version
+  buf.writeBigUInt64LE(BigInt(loadVaddr), 24);  // e_entry (irrelevant here)
+  buf.writeBigUInt64LE(BigInt(ehdrSize), 32);   // e_phoff
+  buf.writeBigUInt64LE(0n, 40);  // e_shoff
+  buf.writeUInt32LE(0, 48);      // e_flags
+  buf.writeUInt16LE(ehdrSize, 52);
+  buf.writeUInt16LE(phdrSize, 54);
+  buf.writeUInt16LE(nPhdr, 56);
+
+  // PT_LOAD phdr — covers the whole file: p_offset=0, p_vaddr=loadVaddr,
+  // p_filesz=total. This is the segment DT_STRTAB's vaddr must resolve
+  // through.
+  buf.writeUInt32LE(PT_LOAD, ehdrSize);
+  buf.writeUInt32LE(5, ehdrSize + 4); // PF_R|PF_X
+  buf.writeBigUInt64LE(0n, ehdrSize + 8);               // p_offset
+  buf.writeBigUInt64LE(BigInt(loadVaddr), ehdrSize + 16); // p_vaddr
+  buf.writeBigUInt64LE(BigInt(loadVaddr), ehdrSize + 24); // p_paddr
+  buf.writeBigUInt64LE(BigInt(total), ehdrSize + 32);   // p_filesz
+  buf.writeBigUInt64LE(BigInt(total), ehdrSize + 40);   // p_memsz
+  buf.writeBigUInt64LE(0x1000n, ehdrSize + 48);         // p_align
+
+  // PT_INTERP phdr
+  const p1 = ehdrSize + phdrSize;
+  buf.writeUInt32LE(PT_INTERP, p1);
+  buf.writeUInt32LE(4, p1 + 4); // PF_R
+  buf.writeBigUInt64LE(BigInt(interpOff), p1 + 8);
+  buf.writeBigUInt64LE(BigInt(loadVaddr + interpOff), p1 + 16);
+  buf.writeBigUInt64LE(0n, p1 + 24);
+  buf.writeBigUInt64LE(BigInt(interpBytes.length), p1 + 32);
+  buf.writeBigUInt64LE(BigInt(interpBytes.length), p1 + 40);
+  buf.writeBigUInt64LE(1n, p1 + 48);
+  interpBytes.copy(buf, interpOff);
+
+  // PT_DYNAMIC phdr
+  const p2 = ehdrSize + phdrSize * 2;
+  buf.writeUInt32LE(PT_DYNAMIC, p2);
+  buf.writeUInt32LE(6, p2 + 4); // PF_R|PF_W
+  buf.writeBigUInt64LE(BigInt(dynOff), p2 + 8);
+  buf.writeBigUInt64LE(BigInt(loadVaddr + dynOff), p2 + 16);
+  buf.writeBigUInt64LE(0n, p2 + 24);
+  buf.writeBigUInt64LE(BigInt(dynEnt * nDyn), p2 + 32);
+  buf.writeBigUInt64LE(BigInt(dynEnt * nDyn), p2 + 40);
+  buf.writeBigUInt64LE(8n, p2 + 48);
+
+  // Dynamic section — DT_STRTAB holds a VADDR (real ET_DYN semantics).
+  let d = dynOff;
+  buf.writeBigInt64LE(5n /* DT_STRTAB */, d);
+  buf.writeBigUInt64LE(BigInt(strtabVaddr), d + 8);
+  d += dynEnt;
+  buf.writeBigInt64LE(10n /* DT_STRSZ */, d);
+  buf.writeBigUInt64LE(BigInt(strtab.length), d + 8);
+  d += dynEnt;
+  for (let i = 0; i < opts.needed.length; i++) {
+    buf.writeBigInt64LE(BigInt(DT_NEEDED), d);
+    buf.writeBigUInt64LE(BigInt(strOffsets[i]), d + 8);
+    d += dynEnt;
+  }
+  buf.writeBigInt64LE(BigInt(DT_NULL), d);
+  buf.writeBigUInt64LE(0n, d + 8);
+
+  strtab.copy(buf, strtabFileOff);
   return buf;
 }
 
@@ -443,6 +565,68 @@ describe('verifyRuntimeArtifact — ELF dependency closure', () => {
     const manifestPath = await writeManifest(await tmp('oct-m-'), fixed);
     await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
       .rejects.toThrow(/ELF/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // PT_LOAD vaddr→offset translation (Finding 2 carry-forward)
+  //
+  // A real ET_DYN Linux `node` stores a VIRTUAL ADDRESS in DT_STRTAB. Before
+  // the fix, the parser treated DT_STRTAB as a file offset (or fell back to
+  // treating DT_NEEDED d_vals as absolute offsets) and failed closed on real
+  // binaries. These fixtures carry a PT_LOAD segment and a DT_STRTAB vaddr
+  // that only resolves through it.
+  // -------------------------------------------------------------------------
+
+  it('resolves DT_NEEDED sonames when DT_STRTAB holds a PT_LOAD virtual address', async () => {
+    const treeDir = await tmp('oct-tree-ptload-');
+    const nodeElf = buildElf64PtLoad({ needed: ['libnode.so.127'] });
+    const files = [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libnode.so.127', content: Buffer.from('libnode'), mode: 0o755 },
+    ];
+    const { artifactPath, manifest } = await buildArtifact(treeDir, files, { nodePath: '/usr/bin/node' });
+    const artifactBuf = await fs.readFile(artifactPath);
+    const fixed = { ...manifest, artifactSha256: sha256(artifactBuf) };
+    const manifestPath = await writeManifest(await tmp('oct-m-'), fixed);
+    // Passes only if the parser translated DT_STRTAB's vaddr through PT_LOAD
+    // and resolved 'libnode.so.127' from the string table.
+    const got = await verifyRuntimeArtifact({ artifactPath, manifestPath });
+    expect(got.files.length).toBe(manifest.files.length);
+  });
+
+  it('resolves the correct soname string through PT_LOAD (not a garbage one)', async () => {
+    // The manifest provides libnode.so.127; the ELF DT_NEEDED must resolve to
+    // exactly that string. If translation landed at the wrong offset, the
+    // parser would read garbage and the closure check would reject.
+    const treeDir = await tmp('oct-tree-ptload2-');
+    const nodeElf = buildElf64PtLoad({ needed: ['libnode.so.127'] });
+    const files = [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libnode.so.127', content: Buffer.from('libnode'), mode: 0o755 },
+    ];
+    const { artifactPath, manifest } = await buildArtifact(treeDir, files, { nodePath: '/usr/bin/node' });
+    const artifactBuf = await fs.readFile(artifactPath);
+    const fixed = { ...manifest, artifactSha256: sha256(artifactBuf) };
+    const manifestPath = await writeManifest(await tmp('oct-m-'), fixed);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath })).resolves.toBeTruthy();
+  });
+
+  it('fails closed when DT_STRTAB holds a vaddr not covered by any PT_LOAD', async () => {
+    const treeDir = await tmp('oct-tree-ptload-bad-');
+    const nodeElf = buildElf64PtLoad({ needed: ['libnode.so.127'], strtabVaddrOverride: 0x7f000000 });
+    const files = [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libnode.so.127', content: Buffer.from('libnode'), mode: 0o755 },
+    ];
+    const { artifactPath, manifest } = await buildArtifact(treeDir, files, { nodePath: '/usr/bin/node' });
+    const artifactBuf = await fs.readFile(artifactPath);
+    const fixed = { ...manifest, artifactSha256: sha256(artifactBuf) };
+    const manifestPath = await writeManifest(await tmp('oct-m-'), fixed);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
+      .rejects.toThrow(/PT_LOAD/i);
   });
 });
 
