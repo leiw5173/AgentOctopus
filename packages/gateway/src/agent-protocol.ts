@@ -6,23 +6,15 @@ import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, 
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
 import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
-import { getConfig, type CredentialMissingResult, type BinaryMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult } from '@agentoctopus/core';
+import { getConfig, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult } from '@agentoctopus/core';
 import { eventBus } from './control-plane/event-bus.js';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
 }
 
-function isBinaryMissing(result: unknown): result is BinaryMissingResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
-}
-
-function isBinaryInstallable(result: unknown): result is BinaryInstallableResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_installable';
-}
-
-function isBinaryInstallFailed(result: unknown): result is BinaryInstallFailedResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_install_failed';
+function isUnsupportedRuntime(result: unknown): result is UnsupportedRuntimeRequirementsResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'unsupported_runtime_requirements';
 }
 
 /**
@@ -203,7 +195,10 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
         return;
       }
 
-      let result = await engine.executor.execute(routing.skill, { query }, { autoInstall });
+      // Note: the `autoInstall` request field is accepted for schema
+      // compatibility but intentionally ignored — skills are untrusted and
+      // must never trigger host package-manager execution.
+      let result = await engine.executor.execute(routing.skill, { query });
 
       if (isCredentialMissing(result)) {
         const lines = result.missing
@@ -225,44 +220,13 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
         return;
       }
 
-      if (isBinaryInstallable(result)) {
+      if (isUnsupportedRuntime(result)) {
         res.json({
           success: false,
-          type: 'binary_installable',
+          type: 'unsupported_runtime_requirements',
           skillName: result.skillName,
           missing: result.missing,
-          installSpecs: result.installSpecs,
-          response: `I matched a skill but it requires tools that aren't installed: ${(result.missing as string[]).join(', ')}. Retry with autoInstall=true to install automatically, or install them manually.`,
-          skill: routing.skill.manifest.name,
-          sessionId: session.id,
-          confidence: routing.score,
-        });
-        return;
-      }
-
-      if (isBinaryInstallFailed(result)) {
-        res.json({
-          success: false,
-          type: 'binary_install_failed',
-          skillName: result.skillName,
-          missing: result.missing,
-          manualInstructions: result.manualInstructions,
-          response: `Installation of required tools failed. Manual steps:\n${(result.manualInstructions as string[]).map(i => `  ${i}`).join('\n')}`,
-          skill: routing.skill.manifest.name,
-          sessionId: session.id,
-          confidence: routing.score,
-        });
-        return;
-      }
-
-      if (isBinaryMissing(result)) {
-        const tools = result.missing.map(b => `  - ${b}`).join('\n');
-        res.json({
-          success: false,
-          type: 'binary_missing',
-          skillName: result.skillName,
-          missing: result.missing,
-          response: `I matched a skill but it requires tools that aren't installed:\n${tools}\n\nInstall the tool(s) above, then retry.`,
+          response: `I matched a skill but it requires tools that aren't installed: ${result.missing.join(', ')}. No trusted runtime profile covers: ${result.missing.join(', ')}. Ask the operator to add one under \`sandbox.runtimeProfiles\`.`,
           skill: routing.skill.manifest.name,
           sessionId: session.id,
           confidence: routing.score,

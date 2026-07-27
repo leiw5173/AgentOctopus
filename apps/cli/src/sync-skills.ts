@@ -11,6 +11,7 @@ import {
   installSkill,
   type SkillIndexEntry,
 } from './clawhub.js';
+import { removeInstallationId } from '@agentoctopus/skills';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -278,6 +279,9 @@ export async function installAwesomeSkills(
           if (options.dryRun) {
             console.log(`  ${chalk.red('✘')} ${slug} ${chalk.gray('(would delete — removed from registry)')}`);
           } else {
+            // Rotate identity: remove the installation id BEFORE deleting so a
+            // later fresh reinstall receives a NEW id (prior grants must not reattach).
+            removeInstallationId(dir);
             fs.rmSync(dir, { recursive: true });
             console.log(`  ${chalk.red('✘')} ${slug} ${chalk.gray('(deleted — removed from registry)')}`);
             result.deleted++;

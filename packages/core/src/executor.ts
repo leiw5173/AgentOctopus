@@ -2,7 +2,6 @@ import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/r
 import { getRequiredEnvVars, getRequiredBins, getSkillEntry } from '@agentoctopus/registry';
 import type { AdapterResult, AdapterInvocationContext } from '@agentoctopus/adapters';
 import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
-import { installMissingBins } from '@agentoctopus/skills';
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
@@ -102,25 +101,11 @@ export interface CredentialMissingResult {
   missing: RequiredEnvVar[];
 }
 
-export interface BinaryMissingResult {
-  type: 'binary_missing';
+export interface UnsupportedRuntimeRequirementsResult {
+  type: 'unsupported_runtime_requirements';
   skillName: string;
   missing: string[];
-}
-
-export interface BinaryInstallableResult {
-  type: 'binary_installable';
-  skillName: string;
-  missing: string[];
-  installSpecs: import('@agentoctopus/skills').SkillInstallSpec[];
-}
-
-export interface BinaryInstallFailedResult {
-  type: 'binary_install_failed';
-  skillName: string;
-  missing: string[];
-  error: string;
-  manualInstructions: string[];
+  message: string;
 }
 
 export class Executor {
@@ -182,8 +167,8 @@ export class Executor {
     return view;
   }
 
-  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean; autoInstall?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult | BinaryInstallableResult | BinaryInstallFailedResult> {
-    const { debug = false, autoInstall = false } = opts;
+  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | UnsupportedRuntimeRequirementsResult> {
+    const { debug = false } = opts;
 
     let adapterResult: AdapterResult | undefined;
     let latencyMs: number = 0;
@@ -206,49 +191,20 @@ export class Executor {
       } satisfies CredentialMissingResult;
     }
 
-    // Check required binaries before invoking
+    // Check required binaries before invoking. SKILL.md may DECLARE
+    // requires.bins, but must NEVER trigger host package-manager execution.
+    // Trusted sandbox.runtimeProfiles (octopus.json) maps approved bins to
+    // digest-pinned images; when no single trusted profile covers the missing
+    // bins we return a typed UNSUPPORTED result with no host side effects.
     const requiredBins = getRequiredBins(skill.manifest);
     const missingBins = requiredBins.filter(bin => !isBinAvailable(bin));
     if (missingBins.length > 0) {
-      const entry = getSkillEntry(skill);
-      const installSpecs = entry.metadata?.install ?? [];
-
-      if (installSpecs.length === 0) {
-        return { type: 'binary_missing', skillName: skill.manifest.name, missing: missingBins };
-      }
-
-      if (autoInstall) {
-        const installResult = await installMissingBins(installSpecs, missingBins, process.platform);
-        if (installResult.success) {
-          const stillMissing = missingBins.filter(bin => !isBinAvailable(bin));
-          if (stillMissing.length === 0) {
-            // binaries now available — fall through to normal execution
-          } else {
-            return {
-              type: 'binary_install_failed',
-              skillName: skill.manifest.name,
-              missing: stillMissing,
-              error: `Installed ${installResult.installed.join(', ')} but ${stillMissing.join(', ')} still missing`,
-              manualInstructions: installResult.manualInstructions,
-            };
-          }
-        } else {
-          return {
-            type: 'binary_install_failed',
-            skillName: skill.manifest.name,
-            missing: missingBins,
-            error: `Installation failed for: ${installResult.failed.map(f => f.bin).join(', ')}`,
-            manualInstructions: installResult.manualInstructions,
-          };
-        }
-      } else {
-        return {
-          type: 'binary_installable',
-          skillName: skill.manifest.name,
-          missing: missingBins,
-          installSpecs,
-        };
-      }
+      return {
+        type: 'unsupported_runtime_requirements',
+        skillName: skill.manifest.name,
+        missing: missingBins,
+        message: `no single trusted runtime profile covers requested bins: ${missingBins.join(', ')}`,
+      } satisfies UnsupportedRuntimeRequirementsResult;
     }
 
     // Handle composed skills (skill chaining)

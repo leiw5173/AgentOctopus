@@ -40,14 +40,6 @@ vi.mock('../src/utils.js', () => ({
   isBinAvailable: vi.fn().mockReturnValue(true),
 }));
 
-vi.mock('@agentoctopus/skills', async () => {
-  const actual = await vi.importActual('@agentoctopus/skills') as any;
-  return {
-    ...actual,
-    installMissingBins: vi.fn().mockResolvedValue({ success: true, installed: [], failed: [], manualInstructions: [] }),
-  };
-});
-
 // ---------------------------------------------------------------------------
 // Recording bound port + stub SandboxRunner
 // ---------------------------------------------------------------------------

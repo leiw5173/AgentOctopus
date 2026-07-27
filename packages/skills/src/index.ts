@@ -15,8 +15,7 @@ export { loadWorkspaceSkills, mergeByPriority } from "./workspace.js";
 export type { WorkspaceSource, WorkspaceOptions } from "./workspace.js";
 export { resolveBundledSkillsDir } from "./bundled.js";
 export { resolvePluginSkillDirs } from "./plugin-skills.js";
-export { installSkillDeps, sanitizeString, installMissingBins } from "./install.js";
-export type { InstallPreferences, MissingBinInstallResult, InstallAttempt } from "./install.js";
+export { sanitizeString, generateManualInstruction } from "./install.js";
 export { buildWorkspaceSkillCommandSpecs } from "./command-specs.js";
 export { buildWorkspaceSkillSnapshot } from "./snapshot.js";
 export type { SnapshotLimits } from "./snapshot.js";
@@ -24,6 +23,8 @@ export {
   ensureInstallationId,
   lookupInstallationId,
   removeInstallationId,
+  peekInstallationId,
+  restoreInstallationId,
   INSTALLATION_ID_MISSING,
 } from "./install-registry.js";
 export { registerSkillsChangeListener, bumpSnapshotVersion, watchSkillsDir } from "./refresh.js";

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { Router, Executor, createChatClient, loadConfig, type CredentialMissingResult, type BinaryMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, loadConfig, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult } from '@agentoctopus/core';
 import { SkillRegistry } from '@agentoctopus/registry';
 import path from 'path';
 
@@ -7,16 +7,8 @@ function isCredentialMissing(result: unknown): result is CredentialMissingResult
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
 }
 
-function isBinaryMissing(result: unknown): result is BinaryMissingResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
-}
-
-function isBinaryInstallable(result: unknown): result is BinaryInstallableResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_installable';
-}
-
-function isBinaryInstallFailed(result: unknown): result is BinaryInstallFailedResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_install_failed';
+function isUnsupportedRuntime(result: unknown): result is UnsupportedRuntimeRequirementsResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'unsupported_runtime_requirements';
 }
 
 // Singleton initialization for production (can be expanded for persistence)
@@ -70,6 +62,10 @@ export async function POST(req: Request) {
     if (!query) {
       return NextResponse.json({ error: 'Query is missing' }, { status: 400 });
     }
+    // Note: `autoInstall` is accepted for request-schema compatibility but
+    // intentionally ignored — skills are untrusted and must never trigger
+    // host package-manager execution.
+    void autoInstall;
 
     await initOctopus();
 
@@ -100,7 +96,7 @@ export async function POST(req: Request) {
       const route = candidates[i]!;
       skillsAttempted.push(route.skill.manifest.name);
       try {
-        const result = await executor.execute(route.skill, { query }, { autoInstall });
+        const result = await executor.execute(route.skill, { query });
 
         if (isCredentialMissing(result)) {
           return NextResponse.json({
@@ -113,38 +109,14 @@ export async function POST(req: Request) {
           });
         }
 
-        if (isBinaryInstallable(result)) {
+        if (isUnsupportedRuntime(result)) {
           return NextResponse.json({
             success: false,
-            type: 'binary_installable',
-            skillName: result.skillName,
-            missing: result.missing,
-            installSpecs: result.installSpecs,
-            skillsAttempted,
-            response: `This skill requires tools that aren't installed: ${(result.missing as string[]).join(', ')}. Retry with autoInstall=true to install automatically.`,
-          });
-        }
-
-        if (isBinaryInstallFailed(result)) {
-          return NextResponse.json({
-            success: false,
-            type: 'binary_install_failed',
-            skillName: result.skillName,
-            missing: result.missing,
-            manualInstructions: result.manualInstructions,
-            skillsAttempted,
-            response: `Installation failed. Manual steps:\n${(result.manualInstructions as string[]).map(i => `  ${i}`).join('\n')}`,
-          });
-        }
-
-        if (isBinaryMissing(result)) {
-          return NextResponse.json({
-            success: false,
-            type: 'binary_missing',
+            type: 'unsupported_runtime_requirements',
             skillName: result.skillName,
             missing: result.missing,
             skillsAttempted,
-            response: `This skill requires tools that aren't installed: ${result.missing.join(', ')}. Install them, then retry.`,
+            response: `No trusted runtime profile covers: ${result.missing.join(', ')}. Ask the operator to add one under \`sandbox.runtimeProfiles\`.`,
           });
         }
 
