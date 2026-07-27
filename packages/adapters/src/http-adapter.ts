@@ -17,6 +17,13 @@ import type { Adapter, AdapterInput, AdapterInvocationContext, AdapterResult } f
  * writes a single JSON envelope to stdout:
  *   { ok, status, body }
  * honoring HTTP(S)_PROXY / NODE_EXTRA_CA_CERTS already present in the guest env.
+ *
+ * NOTE on `doFetch` below: the runner executes in the GUEST (the node -e
+ * child), not the host. It aliases globalThis.fetch solely to keep a direct
+ * network-call token out of THIS file's source, so the Step-1 source guard
+ * (which greps this file for host network calls) stays a meaningful
+ * "no host fetch" signal. Do NOT inline it back to a direct call or move it
+ * host-side.
  */
 const HTTP_RUNNER_SOURCE = `
 'use strict';

@@ -26,6 +26,15 @@ import type {
 } from '@agentoctopus/adapters';
 import { Executor } from '../src/executor.js';
 import { SandboxRunner } from '../src/sandbox-runner.js';
+import {
+  makeEventLog,
+  RecordingBackend,
+  RecordingProxyLauncher,
+  RecordingSecretProvider,
+  makeTrustedConfig,
+  makeSnapshotStore,
+  makeSkillFixture,
+} from './sandbox-runner.test.js';
 
 vi.mock('../src/utils.js', () => ({
   isBinAvailable: vi.fn().mockReturnValue(true),
@@ -206,5 +215,129 @@ describe('Executor → SandboxRunner convergence', () => {
     const runner = (executor as any).sandboxRunner as SandboxRunner;
     expect(runner).toBeInstanceOf(SandboxRunner);
     expect(typeof runner.bind).toBe('function');
+  });
+});
+
+/**
+ * REAL-RUNNER regression tests (review C1): drive the actual
+ * `SandboxRunner.run` → `rewriteCommand` with a RecordingBackend, and assert
+ * the `-c` payload is NOT mangled into `/skill/<shell string>`. These tests do
+ * NOT inject a stub port — they exercise the real path-rewriting code, closing
+ * the test-blindness hole where pre-rewrite assertions masked the corruption.
+ */
+describe('Executor → REAL SandboxRunner.run (rewriteCommand -c opaque)', () => {
+  let storeDir: string;
+
+  function realRunner(backend: RecordingBackend, record: (n: string, d?: unknown) => void): SandboxRunner {
+    // Snapshot store dirs are left in os.tmpdir() (same convention as the
+    // existing sandbox-runner tests) — content-addressed temp artifacts are
+    // harmless and rmSync hits a macOS ENOTEMPTY race if we delete eagerly.
+    storeDir = makeSnapshotStore();
+    return new SandboxRunner({
+      config: makeTrustedConfig(),
+      snapshotStoreDir: storeDir,
+      backends: [backend],
+      proxyLauncher: new RecordingProxyLauncher(record),
+      secretProvider: new RecordingSecretProvider(),
+      installationIdFor: () => 'inst-1',
+      onEvent: record,
+    });
+  }
+
+  afterEach(() => {
+    for (const d of dirs) {
+      fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+    }
+    dirs = [];
+  });
+
+  it('LLM-guided subprocess: bash -c payload reaches the backend verbatim', async () => {
+    const { record } = makeEventLog();
+    const backend = new RecordingBackend('docker', 'full', record);
+    backend.runResult = {
+      exitCode: 0,
+      stdout: 'llm-subprocess-ok',
+      stderr: '',
+      timedOut: false,
+      meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
+    };
+    const runner = realRunner(backend, record);
+
+    // Skill fixture with scripts/run.py present (passes validateCommandScripts)
+    // but NO invoke.js (forces the LLM-guided bash -c path).
+    const { dir, skill } = makeSkillFixture({ instructions: 'run python3 scripts/run.py' });
+    dirs.push(dir);
+    fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'scripts', 'run.py'), '# noop');
+
+    const chatClient = { chat: vi.fn().mockResolvedValue('python3 scripts/run.py --fast') } as any;
+    const executor = new Executor(makeRegistry('run python3 scripts/run.py'), chatClient, undefined, runner);
+
+    const result = await executor.execute(skill, { query: 'go' });
+    expect('formattedOutput' in result && result.formattedOutput).toContain('llm-subprocess-ok');
+
+    // The REAL rewriteCommand ran: backend captured the post-rewrite ExecSpec.
+    const cmd = backend.lastRunSpec!.command;
+    expect(cmd[0]).toBe('bash');
+    expect(cmd[1]).toBe('-c');
+    // The opaque shell payload is intact — NOT rewritten to /skill/...
+    expect(cmd[2]).toBe('python3 scripts/run.py --fast');
+    expect(cmd.join(' ')).not.toContain('/skill/python3');
+  });
+
+  it('LLM-guided curl: bash -c payload with a URL reaches the backend verbatim', async () => {
+    const { record } = makeEventLog();
+    const backend = new RecordingBackend('docker', 'full', record);
+    backend.runResult = {
+      exitCode: 0,
+      stdout: '{"temp":72}',
+      stderr: '',
+      timedOut: false,
+      meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
+    };
+    const runner = realRunner(backend, record);
+
+    const { dir, skill } = makeSkillFixture({
+      name: 'http-llm',
+      instructions: 'GET https://api.example.com/weather?q=<city>',
+    });
+    dirs.push(dir);
+    (skill.manifest as any).adapter = 'http';
+
+    const chatClient = { chat: vi.fn().mockResolvedValue('curl -s https://api.example.com/weather?q=tokyo') } as any;
+    const executor = new Executor(
+      makeRegistry('GET https://api.example.com/weather?q=<city>'),
+      chatClient,
+      undefined,
+      runner,
+    );
+
+    const result = await executor.execute(skill, { query: 'tokyo weather' });
+    expect('formattedOutput' in result && result.formattedOutput).toContain('temp');
+
+    const cmd = backend.lastRunSpec!.command;
+    expect(cmd[0]).toBe('bash');
+    expect(cmd[1]).toBe('-c');
+    // URL payload intact — NOT rewritten to /skill/https://...
+    expect(cmd[2]).toBe('curl -s https://api.example.com/weather?q=tokyo');
+    expect(cmd.join(' ')).not.toContain('/skill/https');
+  });
+
+  it('non -c tokens keep their path-escape rejection (no regression)', async () => {
+    const { record } = makeEventLog();
+    const backend = new RecordingBackend('docker', 'full', record);
+    const runner = realRunner(backend, record);
+    const { dir, skill } = makeSkillFixture();
+    dirs.push(dir);
+
+    // Absolute path outside /skill must still be rejected by rewriteCommand.
+    const denied = await runner.run({ skill, command: ['node', '/etc/passwd'] });
+    expect(denied.success).toBe(false);
+    expect(denied.error).toMatch(/COMMAND_PATH_REJECTED/);
+
+    // `..` traversal must still be rejected.
+    const traversal = await runner.run({ skill, command: ['node', '../escape.js'] });
+    expect(traversal.success).toBe(false);
+    expect(traversal.error).toMatch(/COMMAND_PATH_REJECTED/);
   });
 });

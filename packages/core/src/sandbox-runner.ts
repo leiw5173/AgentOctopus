@@ -245,7 +245,22 @@ function buildGuestEnv(input: {
 function rewriteCommand(command: string[], skillDirPath: string): string[] {
   const out: string[] = [];
   const resolvedSkillDir = path.resolve(skillDirPath);
-  for (const arg of command) {
+  for (let i = 0; i < command.length; i++) {
+    const arg = command[i]!;
+    // `-c` (sh/bash -c) marks the NEXT token as an OPAQUE shell string. The
+    // payload is a free-form shell command (e.g. `python3 scripts/run.py
+    // --fast`, `curl -s https://host/x?a=b`) — NOT a path — so path-rewriting
+    // it would corrupt it (e.g. → `/skill/python3 scripts/run.py ...`). Copy
+    // the flag through and pass the payload verbatim, then resume rewriting.
+    if (arg === '-c') {
+      out.push(arg);
+      const payload = command[i + 1];
+      if (payload !== undefined) {
+        out.push(payload);
+        i++; // consumed the opaque payload token
+      }
+      continue;
+    }
     // Absolute path under skill.dirPath → /skill/...
     if (path.isAbsolute(arg)) {
       // Already a guest path — pass through unchanged.
