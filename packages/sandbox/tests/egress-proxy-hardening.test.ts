@@ -243,12 +243,17 @@ describe('EgressProxy hardening', () => {
   it('re-evaluates cross-origin redirects and never forwards the first origin credential', async () => {
     // Origin A (portA) has a credential grant; Origin B (portB) does not.
     // Origin A redirects to Origin B.
+    // The CLIENT sends its own Authorization header so the strip logic has
+    // something concrete to remove; without it the test would pass even if
+    // the strip block were deleted.
     // Assert: credential from A is NOT forwarded to B.
 
+    let originAObservedAuth: string | undefined;
     let originBObservedAuth: string | undefined = 'sentinel';
 
-    // Origin A: redirects to Origin B
-    const originA = http.createServer((_req, res) => {
+    // Origin A: records auth header, then redirects to Origin B
+    const originA = http.createServer((req, res) => {
+      originAObservedAuth = req.headers.authorization;
       const portB = (originB.address() as net.AddressInfo).port;
       res.writeHead(302, { 'location': `http://127.0.0.1:${portB}/target` });
       res.end();
@@ -298,6 +303,7 @@ describe('EgressProxy hardening', () => {
           port: proxyPort,
           method: 'GET',
           path: `http://127.0.0.1:${portA}/start`,
+          headers: { authorization: 'Bearer client-supplied' },
         }, (res) => {
           let body = '';
           res.on('data', d => body += d);
@@ -308,7 +314,10 @@ describe('EgressProxy hardening', () => {
       });
       expect(result.status).toBe(200);
       expect(result.body).toBe('origin-b-ok');
-      // The credential for origin A must NOT have been forwarded to origin B
+      // Origin A received the injected credential (overwriting the client's)
+      expect(originAObservedAuth).toBe('Bearer secret-a-value');
+      // The client-supplied credential (and the injected one) must NOT have been
+      // forwarded to origin B — the strip logic removed it on cross-origin redirect
       expect(originBObservedAuth).toBeUndefined();
     } finally {
       await proxy.close();
@@ -365,6 +374,59 @@ describe('EgressProxy hardening', () => {
       expect(result.body).toBe('response too large');
       // Content-length must match the actual 502 body, not the upstream's misleading value
       expect(Number(result.headers['content-length'])).toBe(result.body.length);
+    } finally {
+      await proxy.close();
+      upstream.close();
+    }
+  });
+
+  it('returns a clean 502 when an upstream sends headers + partial body then RSTs mid-response', async () => {
+    // Upstream sends valid headers and a partial body, then destroys the socket.
+    // The proxy's `for await (const chunk of upstreamRes)` gets ECONNRESET.
+    // Assert: client receives a clean 502, process does not crash.
+    const upstream = net.createServer((socket) => {
+      socket.once('data', () => {
+        // Send headers + partial body, then destroy without completing
+        const partial = [
+          'HTTP/1.1 200 OK',
+          'Content-Type: text/plain',
+          'Content-Length: 9999',
+          '',
+          'partial-body-',
+        ].join('\r\n');
+        socket.write(partial);
+        // Destroy the socket after a short delay to simulate a mid-body RST
+        setTimeout(() => socket.destroy(), 10);
+      });
+    });
+    await new Promise<void>(r => upstream.listen(0, '127.0.0.1', r));
+    const upstreamPort = (upstream.address() as net.AddressInfo).port;
+
+    const proxy = new EgressProxy({
+      policy: policyFor(['127.0.0.1']),
+      secrets: {},
+      ca: SessionCa.create(),
+      explicitTargets: [{ scheme: 'http', host: '127.0.0.1', port: upstreamPort }],
+    });
+    const proxyPort = await proxy.listen(0, '127.0.0.1');
+
+    try {
+      const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port: proxyPort,
+          method: 'GET',
+          path: `http://127.0.0.1:${upstreamPort}/`,
+        }, (res) => {
+          let body = '';
+          res.on('data', d => body += d);
+          res.on('end', () => resolve({ status: res.statusCode!, body }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      expect(result.status).toBe(502);
+      expect(result.body).toBe('upstream error');
     } finally {
       await proxy.close();
       upstream.close();

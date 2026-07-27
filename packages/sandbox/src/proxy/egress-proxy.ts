@@ -215,65 +215,75 @@ export class EgressProxy {
     redirects: number;
   }): Promise<void> {
     const { target, reqHeaders, body, res, upstreamRes, redirects } = args;
-    const status = upstreamRes.statusCode ?? 502;
-    const location = upstreamRes.headers.location;
+    try {
+      const status = upstreamRes.statusCode ?? 502;
+      const location = upstreamRes.headers.location;
 
-    if ([301, 302, 303, 307, 308].includes(status) && location) {
-      upstreamRes.resume();
-      if (redirects >= MAX_REDIRECTS) {
-        res.writeHead(502, { 'content-type': 'text/plain' });
-        res.end('too many redirects');
-        return;
-      }
-
-      let next: ProxyTarget;
-      try {
-        const absolute = new URL(location, `${this.originOf(target)}${target.path}`).toString();
-        next = parseAbsoluteProxyTarget(absolute, target.method);
-      } catch {
-        res.writeHead(502, { 'content-type': 'text/plain' });
-        res.end('bad redirect location');
-        return;
-      }
-
-      const originChanged = this.originOf(next) !== this.originOf(target);
-      const cleanHeaders = { ...reqHeaders };
-      if (originChanged) {
-        // Strip all managed credential headers on cross-origin redirect
-        for (const grant of this.opts.policy.credentials) {
-          delete cleanHeaders[grant.header.toLowerCase()];
+      if ([301, 302, 303, 307, 308].includes(status) && location) {
+        upstreamRes.resume();
+        // A reset on the drained hop-N response must not throw uncaught.
+        upstreamRes.on('error', () => {});
+        if (redirects >= MAX_REDIRECTS) {
+          res.writeHead(502, { 'content-type': 'text/plain' });
+          res.end('too many redirects');
+          return;
         }
-      }
 
-      const switchToGet = status === 303 || ((status === 301 || status === 302) && target.method === 'POST');
-      if (switchToGet) {
-        next.method = 'GET';
-        await this.forward(next, cleanHeaders, Buffer.alloc(0), res, redirects + 1);
-      } else {
-        await this.forward(next, cleanHeaders, body, res, redirects + 1);
-      }
-      return;
-    }
+        let next: ProxyTarget;
+        try {
+          const absolute = new URL(location, `${this.originOf(target)}${target.path}`).toString();
+          next = parseAbsoluteProxyTarget(absolute, target.method);
+        } catch {
+          res.writeHead(502, { 'content-type': 'text/plain' });
+          res.end('bad redirect location');
+          return;
+        }
 
-    // Buffer the complete response before forwarding any bytes to the client
-    const cap = this.opts.maxRespBytes ?? 10_485_760;
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    for await (const chunk of upstreamRes) {
-      bytes += Buffer.byteLength(chunk);
-      if (bytes > cap) {
-        upstreamRes.destroy();
-        const msg = Buffer.from('response too large');
-        res.writeHead(502, { 'content-type': 'text/plain', 'content-length': String(msg.length) });
-        res.end(msg);
+        const originChanged = this.originOf(next) !== this.originOf(target);
+        const cleanHeaders = { ...reqHeaders };
+        if (originChanged) {
+          // Strip all managed credential headers on cross-origin redirect
+          for (const grant of this.opts.policy.credentials) {
+            delete cleanHeaders[grant.header.toLowerCase()];
+          }
+        }
+
+        const switchToGet = status === 303 || ((status === 301 || status === 302) && target.method === 'POST');
+        if (switchToGet) {
+          next.method = 'GET';
+          await this.forward(next, cleanHeaders, Buffer.alloc(0), res, redirects + 1);
+        } else {
+          await this.forward(next, cleanHeaders, body, res, redirects + 1);
+        }
         return;
       }
-      chunks.push(Buffer.from(chunk));
-    }
 
-    const responseBody = Buffer.concat(chunks);
-    res.writeHead(status, sanitizeResponseHeaders(upstreamRes.headers, responseBody.length));
-    res.end(responseBody);
+      // Buffer the complete response before forwarding any bytes to the client
+      const cap = this.opts.maxRespBytes ?? 10_485_760;
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      for await (const chunk of upstreamRes) {
+        bytes += Buffer.byteLength(chunk);
+        if (bytes > cap) {
+          upstreamRes.destroy();
+          const msg = Buffer.from('response too large');
+          res.writeHead(502, { 'content-type': 'text/plain', 'content-length': String(msg.length) });
+          res.end(msg);
+          return;
+        }
+        chunks.push(Buffer.from(chunk));
+      }
+
+      const responseBody = Buffer.concat(chunks);
+      res.writeHead(status, sanitizeResponseHeaders(upstreamRes.headers, responseBody.length));
+      res.end(responseBody);
+    } catch {
+      // Response-phase upstream failure (ECONNRESET mid-body, etc.) — clean 502.
+      if (!res.headersSent) {
+        res.writeHead(502, { 'content-type': 'text/plain', 'content-length': String(UPSTREAM_ERROR_BODY.length) });
+      }
+      res.end(UPSTREAM_ERROR_BODY);
+    }
   }
 
   private handleHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
