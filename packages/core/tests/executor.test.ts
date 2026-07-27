@@ -1,16 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Executor, extractCredentialErrors } from '../src/executor.js';
 import { SkillRegistry } from '@agentoctopus/registry';
-import { HttpAdapter, McpAdapter, SubprocessAdapter, DockerAdapter, SshAdapter, OpenShellAdapter } from '@agentoctopus/adapters';
+import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 
 vi.mock('@agentoctopus/adapters', () => {
   return {
     HttpAdapter: vi.fn(),
     McpAdapter: vi.fn(),
     SubprocessAdapter: vi.fn(),
-    DockerAdapter: vi.fn(),
-    SshAdapter: vi.fn(),
-    OpenShellAdapter: vi.fn(),
   };
 });
 

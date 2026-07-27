@@ -17,6 +17,7 @@ export {
   type SandboxSession,
   type BoundSandboxExecutionPort,
 } from './sandbox-runner.js';
+export { createDefaultSandboxRunner, defaultSnapshotStoreDir } from './sandbox-runner-factory.js';
 
 export {
   loadConfig, getConfig, resetConfig,

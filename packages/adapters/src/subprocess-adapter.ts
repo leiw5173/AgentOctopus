@@ -1,12 +1,15 @@
-import * as cp from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { LoadedSkill } from '@agentoctopus/registry';
 import { getSkillEntry } from '@agentoctopus/registry';
-import type { Adapter, AdapterResult } from './adapter.js';
+import type { Adapter, AdapterInput, AdapterInvocationContext, AdapterResult } from './adapter.js';
 
 /**
  * Find the entry script and runtime for a skill.
+ *
+ * This is TRUSTED METADATA reading on the host (the skill dir is the source of
+ * truth for the snapshot the sandbox mounts at `/skill`). Only the SPAWN moves
+ * into the sandbox — discovery stays here.
  *
  * Resolution order:
  * 1. scripts/invoke.js — our convention (Node subprocess)
@@ -79,83 +82,63 @@ function parseScriptReference(instructions: string, scriptsDir: string): { scrip
   return null;
 }
 
-/** Env vars always passed through to subprocess skills. */
-const SANDBOX_PASSTHROUGH_VARS = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM'];
-const SKILL_EXEC_TIMEOUT_MS = parseInt(process.env.SKILL_EXEC_TIMEOUT_MS ?? '30000', 10);
+/**
+ * Map a host-resolved entry script path to its guest path inside the sandbox.
+ * The snapshot (built from skill.dirPath) is mounted at `/skill`, so a host
+ * path `<dirPath>/scripts/foo.js` becomes `/skill/scripts/foo.js`. The sandbox
+ * runner also rewrites relative/under-skill paths, but we hand it a canonical
+ * guest path so the command is unambiguous.
+ */
+function toGuestScriptPath(skill: LoadedSkill, hostScriptPath: string): string {
+  const rel = path.relative(path.resolve(skill.dirPath), path.resolve(hostScriptPath));
+  const relPosix = rel.split(path.sep).join('/');
+  return `/skill/${relPosix}`;
+}
 
+/**
+ * Subprocess skill execution. ALL execution happens inside the sandbox via the
+ * injected, skill-bound `context.sandbox` port — this adapter has NO host
+ * process-spawn access for skill execution. The guest command is
+ * `[runtime, /skill/scripts/<entry>]` with the payload serialized to
+ * OCTOPUS_INPUT by the runner and piped to stdin.
+ */
 export class SubprocessAdapter implements Adapter {
-  async invoke(skill: LoadedSkill, input: Record<string, unknown>): Promise<AdapterResult> {
+  async invoke(input: AdapterInput, context: AdapterInvocationContext): Promise<AdapterResult> {
+    const { skill } = input;
     const entry = findEntryScript(skill);
 
     if (!entry) {
       return { success: false, error: `No script found in ${skill.dirPath}/scripts/` };
     }
 
-    // Ensure script is executable (ClawHub downloads may not preserve +x)
+    // Ensure script is executable (ClawHub downloads may not preserve +x).
+    // Trusted metadata op on the live dir; the snapshot carries the mode bit.
     try { fs.chmodSync(entry.scriptPath, 0o755); } catch { /* non-fatal */ }
 
-    const isNode = entry.runtime === 'node';
+    const guestScript = toGuestScriptPath(skill, entry.scriptPath);
+    const payload = context.payload ?? input.input;
+    const stdin = JSON.stringify(payload);
 
-    return new Promise((resolve) => {
-      // Build sandboxed env: only safe vars + skill-declared credentials
-      const safeEnv: NodeJS.ProcessEnv = {};
-      for (const key of SANDBOX_PASSTHROUGH_VARS) {
-        if (process.env[key] !== undefined) safeEnv[key] = process.env[key];
-      }
-      const credKeys: string[] = [];
-      const creds = (skill.manifest.credentials ?? []) as Array<{ key: string }>;
-      for (const c of creds) credKeys.push(c.key);
-      const ocEnv = (skill.manifest.metadata as any)?.openclaw?.env;
-      if (Array.isArray(ocEnv)) {
-        for (const k of ocEnv) { if (typeof k === 'string') credKeys.push(k); }
-      }
-      for (const key of credKeys) {
-        if (process.env[key] !== undefined) safeEnv[key] = process.env[key];
-      }
-      safeEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
-
-      // For Node scripts: use process.execPath to ensure we use the current Node binary
-      // and bypass Turbopack's constant folding for spawn/exec asset tracing.
-      // For Python scripts: use python3 from PATH.
-      const cmd = isNode ? process.execPath : entry.runtime;
-      const child = cp.spawn(cmd, [entry.scriptPath], {
-        env: safeEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      const killTimer = setTimeout(() => {
-        child.kill('SIGTERM');
-        resolve({ success: false, error: `Skill timed out after ${SKILL_EXEC_TIMEOUT_MS}ms` });
-      }, SKILL_EXEC_TIMEOUT_MS);
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout.on('data', (d) => { stdout += d.toString(); });
-      child.stderr.on('data', (d) => { stderr += d.toString(); });
-
-      child.on('close', (code) => {
-        clearTimeout(killTimer);
-        if (code !== 0) {
-          resolve({ success: false, error: stderr || `Process exited with code ${code}` });
-        } else {
-          try {
-            const data = JSON.parse(stdout);
-            resolve({ success: true, data, rawText: stdout });
-          } catch {
-            resolve({ success: true, rawText: stdout });
-          }
-        }
-      });
-
-      child.on('error', (err) => {
-        clearTimeout(killTimer);
-        resolve({ success: false, error: err.message });
-      });
-
-      // Send input via stdin as well
-      child.stdin.write(JSON.stringify(input));
-      child.stdin.end();
+    const result = await context.sandbox.run({
+      command: [entry.runtime, guestScript],
+      invocation: { payload, stdin },
+      timeoutMs: context.timeoutMs,
     });
+
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error ?? result.stderr ?? 'Skill execution failed in sandbox',
+        rawText: result.rawText,
+      };
+    }
+
+    const stdout = result.rawText ?? '';
+    try {
+      const data = JSON.parse(stdout);
+      return { success: true, data, rawText: stdout };
+    } catch {
+      return { success: true, rawText: stdout };
+    }
   }
 }

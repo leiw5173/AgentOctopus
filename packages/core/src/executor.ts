@@ -1,9 +1,8 @@
 import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/registry';
 import { getRequiredEnvVars, getRequiredBins, getSkillEntry } from '@agentoctopus/registry';
-import type { AdapterResult } from '@agentoctopus/adapters';
-import { HttpAdapter, McpAdapter, SubprocessAdapter, DockerAdapter } from '@agentoctopus/adapters';
-import { applySkillEnvOverrides, installMissingBins } from '@agentoctopus/skills';
-import type { SkillEntry, SkillsConfig } from '@agentoctopus/skills';
+import type { AdapterResult, AdapterInvocationContext } from '@agentoctopus/adapters';
+import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
+import { installMissingBins } from '@agentoctopus/skills';
 import type { ChatClient } from './llm-client.js';
 import { isBinAvailable } from './utils.js';
 import { dbg } from './debug.js';
@@ -11,21 +10,10 @@ import { getConfig } from './config-resolver.js';
 import { recordExecutionSignal } from './evolution-hook.js';
 import { SkillComposer } from './composer.js';
 import type { Router } from './router.js';
+import { SandboxRunner } from './sandbox-runner.js';
+import { createDefaultSandboxRunner } from './sandbox-runner-factory.js';
 import fs from 'fs';
 import path from 'path';
-
-const SANDBOX_PASSTHROUGH_VARS = ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM'];
-
-function buildSandboxedEnv(skill: LoadedSkill): NodeJS.ProcessEnv {
-  const safe: NodeJS.ProcessEnv = {};
-  for (const key of SANDBOX_PASSTHROUGH_VARS) {
-    if (process.env[key] !== undefined) safe[key] = process.env[key];
-  }
-  for (const v of getRequiredEnvVars(skill.manifest)) {
-    if (process.env[v.key] !== undefined) safe[v.key] = process.env[v.key];
-  }
-  return safe;
-}
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
 
@@ -139,39 +127,76 @@ export class Executor {
   private http = new HttpAdapter();
   private mcp = new McpAdapter();
   private subprocess = new SubprocessAdapter();
-  private docker = new DockerAdapter();
   private composer?: SkillComposer;
+  private readonly sandboxRunner: SandboxRunner;
 
   constructor(
     private registry: SkillRegistry,
     private chatClient?: ChatClient,
     private router?: Router,
+    sandboxRunner?: SandboxRunner,
   ) {
+    // The SandboxRunner is the SOLE execution boundary for every non-MCP skill
+    // path. Inject one in tests; production call sites get the default built
+    // from the trusted octopus.json sandbox config. There is NO host fallback.
+    this.sandboxRunner = sandboxRunner ?? createDefaultSandboxRunner();
     if (this.router && this.chatClient) {
       this.composer = new SkillComposer(this.registry, this.router, this, this.chatClient);
     }
   }
 
+  /**
+   * Build the invocation context every adapter call receives: a sandbox port
+   * already bound to this skill, plus the payload and timeout.
+   */
+  private invocationContext(skill: LoadedSkill, payload: unknown): AdapterInvocationContext {
+    return {
+      sandbox: this.sandboxRunner.bind(skill),
+      payload,
+      timeoutMs: getConfig().execution.timeoutMs,
+    };
+  }
+
+  /**
+   * Read-only effective credential env for the pre-flight GUARD. Merges
+   * process.env with octopus.json `skills.entries[<skill>]` apiKey/env
+   * overrides WITHOUT mutating process.env (the runner owns execution env).
+   */
+  private effectiveCredentialEnv(skill: LoadedSkill): Record<string, string | undefined> {
+    const view: Record<string, string | undefined> = { ...process.env };
+    try {
+      const entry = getSkillEntry(skill);
+      const skillKey = entry.metadata.skillKey ?? entry.skill.name;
+      const config = getConfig().skills.entries?.[skillKey];
+      if (entry.metadata.primaryEnv && config?.apiKey && !(entry.metadata.primaryEnv in view)) {
+        view[entry.metadata.primaryEnv] = config.apiKey;
+      }
+      if (config?.env) {
+        for (const [k, v] of Object.entries(config.env)) {
+          if (!(k in view) && v !== undefined) view[k] = v;
+        }
+      }
+    } catch {
+      // config overrides are advisory for the guard; ignore resolution errors
+    }
+    return view;
+  }
+
   async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean; autoInstall?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | BinaryMissingResult | BinaryInstallableResult | BinaryInstallFailedResult> {
     const { debug = false, autoInstall = false } = opts;
-
-    // Apply env overrides from skills config before credential check.
-    // Overrides set configured apiKey/env vars into process.env so that
-    // skills with credentials in octopus.json can pass the check below.
-    const skillsConfig = getConfig().skills;
-    const revertEnv = applySkillEnvOverrides(
-      [getSkillEntry(skill)],
-      skillsConfig as unknown as SkillsConfig,
-    );
 
     let adapterResult: AdapterResult | undefined;
     let latencyMs: number = 0;
     let tokenUsage: number = 0;
 
     try {
-    // Check required credentials before invoking
+    // Check required credentials before invoking. This is a GUARD, not
+    // execution — the runner owns env hygiene and credential provisioning, so
+    // we do NOT mutate process.env here. Config-supplied keys (octopus.json
+    // skills.entries) are read via a read-only effective-env view.
+    const effectiveEnv = this.effectiveCredentialEnv(skill);
     const required = getRequiredEnvVars(skill.manifest);
-    const missing = required.filter(v => !process.env[v.key]);
+    const missing = required.filter(v => !effectiveEnv[v.key]);
 
     if (missing.length > 0) {
       return {
@@ -282,7 +307,7 @@ export class Executor {
         // HTTP skill with no endpoint — use LLM-guided curl execution
         adapterResult = await this.executeHttpWithLLM(skill, input, instructions);
       } else {
-        adapterResult = await adapter.invoke(skill, input);
+        adapterResult = await adapter.invoke({ skill, input }, this.invocationContext(skill, input));
       }
     } catch (err) {
       latencyMs = Date.now() - startTime;
@@ -327,7 +352,6 @@ export class Executor {
 
     return { skill, adapterResult, formattedOutput, authGuidance: authGuidance ?? undefined };
     } finally {
-      revertEnv();
       try {
         if (skill.dirPath && latencyMs > 0) {
           recordExecutionSignal(
@@ -386,7 +410,7 @@ If you're not confident about the URL, say "Visit the provider's website" instea
   private async executeSubprocessWithLLM(
     skill: LoadedSkill,
     input: Record<string, unknown>,
-    adapter: { invoke: (skill: LoadedSkill, input: Record<string, unknown>) => Promise<AdapterResult> },
+    adapter: { invoke: (input: { skill: LoadedSkill; input: Record<string, unknown> }, context: AdapterInvocationContext) => Promise<AdapterResult> },
     instructions: string,
   ): Promise<AdapterResult> {
     // If skill has invoke.js, use standard subprocess execution
@@ -394,12 +418,12 @@ If you're not confident about the URL, say "Visit the provider's website" instea
     const path = await import('path');
     const invokeJs = path.join(skill.dirPath, 'scripts', 'invoke.js');
     if (fs.existsSync(invokeJs)) {
-      return adapter.invoke(skill, input);
+      return adapter.invoke({ skill, input }, this.invocationContext(skill, input));
     }
 
     // LLM-guided: ask the LLM what command to run based on SKILL.md instructions
     if (!this.chatClient) {
-      return adapter.invoke(skill, input);
+      return adapter.invoke({ skill, input }, this.invocationContext(skill, input));
     }
 
     const query = (input.query ?? input.text ?? '') as string;
@@ -439,7 +463,7 @@ If you're not confident about the URL, say "Visit the provider's website" instea
 
     if (!trimmedCommand) {
       // Fallback to standard subprocess execution
-      return adapter.invoke(skill, input);
+      return adapter.invoke({ skill, input }, this.invocationContext(skill, input));
     }
 
     // Safety net: rewrite any absolute path to the skill's scripts/ directory.
@@ -470,44 +494,23 @@ If you're not confident about the URL, say "Visit the provider's website" instea
       return skill.dirPath; // redirect to actual install location
     });
 
-    // Execute the LLM-determined command from the skill's directory
-    const cp = await import('node:child_process');
-    return new Promise((resolve) => {
-      const sandboxEnv = buildSandboxedEnv(skill);
-      sandboxEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
-      const child = cp.spawn('bash', ['-c', trimmedCommand], {
-        cwd: skill.dirPath,
-        env: sandboxEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      const killTimer = setTimeout(() => {
-        child.kill('SIGTERM');
-        resolve({ success: false, error: `Skill timed out after ${getConfig().execution.timeoutMs}ms: ${trimmedCommand}` });
-      }, getConfig().execution.timeoutMs);
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-
-      child.on('close', (code: number) => {
-        clearTimeout(killTimer);
-        if (code !== 0) {
-          resolve({ success: false, error: stderr || `Command exited with code ${code}: ${trimmedCommand}` });
-        } else {
-          resolve({ success: true, rawText: stdout });
-        }
-      });
-
-      child.on('error', (err: Error) => {
-        clearTimeout(killTimer);
-        resolve({ success: false, error: err.message });
-      });
-
-      child.stdin.end();
+    // Execute the LLM-determined command INSIDE the sandbox. The runner
+    // rewrites relative script paths to /skill/..., sets cwd=/skill, and
+    // applies guest env hygiene (payload → OCTOPUS_INPUT). No host spawn.
+    const result = await this.sandboxRunner.bind(skill).run({
+      command: ['bash', '-c', trimmedCommand],
+      invocation: { payload: input },
+      timeoutMs: getConfig().execution.timeoutMs,
     });
+
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error ?? result.stderr ?? `Command failed in sandbox: ${trimmedCommand}`,
+        rawText: result.rawText,
+      };
+    }
+    return { success: true, rawText: result.rawText ?? '' };
   }
 
   /**
@@ -621,43 +624,23 @@ If you're not confident about the URL, say "Visit the provider's website" instea
       return { success: false, error: scriptError };
     }
 
-    // Execute the LLM-determined curl command
-    const cp = await import('node:child_process');
-    return new Promise((resolve) => {
-      const sandboxEnv = buildSandboxedEnv(skill);
-      sandboxEnv['OCTOPUS_INPUT'] = JSON.stringify(input);
-      const child = cp.spawn('bash', ['-c', trimmedCommand], {
-        env: sandboxEnv,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      const killTimer = setTimeout(() => {
-        child.kill('SIGTERM');
-        resolve({ success: false, error: `Skill timed out after ${getConfig().execution.timeoutMs}ms: ${trimmedCommand}` });
-      }, getConfig().execution.timeoutMs);
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-
-      child.on('close', (code: number) => {
-        clearTimeout(killTimer);
-        if (code !== 0) {
-          resolve({ success: false, error: stderr || `Command exited with code ${code}: ${trimmedCommand}` });
-        } else {
-          resolve({ success: true, rawText: stdout });
-        }
-      });
-
-      child.on('error', (err: Error) => {
-        clearTimeout(killTimer);
-        resolve({ success: false, error: err.message });
-      });
-
-      child.stdin.end();
+    // Execute the LLM-determined curl command INSIDE the sandbox. Egress goes
+    // only through the per-session egress proxy, which enforces host/method/path
+    // and injects credentials — no host fetch/spawn, no process.env keys passed.
+    const result = await this.sandboxRunner.bind(skill).run({
+      command: ['bash', '-c', trimmedCommand],
+      invocation: { payload: input },
+      timeoutMs: getConfig().execution.timeoutMs,
     });
+
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error ?? result.stderr ?? `Command failed in sandbox: ${trimmedCommand}`,
+        rawText: result.rawText,
+      };
+    }
+    return { success: true, rawText: result.rawText ?? '' };
   }
 
   /**

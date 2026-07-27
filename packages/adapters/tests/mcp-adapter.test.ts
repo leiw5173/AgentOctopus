@@ -1,5 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { McpAdapter } from '../src/mcp-adapter.js';
+import type { AdapterInvocationContext } from '../src/adapter.js';
+
+// MCP transport is Task 5's job; the context is unused by McpAdapter for now.
+const stubContext: AdapterInvocationContext = {
+  sandbox: { run: vi.fn(), spawn: vi.fn() } as any,
+  payload: {},
+  timeoutMs: 1000,
+};
+
+const ctx = (input: Record<string, unknown>, skill: any) =>
+  [{ skill, input }, stubContext] as const;
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => {
   return {
@@ -34,8 +45,8 @@ describe('McpAdapter', () => {
       manifest: { name: 'test-mcp-tool', endpoint: 'npx my-mcp-server' }
     } as any;
 
-    const result = await adapter.invoke(mockSkill, { arg: 'val' });
-    
+    const result = await adapter.invoke(...ctx({ arg: 'val' }, mockSkill));
+
     expect(result.success).toBe(true);
     expect(result.rawText).toBe('mcp-tool-output');
   });
@@ -46,8 +57,8 @@ describe('McpAdapter', () => {
       manifest: { name: 'test-mcp-tool' }
     } as any;
 
-    const result = await adapter.invoke(mockSkill, { arg: 'val' });
-    
+    const result = await adapter.invoke(...ctx({ arg: 'val' }, mockSkill));
+
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/No command or endpoint/);
   });

@@ -1,5 +1,4 @@
-import type { LoadedSkill } from '@agentoctopus/registry';
-import type { Adapter, AdapterResult } from './adapter.js';
+import type { Adapter, AdapterInput, AdapterInvocationContext, AdapterResult } from './adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import cp from 'node:child_process';
@@ -21,7 +20,13 @@ function readSkillBody(dirPath: string): string {
 const MCP_CONNECT_TIMEOUT_MS = 15_000;
 
 export class McpAdapter implements Adapter {
-  async invoke(skill: LoadedSkill, input: Record<string, unknown>): Promise<AdapterResult> {
+  // NOTE (Plan 5 Task 4): signature converged to the uniform Adapter boundary.
+  // The persistent MCP transport itself is Task 5's job — the host stdio
+  // transport below is intentionally left in place and `context` is unused
+  // until Task 5 replaces it with a sandbox-backed transport.
+  async invoke(input: AdapterInput, _context: AdapterInvocationContext): Promise<AdapterResult> {
+    const { skill } = input;
+    const toolInput = input.input;
     try {
       // Determine the MCP command to run:
       // 1. manifest.endpoint (explicit)
@@ -80,7 +85,7 @@ export class McpAdapter implements Adapter {
       // Execute the tool
       const result = await client.callTool({
         name: tool.name,
-        arguments: input,
+        arguments: toolInput,
       });
 
       await client.close();
