@@ -38,6 +38,14 @@ export interface NetnsHandle {
   readonly proxyPort: number;
   /** Per-session nftables table holding the allowlist rules. */
   readonly nftTable: string;
+  /**
+   * Errors recorded during cleanup that were NOT the benign "already-absent"
+   * case. Already-absent own objects (ENOENT-style) are success and are NOT
+   * recorded here; other teardown errors (EBUSY, still-in-use, permission)
+   * ARE recorded so callers can surface leaks. Readonly snapshot — appended
+   * by cleanup() but never cleared.
+   */
+  readonly cleanupErrors: ReadonlyArray<{ argv: string[]; error: string }>;
   /** Idempotent teardown of the namespace, veth pair, and nft table. */
   cleanup(): Promise<void>;
 }
@@ -67,13 +75,12 @@ const realExecFileAsync = promisify(execFileCb);
 const realNetnsExec: NetnsExec = {
   async execFile(argv, stdin) {
     const [file, ...args] = argv;
-    const child = realExecFileAsync(file, args, {
-      // No shell: execFile never spawns a shell.
-      maxBuffer: 4 * 1024 * 1024,
-    });
     if (stdin !== undefined) {
-      // execFile does not expose a stdin handle directly; spawn via child_process
-      // is needed for piping. We re-dispatch through a small spawn wrapper.
+      // Spawn EXACTLY ONCE for stdin-bearing commands (nft -f -). execFile
+      // would spawn its own child with no way to feed stdin, so we cannot
+      // call it first — doing so would leak a hung child blocked reading
+      // stdin forever. Import spawn lazily so the no-stdin fast path stays
+      // sync-looking.
       const { spawn } = await import('node:child_process');
       return await new Promise((resolve, reject) => {
         const p = spawn(file, args, { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -90,7 +97,11 @@ const realNetnsExec: NetnsExec = {
         p.stdin.end();
       });
     }
-    return child;
+    // No stdin: execFile is sufficient and spawns exactly once.
+    return realExecFileAsync(file, args, {
+      // No shell: execFile never spawns a shell.
+      maxBuffer: 4 * 1024 * 1024,
+    });
   },
 };
 
@@ -336,16 +347,30 @@ export async function setupNetns(opts: SetupNetnsOptions): Promise<NetnsHandle> 
   const plan = buildNetnsCommands({ name, hostIf, skillIf, proxyIp, skillIp, nftTable });
 
   let cleanedUp = false;
+  const cleanupErrors: Array<{ argv: string[]; error: string }> = [];
 
   const cleanup = async (): Promise<void> => {
     if (cleanedUp) return;
     cleanedUp = true;
-    // Best-effort delete of ONLY this session's objects. Already-absent own
-    // objects are success; unexpected errors are swallowed so cleanup is
-    // idempotent. We never run sysctl, never touch shared tables, and never
-    // `|| true` a SETUP failure (only cleanup is best-effort).
+    // Best-effort delete of ONLY this session's objects. We distinguish:
+    //   - already-absent own objects (ENOENT / "No such file" / "Cannot find")
+    //     → success, NOT recorded.
+    //   - any OTHER teardown error (EBUSY, EPERM, still-in-use) → recorded in
+    //     `cleanupErrors` so callers can surface the leak. We still continue
+    //     teardown of the remaining objects — cleanup is idempotent.
+    // We never run sysctl, never touch shared tables, and never `|| true` a
+    // SETUP failure (only cleanup is best-effort).
+    const isAlreadyAbsent = (msg: string): boolean =>
+      /ENOENT|No such file|Cannot find|does not exist|not exist|No such process/i.test(msg);
     const tryExec = async (argv: string[]): Promise<void> => {
-      try { await exec.execFile(argv); } catch { /* already-absent or best-effort */ }
+      try {
+        await exec.execFile(argv);
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (!isAlreadyAbsent(msg)) {
+          cleanupErrors.push({ argv: [...argv], error: msg });
+        }
+      }
     };
     await tryExec(['ip', 'netns', 'exec', name, 'nft', 'delete', 'table', 'inet', nftTable]);
     await tryExec(['ip', 'link', 'delete', hostIf]);
@@ -374,6 +399,7 @@ export async function setupNetns(opts: SetupNetnsOptions): Promise<NetnsHandle> 
       skillIp,
       proxyPort,
       nftTable,
+      cleanupErrors,
       cleanup,
     };
     return handle;
@@ -437,18 +463,102 @@ export async function authorizeProxyEndpoint(
     throw new NetnsError(`nft -j list returned unparseable JSON: ${(err as Error).message}`, { cause: err });
   }
 
-  const blob = JSON.stringify(parsed);
-  const wantDaddr = `"${handle.proxyIp}"`;
-  const wantDport = String(opts.proxyListenPort);
-  // The exact rule must appear in the serialized JSON. We require both the
-  // address and port to be present in the same table dump; a missing or
-  // altered rule means the kernel did not install what we asked.
-  if (!blob.includes(wantDaddr) || !blob.includes(wantDport)) {
+  // Walk the parsed ruleset and require BOTH:
+  //   - a rule in the OUTPUT chain matching ip daddr == proxyIp && tcp dport == port && accept
+  //   - a rule in the INPUT  chain matching ip saddr == proxyIp && tcp sport == port && accept
+  // Substring matching is not sufficient: a missing output rule or a port
+  // string coincidentally matching an unrelated chain handle/priority/counter
+  // must fail closed.
+  const missing = findMissingProxyRules(parsed, handle.proxyIp, opts.proxyListenPort);
+  if (missing.length > 0) {
     throw new NetnsError(
-      `read-back verification failed: table inet ${handle.nftTable} does not contain ` +
-      `the exact allow rule for ${handle.proxyIp}:${opts.proxyListenPort}`,
+      `read-back verification failed: table inet ${handle.nftTable} is missing ` +
+      `the exact allow rule(s): ${missing.join('; ')} — refusing to continue`,
     );
   }
 
   return handle;
+}
+
+// ---------------------------------------------------------------------------
+// Read-back rule walker.
+// ---------------------------------------------------------------------------
+
+interface NftExprMatch {
+  match?: {
+    op?: string;
+    left?: { payload?: { protocol?: string; field?: string } };
+    right?: unknown;
+  };
+  accept?: unknown;
+}
+
+interface NftRule {
+  rule?: {
+    family?: string;
+    table?: string;
+    chain?: string;
+    expr?: NftExprMatch[];
+  };
+}
+
+/**
+ * Inspect a parsed `nft -j list` dump and return a list of missing rules.
+ * Returns an empty array when both the output daddr/dport accept rule and
+ * the input saddr/sport accept rule are present.
+ */
+function findMissingProxyRules(
+  parsed: unknown,
+  proxyIp: string,
+  port: number,
+): string[] {
+  const missing: string[] = [];
+  const nftables = (parsed as { nftables?: unknown[] })?.nftables;
+  if (!Array.isArray(nftables)) {
+    return ['nftables array is absent — unparseable dump'];
+  }
+
+  let hasOutputRule = false;
+  let hasInputRule = false;
+
+  for (const entry of nftables) {
+    const rule = (entry as NftRule)?.rule;
+    if (!rule || !Array.isArray(rule.expr)) continue;
+    const chain = rule.chain;
+    if (chain !== 'output' && chain !== 'input') continue;
+
+    // Extract ip daddr/saddr and tcp dport/sport from this rule's expr.
+    let ipAddr: string | undefined;
+    let tcpPort: number | undefined;
+    let hasAccept = false;
+
+    for (const e of rule.expr) {
+      if (e?.accept !== undefined) {
+        hasAccept = true;
+        continue;
+      }
+      const m = e?.match;
+      if (!m) continue;
+      const proto = m.left?.payload?.protocol;
+      const field = m.left?.payload?.field;
+      const right = m.right;
+      if (proto === 'ip' && (field === 'daddr' || field === 'saddr') && typeof right === 'string') {
+        ipAddr = right;
+      } else if (proto === 'tcp' && (field === 'dport' || field === 'sport') && typeof right === 'number') {
+        tcpPort = right;
+      }
+    }
+
+    if (!hasAccept) continue;
+    if (chain === 'output' && ipAddr === proxyIp && tcpPort === port) hasOutputRule = true;
+    if (chain === 'input' && ipAddr === proxyIp && tcpPort === port) hasInputRule = true;
+  }
+
+  if (!hasOutputRule) {
+    missing.push(`output chain rule: ip daddr ${proxyIp} tcp dport ${port} accept`);
+  }
+  if (!hasInputRule) {
+    missing.push(`input chain rule: ip saddr ${proxyIp} tcp sport ${port} accept`);
+  }
+  return missing;
 }

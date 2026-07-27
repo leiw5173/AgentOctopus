@@ -302,22 +302,144 @@ describe('setupNetns (injected fake exec)', () => {
       message: 'No such file or directory',
     });
     await expect(h.cleanup()).resolves.toBeUndefined();
+    // The "already-absent" failure path was never even reached on the latched
+    // cleanup, so cleanupErrors stays empty.
+    expect(h.cleanupErrors).toEqual([]);
+  });
+
+  it('cleanup records unexpected errors (EBUSY) but treats already-absent as success', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess record', exec: fake });
+    // Make the nft delete fail with EBUSY (still-in-use, NOT already-absent),
+    // and the link delete fail with ENOENT (already-absent → success, not recorded).
+    fake.failOn.push({
+      match: (argv) => argv.includes('nft') && argv.includes('delete'),
+      message: 'Error: EBUSY: table is busy',
+    });
+    fake.failOn.push({
+      match: (argv) => argv[0] === 'ip' && argv[1] === 'link' && argv[2] === 'delete',
+      message: 'Cannot find device "ohXXXXX"',
+    });
+    await h.cleanup();
+    // EBUSY was recorded; ENOENT (already-absent) was NOT.
+    expect(h.cleanupErrors.length).toBe(1);
+    expect(h.cleanupErrors[0].error).toMatch(/EBUSY/);
+    expect(h.cleanupErrors[0].argv).toContain('nft');
+    expect(h.cleanupErrors[0].argv).toContain('delete');
+  });
+
+  it('every nft -f - call goes through the seam EXACTLY ONCE (F1 regression)', async () => {
+    // Regression for the F1 double-spawn bug: a previous version of the real
+    // exec seam called execFile FIRST (spawning a child with no stdin piped,
+    // which would hang forever) and THEN called spawn again for the actual
+    // stdin work. The fix is to branch BEFORE any child is created. We
+    // verify the invariant via the FakeExec seam by counting calls per
+    // logical operation; the real implementation's structure is verified by
+    // inspection of netns.ts (single `if (stdin !== undefined)` branch, no
+    // preceding execFile call).
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess f1', exec: fake });
+    const port = h.proxyPort;
+    fake.nftListOutput = JSON.stringify({
+      nftables: [
+        { table: { family: 'inet', name: h.nftTable } },
+        {
+          rule: {
+            family: 'inet', table: h.nftTable, chain: 'output',
+            expr: [
+              { match: { op: '==', left: { payload: { protocol: 'ip', field: 'daddr' } }, right: h.proxyIp } },
+              { match: { op: '==', left: { payload: { protocol: 'tcp', field: 'dport' } }, right: port } },
+              { accept: null },
+            ],
+          },
+        },
+        {
+          rule: {
+            family: 'inet', table: h.nftTable, chain: 'input',
+            expr: [
+              { match: { op: '==', left: { payload: { protocol: 'ip', field: 'saddr' } }, right: h.proxyIp } },
+              { match: { op: '==', left: { payload: { protocol: 'tcp', field: 'sport' } }, right: port } },
+              { accept: null },
+            ],
+          },
+        },
+      ],
+    });
+    await authorizeProxyEndpoint(h, { proxyListenPort: port, exec: fake });
+    // Two nft -f - calls total: one for the initial base table, one for the
+    // atomic replace. Each must appear EXACTLY ONCE in the seam's call log.
+    const nftFeedCalls = fake.calls.filter((c) =>
+      c.argv.includes('nft') && c.argv.includes('-f') && c.argv.includes('-'));
+    expect(nftFeedCalls.length).toBe(2);
+    // Both carried stdin (i.e. each logical stdin operation made exactly one
+    // seam call, and that call carried the ruleset).
+    for (const call of nftFeedCalls) {
+      expect(call.stdin).toBeDefined();
+      expect(call.stdin!.length).toBeGreaterThan(0);
+    }
+    // Source-structure check: the production seam must not call execFile
+    // before deciding whether stdin is present. Read the module source once
+    // and assert the branch ordering.
+    const src = await fs.readFile(new URL('../src/os/netns.ts', import.meta.url), 'utf8');
+    const realExecBody = src.match(/const realNetnsExec[\s\S]*?^};/m)?.[0] ?? '';
+    expect(realExecBody.length).toBeGreaterThan(0);
+    const stdinBranchIdx = realExecBody.indexOf('if (stdin !== undefined)');
+    const execFileCallIdx = realExecBody.indexOf('realExecFileAsync(file');
+    expect(stdinBranchIdx).toBeGreaterThan(-1);
+    expect(execFileCallIdx).toBeGreaterThan(-1);
+    // The stdin branch must come BEFORE any execFile invocation, so a
+    // stdin-bearing call never spawns an execFile child first.
+    expect(stdinBranchIdx).toBeLessThan(execFileCallIdx);
   });
 });
 
 describe('authorizeProxyEndpoint (injected fake exec)', () => {
+  function buildFakeNftList(host: { proxyIp: string; nftTable: string }, port: number, opts?: { omitOutput?: boolean; bogusPort?: number }): string {
+    const rules: unknown[] = [
+      { table: { family: 'inet', name: host.nftTable } },
+    ];
+    if (!opts?.omitOutput) {
+      rules.push({
+        rule: {
+          family: 'inet',
+          table: host.nftTable,
+          chain: 'output',
+          expr: [
+            { match: { op: '==', left: { payload: { protocol: 'ip', field: 'daddr' } }, right: host.proxyIp } },
+            { match: { op: '==', left: { payload: { protocol: 'tcp', field: 'dport' } }, right: port } },
+            { accept: null },
+          ],
+        },
+      });
+    }
+    rules.push({
+      rule: {
+        family: 'inet',
+        table: host.nftTable,
+        chain: 'input',
+        expr: [
+          { match: { op: '==', left: { payload: { protocol: 'ip', field: 'saddr' } }, right: host.proxyIp } },
+          { match: { op: '==', left: { payload: { protocol: 'tcp', field: 'sport' } }, right: port } },
+          { accept: null },
+        ],
+      },
+    });
+    if (opts?.bogusPort !== undefined) {
+      // An unrelated chain whose handle happens to match the port string —
+      // a substring-based check would false-positive on this. The exact-rule
+      // walker must ignore it.
+      rules.push({
+        chain: { family: 'inet', table: host.nftTable, name: 'unrelated', handle: opts.bogusPort },
+      });
+    }
+    return JSON.stringify({ nftables: rules });
+  }
+
   it('atomically replaces the table and verifies the exact port rule via read-back', async () => {
     const fake = new FakeExec();
     const h = await setupNetns({ sessionId: 'sess auth', exec: fake });
     const port = h.proxyPort;
-    // Provide the nft -j list output the read-back expects.
-    fake.nftListOutput = JSON.stringify({
-      nftables: [
-        { table: { family: 'inet', name: h.nftTable } },
-        { rule: { chain: 'output', expr: [{ match: { left: { payload: { field: 'daddr' } }, right: h.proxyIp } }, { match: { left: { payload: { field: 'dport' } }, right: port } }, { accept: null }] } },
-        { rule: { chain: 'input', expr: [{ match: { left: { payload: { field: 'saddr' } }, right: h.proxyIp } }, { match: { left: { payload: { field: 'sport' } }, right: port } }, { accept: null }] } },
-      ],
-    });
+    fake.nftListOutput = buildFakeNftList(h, port);
     const out = await authorizeProxyEndpoint(h, { proxyListenPort: port, exec: fake });
     expect(out).toBe(h);
     // The nft -f - replace call went through stdin.
@@ -352,6 +474,28 @@ describe('authorizeProxyEndpoint (injected fake exec)', () => {
     await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
       .rejects.toThrow(/read-back|not present|missing|verif/i);
   });
+
+  it('fails closed when only the INPUT return rule is present (output allow rule missing)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess noout', exec: fake });
+    // Substring-based check would PASS here (proxyIp and port both appear
+    // in the dump). The exact-rule walker must reject.
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { omitOutput: true });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .rejects.toThrow(/output chain rule/);
+  });
+
+  it('fails closed when the port string appears only as an unrelated chain handle', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess bogus', exec: fake });
+    // The dump has the input rule with the right port AND a chain handle that
+    // coincidentally equals the port number — but the OUTPUT rule is missing.
+    // Substring-based check would false-positive on the handle. Exact-rule
+    // walker must reject because the output daddr/dport rule is absent.
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { omitOutput: true, bogusPort: h.proxyPort });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .rejects.toThrow(/output chain rule/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -361,11 +505,32 @@ describe('authorizeProxyEndpoint (injected fake exec)', () => {
 const isLinux = process.platform === 'linux';
 const REQUIRE_OS = process.env.OCTOPUS_REQUIRE_OS_SANDBOX === '1';
 
+// Hard-fail guard: on the Plan 6 lane REQUIRE_OS=1 is set to convert any
+// capability skip into a hard failure. If the env is set but the test is
+// being collected on a non-Linux host, the whole Linux-gated block would
+// silently skip and the lane would appear green. This portable test forces
+// the lane to fail loudly instead.
+describe('OCTOPUS_REQUIRE_OS_SANDBOX contract (netns)', () => {
+  it('hard-fails when REQUIRE_OS=1 but the platform cannot run the real netns smoke', () => {
+    if (REQUIRE_OS && !isLinux) {
+      throw new Error(
+        'OCTOPUS_REQUIRE_OS_SANDBOX=1 but platform is not linux — the netns smoke ' +
+        'test cannot run here, so the lane cannot silently regress',
+      );
+    }
+  });
+});
+
 describe.skipIf(!isLinux)('setupNetns — real Linux netns smoke', () => {
   it('creates a no-egress-window namespace, authorizes the proxy, and cleans up only its own objects', async () => {
     if (REQUIRE_OS) {
-      // On the Plan 6 privileged lane this test MUST run end-to-end.
+      // On the Plan 6 privileged lane this test MUST run end-to-end. Any
+      // capability failure surfaces via the throws below, not via a skip.
     }
+
+    // Snapshot net.ipv4.ip_forward BEFORE setup; assert it is unchanged at
+    // every later step. Setup must never touch host-global sysctls.
+    const ipForwardBefore = (await fs.readFile('/proc/sys/net/ipv4/ip_forward', 'utf8')).trim();
 
     const h = await setupNetns({ sessionId: `oct-smoke-${process.pid}` });
     try {
@@ -434,6 +599,20 @@ describe.skipIf(!isLinux)('setupNetns — real Linux netns smoke', () => {
           c.on('error', reject);
           c.on('timeout', () => { c.destroy(); reject(new Error('timeout')); });
         })).rejects.toThrow();
+
+        // Public IP 1.1.1.1:80 must also fail (no egress to anything other
+        // than proxyIp:proxyPort, even after authorization).
+        await expect(new Promise<void>((resolve, reject) => {
+          const c = net.createConnection({ host: '1.1.1.1', port: 80 }, () => {});
+          c.setTimeout(1500);
+          c.on('connect', () => { c.destroy(); resolve(); });
+          c.on('error', reject);
+          c.on('timeout', () => { c.destroy(); reject(new Error('timeout')); });
+        })).rejects.toThrow();
+
+        // ip_forward must STILL be unchanged after authorize.
+        const ipForwardAfterAuth = (await fs.readFile('/proc/sys/net/ipv4/ip_forward', 'utf8')).trim();
+        expect(ipForwardAfterAuth).toBe(ipForwardBefore);
       } finally {
         server.close();
       }
@@ -450,5 +629,8 @@ describe.skipIf(!isLinux)('setupNetns — real Linux netns smoke', () => {
     // The session nft table is gone.
     const { stdout: tablesAfter } = await execFileAsync('nft', ['list', 'tables']);
     expect(tablesAfter).not.toContain(h.nftTable);
+    // ip_forward is still unchanged after the entire lifecycle.
+    const ipForwardFinal = (await fs.readFile('/proc/sys/net/ipv4/ip_forward', 'utf8')).trim();
+    expect(ipForwardFinal).toBe(ipForwardBefore);
   }, 30000);
 });
