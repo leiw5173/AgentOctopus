@@ -18,9 +18,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
-import { resolve, join, dirname, basename } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { join, dirname, basename } from 'node:path';
 import { verifyRuntimeArtifact } from './rootfs.js';
+import { verifyHelperArtifact } from './helper-build.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -41,6 +42,14 @@ export interface OsCaps {
 export interface ProbeOptions {
   runtimeManifestPath: string;
   helperManifestPath: string;
+  /**
+   * Absolute path to the already-resolved helper binary. When provided, the
+   * helper artifact is verified with the real `verifyHelperArtifact()` (strict
+   * digest/size/mode) and the namespace probe executes THIS binary. When
+   * omitted, the path is derived from the manifest filename convention
+   * (`<name>.manifest.json` → sibling `<name>` binary) — still verified.
+   */
+  helperBinaryPath?: string;
   /** Override the parent dir for probe artifacts; default `/run/agentoctopus-probe` (Linux). */
   probeRoot?: string;
 }
@@ -68,31 +77,17 @@ function detectPlatform(): OsPlatform {
 }
 
 // ---------------------------------------------------------------------------
-// Artifact verification seam
+// Artifact verification (Task 2 runtime seam + Task 3 real helper verifier)
 // ---------------------------------------------------------------------------
-// Task 2 ships the real runtime verifier in `src/os/rootfs.ts` — the runtime
-// seam below delegates to it. The helper verifier is Task 3's job; until it
-// lands we keep the minimal shape check for the helper manifest only.
+// The runtime manifest is verified by `verifyRuntimeArtifact()`; the helper by
+// `verifyHelperArtifact()` (strict digest/size/mode, no files[] indirection).
 //
 // Manifest naming convention (Task 2.5): the runtime manifest is
 //   <dir>/linux-node22.manifest.json     artifact: <dir>/linux-node22.rootfs.tar.zst
-// The probe derives the artifact path from the manifest filename so callers
-// only need to pass the manifest path. If the manifest filename does not
-// match the convention, the probe reports the runtime artifact as missing
+// The probe derives the runtime artifact path from the manifest filename so
+// callers only need to pass the manifest path. If the manifest filename does
+// not match the convention, the probe reports the artifact as missing
 // (fail-closed) rather than guess.
-
-const SHA256_RE = /^[0-9a-f]{64}$/;
-
-interface ManifestFileEntry {
-  path?: unknown;
-  sha256?: unknown;
-  mode?: unknown;
-  size?: unknown;
-}
-
-interface ArtifactManifestShape {
-  files?: unknown;
-}
 
 /** Derive the sibling runtime artifact path from a Task 2.5 manifest path. */
 function runtimeArtifactPathFromManifest(manifestPath: string): string {
@@ -111,37 +106,25 @@ async function verifyRuntimeSeam(manifestPath: string): Promise<void> {
   await verifyRuntimeArtifact({ artifactPath, manifestPath });
 }
 
-async function verifyArtifactSeam(manifestPath: string, kind: 'helper'): Promise<void> {
-  const st = await stat(manifestPath);
-  if (!st.isFile()) throw new Error(`${kind} manifest is not a regular file: ${manifestPath}`);
+/**
+ * Derive the helper binary path: the caller's resolved `helperBinaryPath`
+ * wins; otherwise the manifest filename convention (`<name>.manifest.json`
+ * → sibling `<name>`). Either way the binary is verified against the manifest
+ * by `verifyHelperArtifact()` before it is ever executed.
+ */
+function helperBinaryPathFromManifest(helperManifestPath: string, override?: string): string {
+  if (override && override.length > 0) return override;
+  const dir = dirname(helperManifestPath);
+  const base = basename(helperManifestPath);
+  const m = base.match(/^(.+)\.manifest\.json$/);
+  if (!m) throw new Error(`helper manifest filename does not match *.manifest.json: ${base}`);
+  return join(dir, m[1]);
+}
 
-  const raw = await readFile(manifestPath, 'utf8');
-  let parsed: ArtifactManifestShape;
-  try {
-    parsed = JSON.parse(raw) as ArtifactManifestShape;
-  } catch (err) {
-    throw new Error(`${kind} manifest is not valid JSON: ${(err as Error).message}`);
-  }
-  if (!parsed || typeof parsed !== 'object') {
-    throw new Error(`${kind} manifest is not a JSON object`);
-  }
-  const files = parsed.files;
-  if (!Array.isArray(files) || files.length === 0) {
-    throw new Error(`${kind} manifest has no files[] entries`);
-  }
-  for (const entry of files as ManifestFileEntry[]) {
-    if (!entry || typeof entry !== 'object') throw new Error(`${kind} manifest has non-object file entry`);
-    if (typeof entry.path !== 'string' || entry.path.length === 0) {
-      throw new Error(`${kind} manifest file entry missing path`);
-    }
-    // Manifest paths are relative to the artifact root — reject absolute / traversal.
-    if (entry.path.startsWith('/') || entry.path.split('/').includes('..')) {
-      throw new Error(`${kind} manifest file entry has unsafe path: ${entry.path}`);
-    }
-    if (typeof entry.sha256 !== 'string' || !SHA256_RE.test(entry.sha256)) {
-      throw new Error(`${kind} manifest file entry has invalid sha256 for ${entry.path}`);
-    }
-  }
+async function verifyHelperSeam(helperManifestPath: string, helperBinaryPath: string): Promise<void> {
+  const st = await stat(helperManifestPath);
+  if (!st.isFile()) throw new Error(`helper manifest is not a regular file: ${helperManifestPath}`);
+  await verifyHelperArtifact({ helperPath: helperBinaryPath, manifestPath: helperManifestPath });
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +157,7 @@ function newToken(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1: artifact verification (seam — see comment above)
+// Phase 1: artifact verification (runtime + helper, both real verifiers)
 // ---------------------------------------------------------------------------
 
 async function probeArtifacts(opts: ProbeOptions, errors: string[]): Promise<{ runtime: boolean; helper: boolean }> {
@@ -187,7 +170,7 @@ async function probeArtifacts(opts: ProbeOptions, errors: string[]): Promise<{ r
     errors.push(`runtime artifact: ${(err as Error).message}`);
   }
   try {
-    await verifyArtifactSeam(opts.helperManifestPath, 'helper');
+    await verifyHelperSeam(opts.helperManifestPath, helperBinaryPathFromManifest(opts.helperManifestPath, opts.helperBinaryPath));
     helper = true;
   } catch (err) {
     errors.push(`helper artifact: ${(err as Error).message}`);
@@ -200,27 +183,14 @@ async function probeArtifacts(opts: ProbeOptions, errors: string[]): Promise<{ r
 // ---------------------------------------------------------------------------
 // The verified helper is invoked with `--probe-namespaces`; it performs the
 // unshare(2) calls itself inside a tightly-scoped binary so we don't hand
-// namespace-creation primitives to the JS layer. The helper path is the
-// manifest's declared `helper` entry; Task 3 supplies it. Until then, the
-// manifest seam yields the helper entrypoint path.
+// namespace-creation primitives to the JS layer. The helper binary path is
+// resolved by the caller (OsSandboxBackend.resolveOsArtifacts) or derived from
+// the manifest filename convention, and is always digest/size/mode-verified
+// by Phase 1 before it is executed here.
 
-async function helperPathFromManifest(manifestPath: string): Promise<string> {
-  const raw = await readFile(manifestPath, 'utf8');
-  const parsed = JSON.parse(raw) as { helper?: unknown; files?: Array<{ path?: unknown }> };
-  if (typeof parsed.helper === 'string' && parsed.helper.length > 0) return parsed.helper;
-  // Fallback: look for a well-known helper entry in files[].
-  const hit = Array.isArray(parsed.files)
-    ? parsed.files.find((f) => typeof f?.path === 'string' && /(^|\/)sandbox-helper$/.test(f.path as string))
-    : undefined;
-  if (hit && typeof hit.path === 'string') return hit.path as string;
-  throw new Error('helper manifest does not declare a helper entrypoint');
-}
-
-async function probeNamespaces(helperManifestPath: string, manifestDir: string, errors: string[]): Promise<boolean> {
+async function probeNamespaces(helperBinaryPath: string, errors: string[]): Promise<boolean> {
   try {
-    const helperRel = await helperPathFromManifest(helperManifestPath);
-    const helperAbs = resolve(manifestDir, helperRel);
-    const res = await runArgv([helperAbs, '--probe-namespaces']);
+    const res = await runArgv([helperBinaryPath, '--probe-namespaces']);
     if (res.code !== 0) {
       errors.push(`helper namespace probe exited ${res.code}: ${res.stderr.trim() || res.stdout.trim()}`);
       return false;
@@ -410,9 +380,17 @@ export async function probeOsCaps(opts: ProbeOptions): Promise<OsCaps> {
   caps.runtimeArtifact = artifacts.runtime;
   caps.helperArtifact = artifacts.helper;
 
-  // Helper namespace probe needs the helper manifest dir to resolve relative paths.
-  const helperManifestDir = resolve(opts.helperManifestPath, '..');
-  caps.userMountPidIpcUtsNs = await probeNamespaces(opts.helperManifestPath, helperManifestDir, probeErrors);
+  // Namespace probe executes the verified helper binary (Phase 1 verified it
+  // above). If the helper artifact failed verification, skip execution —
+  // never run an unverified helper.
+  if (artifacts.helper) {
+    caps.userMountPidIpcUtsNs = await probeNamespaces(
+      helperBinaryPathFromManifest(opts.helperManifestPath, opts.helperBinaryPath),
+      probeErrors,
+    );
+  } else {
+    probeErrors.push('namespace probe skipped: helper artifact failed verification');
+  }
 
   caps.namedNetns = await probeNetns(token, probeErrors);
   caps.nftRuleCreate = await probeNft(token, probeErrors);

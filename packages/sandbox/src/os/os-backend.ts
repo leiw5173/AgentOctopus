@@ -332,6 +332,7 @@ export class OsSandboxBackend implements SandboxBackend {
     const caps = await prober({
       runtimeManifestPath: artifacts.runtimeManifestPath,
       helperManifestPath: artifacts.helperManifestPath,
+      helperBinaryPath: artifacts.helperBinaryPath,
     });
     this.probed = true;
     this.caps = caps;

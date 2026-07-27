@@ -708,24 +708,64 @@ static char *read_file(const char *path, size_t *outLen) {
     return buf;
 }
 
+/* ------------------------------------------------------------------ */
+/* Namespace capability probe (--probe-namespaces)                     */
+/* ------------------------------------------------------------------ */
+
+/* Perform ONLY the user/mount/PID/IPC/UTS namespace pivot the launcher
+ * relies on, then exit 0. This lets the JS probe prove the host grants
+ * namespace creation WITHOUT opening any netns, mounting anything, or
+ * chrooting. On any failure it die()s non-zero so the probe reads it as
+ * "capability absent" (fail-closed). It must run as root, like main(). */
+static void probe_namespaces(void) {
+    if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
+        die_errno("probe unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
+
+    /* Mirror phase-1 mapping so the probe exercises the same privileged
+     * writes the real launch needs. */
+    char map[64];
+    uid_t ruid = getuid();
+    gid_t rgid = getgid();
+    xwrite_file("/proc/self/setgroups", "deny");
+    snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
+    xwrite_file("/proc/self/uid_map", map);
+    snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
+    xwrite_file("/proc/self/gid_map", map);
+
+    /* Success: namespaces created and uid/gid mapped. Exit 0. The kernel
+     * reclaims the (never-entered-by-a-child) namespaces on process exit. */
+    _exit(0);
+}
+
 int main(int argc, char **argv) {
     const char *launchSpecPath = NULL;
     int stopBeforeExec = 0;
+    int probeNs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--launch-spec") == 0 && i + 1 < argc) {
             launchSpecPath = argv[++i];
         } else if (strcmp(argv[i], "--stop-before-exec") == 0) {
             stopBeforeExec = 1;
+        } else if (strcmp(argv[i], "--probe-namespaces") == 0) {
+            probeNs = 1;
         } else {
             die("unknown argument: %s", argv[i]);
         }
     }
-    if (!launchSpecPath) die("missing --launch-spec <path>");
 
     /* The helper must run as root (real uid 0) so it can write uid_map and
      * perform the mounts. The launcher guarantees this; we enforce it. */
     if (getuid() != 0) die("os-helper must run as root");
+
+    /* Early probe path: no launch spec required, no netns/mount/chroot. */
+    if (probeNs) {
+        if (launchSpecPath) die("--probe-namespaces takes no --launch-spec");
+        probe_namespaces();
+        /* never returns */
+    }
+
+    if (!launchSpecPath) die("missing --launch-spec <path>");
 
     size_t specLen = 0;
     char *specJson = read_file(launchSpecPath, &specLen);

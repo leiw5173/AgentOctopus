@@ -99,6 +99,7 @@ describe.skipIf(!isLinux)('probeOsCaps linux smoke', () => {
     const caps = await probeOsCaps({
       runtimeManifestPath: `${PROBE_MANIFEST_ROOT}/runtime.manifest.json`,
       helperManifestPath: `${PROBE_MANIFEST_ROOT}/helper.manifest.json`,
+      helperBinaryPath: `${PROBE_MANIFEST_ROOT}/helper`,
     });
 
     const afterNetns = await snapshotNetns();
