@@ -208,6 +208,13 @@ static size_t parse_string(Scanner *s, char *out, size_t outLen) {
                         else die("launch spec parse error: bad \\u escape");
                     }
                     if (v > 0x7f) die("launch spec: non-ASCII \\u escape not supported");
+                    /* Apply the SAME control-char rejection to the DECODED
+                     * value as the raw-byte path above, and reject NUL
+                     * outright — parsed strings become C strings (argv, cwd,
+                     * env) where an embedded NUL silently truncates. No
+                     * escape sequence may introduce a byte < 0x20. */
+                    if (v == 0) die("launch spec: \\u0000 (NUL) is never legitimate in a string");
+                    if (v < 0x20) die("launch spec parse error: control char in \\u escape");
                     c = (char)v;
                     break;
                 }
