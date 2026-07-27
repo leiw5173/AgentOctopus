@@ -17,10 +17,10 @@
  *      argument-array invocation, into a temp output then atomic rename.
  *   2. Compute SHA-256, record mode (0o755) + size, write
  *      runtime/os-helper.manifest.json atomically.
- *   3. Self-check: run verifyHelperArtifact() against the pair IF that
- *      function has landed in dist/os/ (Task 3). If not, the script notes
- *      the seam and still fails the build if the manifest it wrote does not
- *      round-trip its own schema fields.
+ *   3. Self-check: run verifyHelperArtifact() (Task 3, compiled to
+ *      dist/os/helper-build.js) against the pair. The producer and verifier
+ *      share the canonical HelperArtifactManifest schema; a missing dist
+ *      build or a rejected pair is a hard failure — there is no soft seam.
  *
  * Fail-closed everywhere: missing tool/input exits non-zero; no partial
  * artifact is ever left in place.
@@ -130,30 +130,33 @@ const manifest = {
 await writeAtomic(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n');
 
 // ---------------------------------------------------------------------------
-// Step 3: self-check with the compiled verifyHelperArtifact() when available.
+// Step 3: self-check with the compiled verifyHelperArtifact() (Task 3).
+// The producer and verifier now share the canonical HelperArtifactManifest
+// schema; a missing dist build is a hard failure, not a soft seam.
 // ---------------------------------------------------------------------------
 
 let verifyHelperArtifact;
 try {
-  for (const candidate of ['helper.js', 'rootfs.js']) {
-    const mod = await import(path.join(DIST_OS_DIR, candidate)).catch(() => null);
-    if (mod?.verifyHelperArtifact) { verifyHelperArtifact = mod.verifyHelperArtifact; break; }
-  }
+  const mod = await import(path.join(DIST_OS_DIR, 'helper-build.js'));
+  verifyHelperArtifact = mod.verifyHelperArtifact;
 } catch { /* fall through */ }
 
-if (verifyHelperArtifact) {
-  try {
-    await verifyHelperArtifact({ helperPath: HELPER_PATH, manifestPath: MANIFEST_PATH });
-  } catch (err) {
-    await fs.rm(HELPER_PATH, { force: true }).catch(() => {});
-    await fs.rm(MANIFEST_PATH, { force: true }).catch(() => {});
-    die(`self-check failed: verifyHelperArtifact rejected the just-produced pair: ${err.message}`, 3);
-  }
-} else {
-  console.error(
-    'build-os-helper: NOTE: verifyHelperArtifact() is not yet available in dist/os/ (Task 3 pending).\n' +
-    '  Self-check seam: once Task 3 lands it, re-run this script to verify the pair.',
+if (typeof verifyHelperArtifact !== 'function') {
+  await fs.rm(HELPER_PATH, { force: true }).catch(() => {});
+  await fs.rm(MANIFEST_PATH, { force: true }).catch(() => {});
+  die(
+    'verifyHelperArtifact() not found in dist/os/helper-build.js.\n' +
+    '  Run `pnpm --filter @agentoctopus/sandbox build` first so the Task 3 verifier is compiled.',
+    3,
   );
+}
+
+try {
+  await verifyHelperArtifact({ helperPath: HELPER_PATH, manifestPath: MANIFEST_PATH });
+} catch (err) {
+  await fs.rm(HELPER_PATH, { force: true }).catch(() => {});
+  await fs.rm(MANIFEST_PATH, { force: true }).catch(() => {});
+  die(`self-check failed: verifyHelperArtifact rejected the just-produced pair: ${err.message}`, 3);
 }
 
 console.log('build-os-helper: OK');
