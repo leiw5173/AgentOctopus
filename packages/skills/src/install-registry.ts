@@ -90,3 +90,21 @@ export function removeInstallationId(dirPath: string): void {
     // best-effort
   }
 }
+
+/**
+ * Read the current installation id without creating one. Returns undefined
+ * when no identity exists. Used by install paths to capture the prior id
+ * BEFORE a force-reinstall wipes the directory, so it can be restored after.
+ */
+export function peekInstallationId(dirPath: string): string | undefined {
+  return readIdentity(dirPath)?.installationId;
+}
+
+/**
+ * Persist a SPECIFIC installation id (rather than generating a new one).
+ * Used to carry identity across a force-reinstall that replaces the skill
+ * directory contents but must keep the same grant key half.
+ */
+export function restoreInstallationId(dirPath: string, id: string): void {
+  writeIdentityAtomic(dirPath, { installationId: id });
+}
