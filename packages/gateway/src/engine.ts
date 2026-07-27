@@ -1,7 +1,7 @@
 import path from 'path';
 import os from 'os';
 import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, type ChatClient, type LLMConfig, getConfig, loadConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, createDefaultSandboxRunner, buildSecretProviderFromConfig, type ChatClient, type LLMConfig, getConfig, loadConfig } from '@agentoctopus/core';
 
 export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
 
@@ -66,7 +66,12 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   await router.buildIndex(registry.getAll());
 
   const chatClient = createChatClient(rerankConfig);
-  const executor = new Executor(registry, chatClient, router);
+  // Build the host-side secret provider from trusted config and converge the
+  // Executor's execution boundary on a runner that provisions credentials ONLY
+  // to the trusted egress proxy — never into a prompt, env spec, log, or error.
+  const secretProvider = buildSecretProviderFromConfig(config);
+  const sandboxRunner = createDefaultSandboxRunner(secretProvider);
+  const executor = new Executor(registry, chatClient, router, sandboxRunner);
 
   _engine = { registry, router, executor, chatClient };
   return _engine;

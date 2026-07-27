@@ -12,7 +12,7 @@
  */
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DockerBackend, OsSandboxBackend, type SandboxBackend } from '@agentoctopus/sandbox';
+import { DockerBackend, OsSandboxBackend, type SandboxBackend, type SecretProvider } from '@agentoctopus/sandbox';
 import { getConfig, getConfigDir } from './config-resolver.js';
 import { SandboxRunner } from './sandbox-runner.js';
 
@@ -25,8 +25,14 @@ export function defaultSnapshotStoreDir(): string {
  * Build the default SandboxRunner from the resolved octopus.json config.
  * Backends are constructed fresh (a new sessionId per runner) so each runner
  * owns its topology; `probe()`/`selectBackend` decide which is actually used.
+ *
+ * An optional `secretProvider` may be injected (built once at the composition
+ * root via buildSecretProviderFromConfig). When omitted, the runner defaults to
+ * an EMPTY provider — no secrets are provisioned. This keeps the no-arg form
+ * working for call sites that cannot reach the LLM-guided credential paths
+ * (web singleton, multi-agent instances).
  */
-export function createDefaultSandboxRunner(): SandboxRunner {
+export function createDefaultSandboxRunner(secretProvider?: SecretProvider): SandboxRunner {
   const config = getConfig().sandbox;
   const sessionId = randomUUID().slice(0, 8);
   const backends: SandboxBackend[] = [
@@ -37,5 +43,6 @@ export function createDefaultSandboxRunner(): SandboxRunner {
     config,
     snapshotStoreDir: defaultSnapshotStoreDir(),
     backends,
+    ...(secretProvider ? { secretProvider } : {}),
   });
 }

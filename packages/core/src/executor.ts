@@ -395,24 +395,20 @@ If you're not confident about the URL, say "Visit the provider's website" instea
       return skill.dirPath; // redirect to actual install location
     });
 
-    // Build credential context for the LLM so it can include auth in commands
+    // Credential hygiene: the prompt may carry credential KEY NAMES plus a
+    // value-free configured/not-configured boolean — NEVER a value, NEVER an
+    // `= <anything>` interpolation. Values reach ONLY the trusted egress proxy
+    // via SandboxRunner.provisionSecrets. Presence is read from the same
+    // effective view the guard uses (process.env + octopus.json overrides).
     const subRequiredEnvVars = getRequiredEnvVars(skill.manifest);
-    const subCredLines: string[] = [];
-    if (subRequiredEnvVars.length > 0) {
-      for (const v of subRequiredEnvVars) {
-        const val = process.env[v.key];
-        if (val) {
-          subCredLines.push(`  ${v.key} = ${val} (already set)`);
-        } else {
-          subCredLines.push(`  ${v.key} = NOT SET${v.label ? ` (${v.label})` : ''}`);
-        }
-      }
-    }
-    const subCredContext = subCredLines.length > 0
-      ? `\n\nAvailable credentials:\n${subCredLines.join('\n')}`
+    const subEffectiveEnv = this.effectiveCredentialEnv(skill);
+    const subCredHints = subRequiredEnvVars.length > 0
+      ? `\n\nCredentials (key names only — values are injected by the runtime, never shown here):\n${subRequiredEnvVars
+          .map(v => `  ${v.key} (${subEffectiveEnv[v.key] ? 'configured' : 'not configured'})`)
+          .join('\n')}`
       : '';
 
-    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${rewrittenInstructions}\n\nUser query: "${query}"${subCredContext}\n\nWhat command should I run?`;
+    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nInstructions:\n${rewrittenInstructions}\n\nUser query: "${query}"${subCredHints}\n\nWhat command should I run?`;
 
     const command = await this.chatClient.chat(SKILL_EXECUTION_SYSTEM_PROMPT, userMessage);
     let trimmedCommand = command.trim();
@@ -536,31 +532,18 @@ If you're not confident about the URL, say "Visit the provider's website" instea
       return skill.dirPath;
     });
 
-    // Build credential context for the LLM so it can include auth headers/tokens
+    // Credential hygiene: same rule as the subprocess path — KEY NAMES plus a
+    // configured/not-configured boolean only, NEVER a value, no broad env scan.
+    // The egress proxy injects the actual credential at request time.
     const requiredEnvVars = getRequiredEnvVars(skill.manifest);
-    const credLines: string[] = [];
-    if (requiredEnvVars.length > 0) {
-      for (const v of requiredEnvVars) {
-        const val = process.env[v.key];
-        if (val) {
-          credLines.push(`  ${v.key} = ${val} (already set)`);
-        } else {
-          credLines.push(`  ${v.key} = NOT SET${v.label ? ` (${v.label})` : ''}`);
-        }
-      }
-    }
-    // Also scan for common API key env vars that are set in the environment
-    const commonKeyPattern = /^[A-Z][A-Z0-9_]*_(API_KEY|KEY|TOKEN|SECRET|APIKEY)$/;
-    for (const [key, val] of Object.entries(process.env)) {
-      if (val && commonKeyPattern.test(key) && !requiredEnvVars.some(v => v.key === key)) {
-        credLines.push(`  ${key} = ${val} (available in env)`);
-      }
-    }
-    const credContext = credLines.length > 0
-      ? `\n\nAvailable credentials:\n${credLines.join('\n')}\nUse these credentials in the API call (e.g. as Authorization: Bearer <token> header, or as query parameter).`
+    const httpEffectiveEnv = this.effectiveCredentialEnv(skill);
+    const credHints = requiredEnvVars.length > 0
+      ? `\n\nCredentials (key names only — values are injected by the runtime, never shown here):\n${requiredEnvVars
+          .map(v => `  ${v.key} (${httpEffectiveEnv[v.key] ? 'configured' : 'not configured'})`)
+          .join('\n')}\nReference the credential by its env var name (e.g. $${requiredEnvVars[0]!.key}) in the command — do NOT hardcode any value.`
       : '';
 
-    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nAPI Instructions:\n${rewrittenInstructions}\n\nUser query: "${query}"${credContext}\n\nWhat curl command should I run?`;
+    const userMessage = `Skill: ${skill.manifest.name}\nDescription: ${skill.manifest.description}\n\nAPI Instructions:\n${rewrittenInstructions}\n\nUser query: "${query}"${credHints}\n\nWhat curl command should I run?`;
 
     const command = await this.chatClient.chat(HTTP_EXECUTION_SYSTEM_PROMPT, userMessage);
     const trimmedCommand = command.trim();
@@ -701,12 +684,16 @@ If you're not confident about the URL, say "Visit the provider's website" instea
     const lines: string[] = [];
     lines.push(`⚠ Skill "${skill.manifest.name}" requires authentication.`);
 
+    // Read credential PRESENCE from the same effective view the pre-flight
+    // guard uses (process.env + octopus.json overrides) — never the VALUE.
+    const effectiveEnv = this.effectiveCredentialEnv(skill);
+
     // 1. Check manifest credentials (env vars)
     const required = getRequiredEnvVars(skill.manifest);
     if (required.length > 0) {
       for (const v of required) {
         const label = v.label ? ` — ${v.label}` : '';
-        const isSet = !!process.env[v.key];
+        const isSet = !!effectiveEnv[v.key];
         if (isSet) {
           lines.push(`  ✓ ${v.key} is set${label}`);
         } else {
@@ -724,7 +711,7 @@ If you're not confident about the URL, say "Visit the provider's website" instea
       }
       if (foundVars.size > 0) {
         for (const v of foundVars) {
-          const isSet = !!process.env[v];
+          const isSet = !!effectiveEnv[v];
           if (isSet) {
             lines.push(`  ✓ ${v} is set`);
           } else {

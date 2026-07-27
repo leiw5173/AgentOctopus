@@ -8,7 +8,7 @@ import fs from 'fs';
 import readline from 'readline';
 
 import { SkillRegistry, getRequiredEnvVars } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, createDefaultSandboxRunner, buildSecretProviderFromConfig, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, fetchSkillMeta } from './clawhub.js';
 import { removeInstallationId } from '@agentoctopus/skills';
@@ -191,7 +191,11 @@ async function bootstrap() {
 
   const router = new Router(chatConfig, embedConfig);
   const chatClient = createChatClient(chatConfig);
-  const executor = new Executor(registry, chatClient);
+  // Converge execution on a runner that provisions credentials ONLY to the
+  // trusted egress proxy (built from trusted config), never into a prompt/env.
+  const secretProvider = buildSecretProviderFromConfig(config);
+  const sandboxRunner = createDefaultSandboxRunner(secretProvider);
+  const executor = new Executor(registry, chatClient, undefined, sandboxRunner);
 
   return { registry, router, executor };
 }
