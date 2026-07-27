@@ -9,7 +9,6 @@ export {
   SANDBOX_ERROR,
   type SandboxErrorCode,
   type SandboxRunnerDeps,
-  type SandboxRunnerHooks,
   type SandboxInvocation,
   type SandboxCommandInput,
   type SandboxRunInput,

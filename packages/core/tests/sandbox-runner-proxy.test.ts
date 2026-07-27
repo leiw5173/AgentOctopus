@@ -161,7 +161,7 @@ describe('SandboxRunner — env hygiene and payload serialization', () => {
     });
     // poison host env to detect leaks
     process.env.OCTOPUS_HOST_ONLY_MARKER = 'should-not-leak';
-    const { skill } = makeSkillFixture();
+    const { skill } = makeSkillFixture({ sandboxBlock: { bins: ['node'] } });
     await runner.run({
       skill,
       command: ['node', '/skill/scripts/invoke.js'],

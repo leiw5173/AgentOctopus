@@ -43,30 +43,14 @@ describe('SandboxRunner — snapshot integrity', () => {
       secretProvider: new RecordingSecretProvider(),
       installationIdFor: () => 'inst-1',
       onEvent: record,
+      afterBuildSnapshot: ({ snapshotRoot }) => {
+        // mutate the snapshot in place — write a new file
+        fs.writeFileSync(path.join(snapshotRoot, 'tampered.txt'), 'x');
+      },
     });
     const { skill } = makeSkillFixture();
 
-    // We trigger a run but tamper with the snapshot AFTER the runner's first
-    // buildSnapshot call. The cleanest way is to use a hook in the runner that
-    // lets the test mutate the snapshot post-build, but the brief asks us to
-    // keep the runner closed. Instead, build the snapshot first via the
-    // runner, mutate it on disk, then re-run: the digest pinned in identity
-    // will no longer match what's on disk because the store is content-
-    // addressed by digest. That does NOT trigger verifySnapshot (the snapshot
-    // root doesn't change).
-    //
-    // The real mutation path: hook the snapshot builder / verifier via a
-    // snapshot-verifier DI seam. SandboxRunner accepts an optional verifier
-    // we can wrap with a faking-mutation.
-    const result = await runner.run(
-      { skill, command: ['node', '/skill/scripts/invoke.js'] },
-      {
-        afterBuildSnapshot: ({ snapshotRoot }) => {
-          // mutate the snapshot in place — write a new file
-          fs.writeFileSync(path.join(snapshotRoot, 'tampered.txt'), 'x');
-        },
-      },
-    );
+    const result = await runner.run({ skill, command: ['node', '/skill/scripts/invoke.js'] });
     expect(result.success).toBe(false);
     expect(result.error).toContain('SNAPSHOT_MISMATCH');
     // No backend.prepare / backend.run fired

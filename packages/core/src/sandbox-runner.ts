@@ -22,7 +22,10 @@
  *   → deterministic reverse cleanup
  *
  * Cleanup is reverse and idempotent:
- *   process.close() → backend.cleanup() → proxyHandle.close()
+ *   spawn() path: process.close() → backend.cleanup() → proxyHandle.close()
+ *   run()   path: backend.cleanup() → proxyHandle.close()
+ *   (backend.run() owns its own spawn→write→exited→close lifecycle internally;
+ *    the one-shot path has no process handle.)
  *
  * Env hygiene:
  *   minimal allowlist (LANG, LC_ALL, TZ) + non-reserved caller keys + fixed
@@ -150,8 +153,8 @@ class SandboxRunnerError extends Error {
 export interface SandboxRunnerDeps {
   /** Trusted, already-parsed sandbox config. REQUIRED. */
   config: SandboxConfig;
-  /** Content-addressed snapshot store dir. */
-  snapshotStoreDir?: string;
+  /** Content-addressed snapshot store dir. REQUIRED — fail fast if absent. */
+  snapshotStoreDir: string;
   /** Pre-constructed backends; if omitted, the runner constructs none (fail-closed). */
   backends?: SandboxBackend[];
   /** Proxy launcher; defaults to DefaultProxyLauncher. */
@@ -169,6 +172,12 @@ export interface SandboxRunnerDeps {
    * can assert on sequencing without mocking internals.
    */
   onEvent?: (name: string, detail?: unknown) => void;
+  /**
+   * Test-only hook: called immediately after buildSnapshot returns, BEFORE
+   * verifySnapshot. Tests use this to mutate the snapshot and trigger
+   * SNAPSHOT_MISMATCH. NOT for production use.
+   */
+  afterBuildSnapshot?: (ctx: { snapshotRoot: string; identity: InstallationIdentity }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +304,9 @@ function resolveRuntimeProfile(
   const profiles = config.runtimeProfiles;
 
   if (requestedBins.length === 0) {
-    // Empty-bins skill: pick the first trusted profile as a sane default.
-    const firstKey = Object.keys(profiles)[0];
+    // Empty-bins skill: pick the lexicographically-first trusted profile as a
+    // deterministic sane default (independent of config-author key insertion order).
+    const firstKey = Object.keys(profiles).sort()[0];
     if (!firstKey) {
       throw new SandboxRunnerError(
         SANDBOX_ERROR.UNSUPPORTED_RUNTIME_REQUIREMENTS,
@@ -348,29 +358,37 @@ export class SandboxRunner {
   private readonly secretProvider: SecretProvider;
   private readonly installationIdFor: (dirPath: string) => string;
   private readonly onEvent: ((name: string, detail?: unknown) => void) | undefined;
+  private readonly afterBuildSnapshot:
+    | ((ctx: { snapshotRoot: string; identity: InstallationIdentity }) => void)
+    | undefined;
 
   constructor(opts: SandboxRunnerDeps) {
     // Parse trusted config with the canonical schema (Task 0 re-export).
     this.config = SandboxConfigSchema.parse(opts.config);
-    this.snapshotStoreDir = opts.snapshotStoreDir ?? path.join(process.cwd(), '.sandbox-store');
+    if (!opts.snapshotStoreDir) {
+      throw new Error(
+        'SandboxRunner: snapshotStoreDir is REQUIRED and must be an explicit trusted path',
+      );
+    }
+    this.snapshotStoreDir = opts.snapshotStoreDir;
     this.backends = opts.backends ?? [];
     this.proxyLauncher = opts.proxyLauncher ?? new DefaultProxyLauncher();
     this.secretProvider = opts.secretProvider ?? new MapSecretProvider(new Map());
     this.installationIdFor = opts.installationIdFor ?? lookupInstallationId;
     this.onEvent = opts.onEvent;
+    this.afterBuildSnapshot = opts.afterBuildSnapshot;
   }
 
   // -----------------------------------------------------------------------
   // Public API
   // -----------------------------------------------------------------------
 
-  async run(input: SandboxRunInput, hooks?: SandboxRunnerHooks): Promise<SandboxRunOutput> {
-    const session = await this.prepareSession(input.skill, hooks);
+  async run(input: SandboxRunInput): Promise<SandboxRunOutput> {
+    const session = await this.prepareSession(input.skill);
     if (!session.ok) {
       return session.output;
     }
     const { backend, proxyHandle } = session;
-    let process: SandboxProcess | undefined;
     try {
       const env = buildGuestEnv({
         callerEnv: input.invocation?.env,
@@ -390,20 +408,15 @@ export class SandboxRunner {
     } catch (err) {
       return this.toErrorOutput(err, backend);
     } finally {
-      if (process) await process.close().catch(() => {});
       await backend.cleanup().catch(() => {});
       await proxyHandle.close().catch(() => {});
     }
   }
 
-  async spawn(input: SandboxSpawnInput, hooks?: SandboxRunnerHooks): Promise<SandboxSession> {
-    const session = await this.prepareSession(input.skill, hooks);
+  async spawn(input: SandboxSpawnInput): Promise<SandboxSession> {
+    const session = await this.prepareSession(input.skill);
     if (!session.ok) {
-      throw new SandboxRunnerError(
-        (session.output.error?.match(/^([A-Z_]+):/)?.[1] as SandboxErrorCode) ??
-          SANDBOX_ERROR.NO_SATISFYING_BACKEND,
-        session.output.error ?? 'spawn failed',
-      );
+      throw new SandboxRunnerError(session.error.code, session.error.message);
     }
     const { backend, proxyHandle } = session;
     let process: SandboxProcess | undefined;
@@ -453,7 +466,6 @@ export class SandboxRunner {
 
   private async prepareSession(
     skill: LoadedSkill,
-    hooks?: SandboxRunnerHooks,
   ): Promise<PrepareSessionResult> {
     let backend: SandboxBackend | undefined;
     let proxyHandle: { close(): Promise<void> } | undefined;
@@ -477,7 +489,7 @@ export class SandboxRunner {
         installationId,
         name: skill.manifest.name,
       });
-      hooks?.afterBuildSnapshot?.({ snapshotRoot, identity });
+      this.afterBuildSnapshot?.({ snapshotRoot, identity });
 
       // 3. descriptor
       const descriptor = toSandboxDescriptor(skill, {
@@ -549,11 +561,17 @@ export class SandboxRunner {
         return {
           ok: false,
           output: this.toErrorOutput(err, backend),
+          error: err,
         };
       }
+      const runnerErr = new SandboxRunnerError(
+        SANDBOX_ERROR.NO_SATISFYING_BACKEND,
+        err instanceof Error ? err.message : String(err),
+      );
       return {
         ok: false,
-        output: this.toErrorOutput(err, backend),
+        output: this.toErrorOutput(runnerErr, backend),
+        error: runnerErr,
       };
     }
   }
@@ -583,18 +601,6 @@ export class SandboxRunner {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Test hooks (not for production use)
-// ---------------------------------------------------------------------------
-
-export interface SandboxRunnerHooks {
-  /**
-   * Called immediately after buildSnapshot returns, BEFORE verifySnapshot.
-   * Tests use this to mutate the snapshot and trigger SNAPSHOT_MISMATCH.
-   */
-  afterBuildSnapshot?(ctx: { snapshotRoot: string; identity: InstallationIdentity }): void;
-}
-
 // -----------------------------------------------------------------------
 // Internal result type for prepareSession
 // -----------------------------------------------------------------------
@@ -606,4 +612,4 @@ type PrepareSessionResult =
       proxyHandle: { close(): Promise<void> };
       runtimeProfile: ResolvedRuntimeProfile;
     }
-  | { ok: false; output: SandboxRunOutput };
+  | { ok: false; output: SandboxRunOutput; error: SandboxRunnerError };

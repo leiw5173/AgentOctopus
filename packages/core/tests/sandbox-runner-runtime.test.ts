@@ -52,11 +52,18 @@ describe('SandboxRunner — runtime profiles', () => {
     expect(backend.prepareOptions?.runtimeProfile.dockerImage).toMatch(/^node@sha256:/);
   });
 
-  it('uses a sane default trusted profile when the skill requests no bins', async () => {
+  it('uses a deterministic default trusted profile when the skill requests no bins', async () => {
     const { record } = makeEventLog();
     const backend = new RecordingBackend('docker', 'full', record);
+    // Use a config where the keys are NOT in the same order as makeTrustedConfig
+    // so the test is not accidentally coupled to insertion order.
+    const reorderedConfig = makeTrustedConfig();
+    reorderedConfig.runtimeProfiles = {
+      zebra: reorderedConfig.runtimeProfiles.bare!,
+      alpha: reorderedConfig.runtimeProfiles.node!,
+    };
     const runner = new SandboxRunner({
-      config,
+      config: reorderedConfig,
       snapshotStoreDir: storeDir,
       backends: [backend],
       proxyLauncher: new RecordingProxyLauncher(record),
@@ -67,9 +74,8 @@ describe('SandboxRunner — runtime profiles', () => {
     const { skill } = makeSkillFixture(); // no bins
     await runner.run({ skill, command: ['node', '/skill/scripts/invoke.js'] });
     // Empty-bins skills still need a profile object to satisfy the required field.
-    // The runner picks the first trusted profile (here: 'node', the only one
-    // whose image/bin/paths are sensible defaults).
-    expect(backend.prepareOptions?.runtimeProfile.id).toBe('node');
+    // The runner picks the lexicographically-first trusted profile key.
+    expect(backend.prepareOptions?.runtimeProfile.id).toBe('alpha');
   });
 
   it('returns UNSUPPORTED_RUNTIME_REQUIREMENTS when NO single trusted profile covers all requested bins', async () => {

@@ -378,4 +378,19 @@ describe('SandboxRunner — orchestration order and fail-closed defaults', () =>
     expect(result.error).toMatch(/reserved/i);
     expect(backend.lastRunSpec).toBeUndefined();
   });
+
+  it('constructor throws when snapshotStoreDir is absent', () => {
+    const { record } = makeEventLog();
+    expect(
+      () =>
+        new SandboxRunner({
+          config,
+          snapshotStoreDir: undefined as unknown as string,
+          backends: [new RecordingBackend('docker', 'full', record)],
+          proxyLauncher: new RecordingProxyLauncher(record),
+          secretProvider: new RecordingSecretProvider(),
+          installationIdFor: () => 'inst-1',
+        }),
+    ).toThrow(/snapshotStoreDir is REQUIRED/);
+  });
 });
