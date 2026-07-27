@@ -408,6 +408,21 @@ export class OsSandboxBackend implements SandboxBackend {
         { policy: opts, secrets: {}, workDir: this.workDir },
         this.carrier,
       );
+      // M3: bind the freshly launched handle to the carrier BEFORE
+      // authorizing nft. The handle's reachableAddr must equal
+      // `http://{carrier.reachableHost}:{carrier.listenPort}` — otherwise
+      // the launcher handed us a proxy listening somewhere other than the
+      // veth peer, and the nft allow rule we are about to install would
+      // authorize the WRONG endpoint. Fail closed.
+      const expectedAddr = `http://${this.carrier.reachableHost}:${this.carrier.listenPort}`;
+      if (this.proxyHandle.reachableAddr !== expectedAddr) {
+        const bad = this.proxyHandle;
+        this.proxyHandle = undefined;
+        await bad.close().catch(() => {});
+        throw new Error(
+          `OsSandboxBackend.prepare: launched proxy reachableAddr '${bad.reachableAddr}' does not match carrier '${expectedAddr}' — refusing to authorize nft`,
+        );
+      }
     }
 
     // Step 4: parse opts.proxyAddr; require host === carrier.reachableHost
@@ -541,20 +556,36 @@ export class OsSandboxBackend implements SandboxBackend {
 
     let killed = false;
     let closed = false;
-    let killCalls = 0;
+    // Containment bookkeeping (C1/I2): tracks whether any containment kill
+    // has been attempted, whether the most recent kill succeeded, and the
+    // in-flight kill promise so `settle()` can await drain before resolving.
+    // The cgroup kill is the security boundary; a failed kill must NEVER
+    // settle with `isolationLevel: 'full'`.
+    let containmentKillAttempted = false;
+    let containmentKillSucceeded = false;
+    let containmentKillError: string | undefined;
+    let inFlightKill: Promise<void> | undefined;
 
     const doCgroupKill = async (): Promise<void> => {
-      killCalls += 1;
+      if (inFlightKill) return inFlightKill;
       if (killed) return;
       killed = true;
-      try {
-        await cgroupRef.kill();
-      } catch {
-        // Backend failure to write cgroup.kill: still waitEmpty best-effort;
-        // we never report meta.isolationLevel='full' after a containment
-        // failure (see meta below).
-      }
-      try { await cgroupRef.waitEmpty(2000); } catch { /* best-effort */ }
+      containmentKillAttempted = true;
+      inFlightKill = (async (): Promise<void> => {
+        try {
+          await cgroupRef.kill();
+          containmentKillSucceeded = true;
+        } catch (err) {
+          // Backend failure to write cgroup.kill (cgroup.ts documents this
+          // as "surface this and never report full"). Record it so settle()
+          // emits a degraded, non-full meta. Still waitEmpty best-effort —
+          // if the kernel-side cgroup.kill happens to land despite the
+          // write error, we don't want to leak processes.
+          containmentKillError = (err as Error).message;
+        }
+        try { await cgroupRef.waitEmpty(2000); } catch { /* best-effort */ }
+      })();
+      return inFlightKill;
     };
 
     const exited = new Promise<BackendRunResult>((resolve) => {
@@ -570,18 +601,43 @@ export class OsSandboxBackend implements SandboxBackend {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        const so = Buffer.concat(outChunks).toString('utf8');
-        const se = Buffer.concat(errChunks).toString('utf8');
-        const stderrFinal = outputOverflow
-          ? `${se}\noutput cap exceeded (outputMaxBytes=${outputMaxBytes})`
-          : se;
-        resolve({
-          exitCode,
-          stdout: so,
-          stderr: stderrFinal,
-          timedOut,
-          meta: { isolationLevel: 'full', backend: 'os', degraded: false, degradationReasons: [] },
-        });
+        // I2: if a containment kill is in flight, do NOT resolve until it
+        // has drained. The "contained" claim must only be asserted after
+        // the operation completes.
+        const finish = (): void => {
+          const so = Buffer.concat(outChunks).toString('utf8');
+          const se = Buffer.concat(errChunks).toString('utf8');
+          const stderrFinal = outputOverflow
+            ? `${se}\noutput cap exceeded (outputMaxBytes=${outputMaxBytes})`
+            : se;
+          // C1: a containment event occurred AND the kill did not succeed —
+          // never claim full. `isolationLevel: 'none'` records that the
+          // child may still be unconfined; `degraded: true` plus a reason
+          // surfaces the backend failure to the caller.
+          const containmentEvent = timedOut || outputOverflow;
+          const killFailed = containmentEvent && containmentKillAttempted && !containmentKillSucceeded;
+          const meta = killFailed
+            ? {
+                isolationLevel: 'none' as const,
+                backend: 'os' as const,
+                degraded: true,
+                degradationReasons: [
+                  `cgroup containment kill failed: ${containmentKillError ?? 'unknown'}`,
+                ],
+              }
+            : {
+                isolationLevel: 'full' as const,
+                backend: 'os' as const,
+                degraded: false,
+                degradationReasons: [] as string[],
+              };
+          resolve({ exitCode, stdout: so, stderr: stderrFinal, timedOut, meta });
+        };
+        if (inFlightKill) {
+          void inFlightKill.then(finish, finish);
+        } else {
+          finish();
+        }
       };
 
       const onData = (which: 'out' | 'err') => (chunk: Buffer) => {
@@ -656,6 +712,13 @@ export class OsSandboxBackend implements SandboxBackend {
           await this.cgroup.waitEmpty(2000);
         } catch {
           // Unexpected remaining processes: kill them and fail the run.
+          // I1 note: this kill is a kernel-idempotent follow-up AFTER the
+          // per-spawn containment kill (which is structurally once-per-spawn
+          // via the inFlightKill guard). It runs only when processes are
+          // still present after the child closed — i.e. the per-spawn kill
+          // either never fired (no containment event) or the kernel state
+          // changed. A second cgroup.kill on an already-killed cgroup is a
+          // no-op at the kernel level, so this is safe.
           await this.cgroup.kill().catch(() => {});
           await this.cgroup.waitEmpty(2000).catch(() => {});
           throw new Error('OsSandboxBackend.run: cgroup not empty after child close');
@@ -685,6 +748,12 @@ export class OsSandboxBackend implements SandboxBackend {
     };
 
     // 1. Active helper: cgroup kill/waitEmpty.
+    // I1 note: cleanup-time kills here and below are kernel-idempotent
+    // follow-ups AFTER the per-spawn containment kill (which is structurally
+    // once-per-spawn via the inFlightKill guard inside spawn()). cleanup()
+    // can run after a completed spawn that already killed the cgroup; a
+    // second cgroup.kill on an already-killed cgroup is a no-op at the
+    // kernel level, so this is safe.
     if (this.activeChild) {
       const { child, launchSpecPath } = this.activeChild;
       this.activeChild = undefined;
@@ -696,7 +765,8 @@ export class OsSandboxBackend implements SandboxBackend {
       await tryStep(() => cleanupLaunchSpec(launchSpecPath));
     }
 
-    // 2. Cgroup kill/wait-empty/remove.
+    // 2. Cgroup kill/wait-empty/remove. Same kernel-idempotence note as (1):
+    // this is cleanup of the session cgroup, not a containment event.
     if (this.cgroup) {
       const cg = this.cgroup;
       this.cgroup = undefined;

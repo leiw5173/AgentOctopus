@@ -736,3 +736,141 @@ describe('OsSandboxBackend.cleanup', () => {
     await b.cleanup();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review-fix regression tests (C1, I2, M3)
+// ---------------------------------------------------------------------------
+
+describe('OsSandboxBackend review-fix regressions', () => {
+  it('C1: cgroup.kill() rejection on timeout yields NOT-full, degraded meta', async () => {
+    const deps = makeDeps();
+    const cgroup = fakeCgroup();
+    (cgroup.kill as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('EIO on cgroup.kill'));
+    deps.createLimitedCgroup.mockResolvedValue(cgroup);
+    // Child closes quickly after timeout fires so settle() runs.
+    const fakeChild = makeFakeChild({ pid: 9100, closeDelayMs: 60 });
+    deps.spawnHelper.mockReturnValue(fakeChild);
+
+    const b = new OsSandboxBackend({ sessionId: 'c1-timeout', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    const proxy = fakeProxyHandle(carrier);
+    await b.prepare(validPrepareOpts(carrier, proxy));
+
+    const result = await b.run({ command: ['/usr/bin/node'], timeoutMs: 30 });
+    expect(result.timedOut).toBe(true);
+    expect(result.meta.isolationLevel).not.toBe('full');
+    expect(result.meta.degraded).toBe(true);
+    expect(result.meta.degradationReasons.length).toBeGreaterThan(0);
+    expect(result.meta.degradationReasons[0]).toMatch(/cgroup containment kill failed/);
+    expect(result.meta.degradationReasons[0]).toMatch(/EIO on cgroup\.kill/);
+  });
+
+  it('C1: cgroup.kill() rejection on output-overflow yields NOT-full, degraded meta', async () => {
+    const deps = makeDeps();
+    const cgroup = fakeCgroup();
+    (cgroup.kill as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('write refused'));
+    deps.createLimitedCgroup.mockResolvedValue(cgroup);
+    const fakeChild = makeFakeChild({ pid: 9101, closeDelayMs: 50 });
+    deps.spawnHelper.mockReturnValue(fakeChild);
+
+    const b = new OsSandboxBackend({ sessionId: 'c1-ovf', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    const proxy = fakeProxyHandle(carrier);
+    await b.prepare(validPrepareOpts(carrier, proxy));
+
+    const proc = await b.spawn({
+      command: ['/usr/bin/node'],
+      outputMaxBytes: 32,
+      timeoutMs: 5000,
+    });
+    fakeChild.emitStdout(Buffer.alloc(64, 0x61));
+    const result = await proc.exited;
+    expect(result.meta.isolationLevel).not.toBe('full');
+    expect(result.meta.degraded).toBe(true);
+    expect(result.meta.degradationReasons[0]).toMatch(/cgroup containment kill failed/);
+  });
+
+  it('C1 (positive): successful cgroup.kill on timeout still reports full, not degraded', async () => {
+    const deps = makeDeps();
+    const cgroup = fakeCgroup();
+    deps.createLimitedCgroup.mockResolvedValue(cgroup);
+    const fakeChild = makeFakeChild({ pid: 9102, closeDelayMs: 60 });
+    deps.spawnHelper.mockReturnValue(fakeChild);
+
+    const b = new OsSandboxBackend({ sessionId: 'c1-ok', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    const proxy = fakeProxyHandle(carrier);
+    await b.prepare(validPrepareOpts(carrier, proxy));
+
+    const result = await b.run({ command: ['/usr/bin/node'], timeoutMs: 30 });
+    expect(result.timedOut).toBe(true);
+    expect(result.meta.isolationLevel).toBe('full');
+    expect(result.meta.degraded).toBe(false);
+    expect(result.meta.degradationReasons).toEqual([]);
+  });
+
+  it('I2: exited does not settle until in-flight containment kill+waitEmpty drains', async () => {
+    const deps = makeDeps();
+    const cgroup = fakeCgroup();
+    const order: string[] = [];
+    // Slow kill: take 80ms; record start/finish in the order log.
+    (cgroup.kill as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('kill:start');
+      await new Promise((r) => setTimeout(r, 80));
+      order.push('kill:end');
+    });
+    (cgroup.waitEmpty as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      order.push('waitEmpty:start');
+      await new Promise((r) => setTimeout(r, 5));
+      order.push('waitEmpty:end');
+    });
+    deps.createLimitedCgroup.mockResolvedValue(cgroup);
+    // Child closes at 50ms — after the 20ms timeout fires but BEFORE the
+    // 80ms kill finishes. If settle() resolved on close, exited would
+    // resolve before kill:end; the fix makes settle await the in-flight kill.
+    const fakeChild = makeFakeChild({ pid: 9200, closeDelayMs: 50 });
+    deps.spawnHelper.mockReturnValue(fakeChild);
+
+    const b = new OsSandboxBackend({ sessionId: 'i2-drain', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    const proxy = fakeProxyHandle(carrier);
+    await b.prepare(validPrepareOpts(carrier, proxy));
+
+    const exitedPromise = b.run({ command: ['/usr/bin/node'], timeoutMs: 20 });
+    // Track when exited actually resolves.
+    void exitedPromise.then(() => { order.push('exited:resolved'); });
+    const result = await exitedPromise;
+    expect(result.timedOut).toBe(true);
+    // The drain must complete BEFORE exited resolves, even though the child
+    // closed early.
+    const exitIdx = order.indexOf('exited:resolved');
+    const killEndIdx = order.indexOf('kill:end');
+    const waitEndIdx = order.indexOf('waitEmpty:end');
+    expect(killEndIdx).toBeGreaterThanOrEqual(0);
+    expect(waitEndIdx).toBeGreaterThanOrEqual(0);
+    expect(exitIdx).toBeGreaterThan(killEndIdx);
+    expect(exitIdx).toBeGreaterThan(waitEndIdx);
+  });
+
+  it('M3: lazy-launched proxy handle reachableAddr mismatch is fatal and closes the handle', async () => {
+    const deps = makeDeps();
+    const b = new OsSandboxBackend({ sessionId: 'm3-mismatch', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    // Build a handle whose reachableAddr does NOT match the carrier.
+    const badHandle: ProxyHandle = {
+      reachableAddr: 'http://169.254.99.99:1',
+      caBundlePath: '/tmp/ca.pem',
+      close: vi.fn(async () => {}),
+    };
+    (deps.proxyLauncher.launch as ReturnType<typeof vi.fn>).mockResolvedValue(badHandle);
+    const opts = validPrepareOpts(carrier, fakeProxyHandle(carrier));
+    await expect(b.prepare(opts)).rejects.toThrow(/reachableAddr|refusing to authorize/);
+    // The bad handle was closed before the throw.
+    expect(badHandle.close).toHaveBeenCalled();
+  });
+});
