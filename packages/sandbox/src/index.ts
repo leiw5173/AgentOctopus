@@ -5,3 +5,6 @@ export * from './policy.js';
 export * from './snapshot.js';
 export * from './secrets.js';
 export * from './backend.js';
+export * from './docker/cli.js';
+export * from './docker/network.js';
+export * from './docker/docker-backend.js';
