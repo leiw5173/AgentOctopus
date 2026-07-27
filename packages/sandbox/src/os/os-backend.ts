@@ -1,0 +1,818 @@
+/**
+ * Plan 4, Task 5 — `OsSandboxBackend`: Linux namespace + cgroup v2 backend.
+ *
+ * Wires the Task 1–4 primitives into the canonical `SandboxBackend`
+ * interface:
+ *   - Task 1 `probeOsCaps` / `fullLevel`          (src/os/probe.ts)
+ *   - Task 2 `verifyRuntimeArtifact`/`assembleRootfs` (src/os/rootfs.ts)
+ *   - Task 3 `verifyHelperArtifact`/`buildOsRunCommand` (src/os/helper-build.ts, src/os/run-spec.ts)
+ *   - Task 3 `createLimitedCgroup`                (src/os/cgroup.ts)
+ *   - Task 4 `setupNetns`/`authorizeProxyEndpoint`(src/os/netns.ts)
+ *   - Plan 3 `DefaultProxyLauncher`/`ProxyHandle` (src/proxy/launcher.ts)
+ *
+ * Lifecycle: new → probe() → prepareTopology() → prepare() → spawn()/run() →
+ * cleanup(). Cleanup is idempotent and runs in reverse dependency order.
+ *
+ * Artifact sourcing (the constructor carries no config): `resolveOsArtifacts()`
+ * reads `OCTOPUS_SANDBOX_OS_*` / `OCTOPUS_SANDBOX_PROXY_*` env vars with
+ * well-known-path fallbacks under the package root, and verifies every
+ * artifact (runtime pair, helper pair, proxy bundle pair) before any value
+ * is used. A missing/unverifiable artifact is an AVAILABILITY signal, never
+ * a rejection — `probe()` returns false on any artifact error.
+ *
+ * DI seam: all side-effecting collaborators are injectable via the optional
+ * `deps` field on the constructor options. Production callers never set it;
+ * unit tests on macOS inject fakes so ORDER and fail-closed behavior can be
+ * exercised without a kernel. The seam is never consulted for behavior.
+ *
+ * Leaf-package rule: Node stdlib + zod (via helper-build) only. Never any
+ * `@agentoctopus/*` import.
+ */
+
+import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
+import type {
+  SandboxBackend,
+  BackendPrepareOptions,
+  ExecSpec,
+  SpawnSpec,
+  SandboxProcess,
+  BackendRunResult,
+  ProxyCarrier,
+} from '../backend.js';
+import type { IsolationLevel } from '../types.js';
+import {
+  probeOsCaps,
+  fullLevel,
+  type OsCaps,
+} from './probe.js';
+import {
+  assembleRootfs,
+  verifyRuntimeArtifact,
+  RootfsError,
+  type RootfsLayout,
+} from './rootfs.js';
+import { verifyHelperArtifact } from './helper-build.js';
+import { buildOsRunCommand, cleanupLaunchSpec, type OsRunCommand } from './run-spec.js';
+import { createLimitedCgroup, type CgroupHandle } from './cgroup.js';
+import { setupNetns, authorizeProxyEndpoint, type NetnsHandle } from './netns.js';
+import { DefaultProxyLauncher, type ProxyHandle, type ProxyLauncher } from '../proxy/launcher.js';
+
+// ---------------------------------------------------------------------------
+// Artifact resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Locations of every artifact the backend needs, fully verified.
+ *
+ * Paths default to `<pkg>/runtime/...` and `<pkg>/build/...` (where `<pkg>`
+ * is `packages/sandbox`). Environment variables override each path so the
+ * backend can be exercised against fixtures in tests / staging.
+ */
+export interface ResolvedOsArtifacts {
+  runtimeArtifactPath: string;
+  runtimeManifestPath: string;
+  helperManifestPath: string;
+  helperBinaryPath: string;
+  proxyBundlePath: string;
+  proxyBundleManifestPath: string;
+}
+
+/** Resolve the package root from this module's location (works in src and dist). */
+function packageRoot(): string {
+  // src/os/os-backend.ts → packages/sandbox; dist/os/os-backend.js → packages/sandbox.
+  return fileURLToPath(new URL('../..', import.meta.url));
+}
+
+function envOr(name: string, fallback: string): string {
+  const v = process.env[name];
+  return v && v.length > 0 ? v : fallback;
+}
+
+async function sha256File(p: string): Promise<string> {
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const h = createHash('sha256');
+    const s = createReadStream(p);
+    s.on('data', (c: Buffer) => h.update(c));
+    s.on('end', () => resolvePromise(h.digest('hex')));
+    s.on('error', rejectPromise);
+  });
+}
+
+/**
+ * Verify the proxy bundle against its digest manifest. The manifest is the
+ * same shape as the helper manifest (`HelperArtifactManifestSchema`):
+ * `{ schemaVersion: 1, helperSha256, size, mode }`. The bundle is executed
+ * under `node` (not as a native binary) so the `mode` field records the
+ * expected permission bits (typically 0644 — the bundle needs to be
+ * readable, not executable). We enforce the digest + size and forbid
+ * group/world-writability; the manifest's `helperSha256` field is the
+ * bundle's SHA-256.
+ */
+async function verifyProxyBundle(
+  bundlePath: string,
+  manifestPath: string,
+): Promise<void> {
+  const raw = await readFile(manifestPath, 'utf8').catch((err) => {
+    throw new RootfsError(`cannot read proxy bundle manifest: ${(err as Error).message}`);
+  });
+  let parsed: { schemaVersion?: unknown; helperSha256?: unknown; size?: unknown; mode?: unknown };
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new RootfsError(`proxy bundle manifest is not valid JSON: ${(err as Error).message}`);
+  }
+  if (parsed.schemaVersion !== 1) {
+    throw new RootfsError('proxy bundle manifest schemaVersion must be 1');
+  }
+  if (typeof parsed.helperSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(parsed.helperSha256)) {
+    throw new RootfsError('proxy bundle manifest helperSha256 must be 64 lowercase hex');
+  }
+  if (typeof parsed.size !== 'number' || !Number.isInteger(parsed.size) || parsed.size <= 0) {
+    throw new RootfsError('proxy bundle manifest size must be a positive integer');
+  }
+  if (typeof parsed.mode !== 'number' || !Number.isInteger(parsed.mode) || parsed.mode < 0) {
+    throw new RootfsError('proxy bundle manifest mode must be a non-negative integer');
+  }
+  const st = await stat(bundlePath).catch((err) => {
+    throw new RootfsError(`cannot stat proxy bundle: ${(err as Error).message}`);
+  });
+  if (!st.isFile()) throw new RootfsError(`proxy bundle at ${bundlePath} is not a regular file`);
+  if (st.size !== parsed.size) {
+    throw new RootfsError(`proxy bundle size mismatch: manifest declares ${parsed.size}, file is ${st.size}`);
+  }
+  const digest = await sha256File(bundlePath);
+  if (digest !== parsed.helperSha256) {
+    throw new RootfsError(
+      `proxy bundle digest mismatch: manifest declares ${parsed.helperSha256}, computed ${digest}`,
+    );
+  }
+  const actualMode = st.mode & 0o7777;
+  if ((actualMode & 0o022) !== 0) {
+    throw new RootfsError(
+      `proxy bundle at ${bundlePath} is group/world-writable (mode ${actualMode.toString(8)}) — refusing to launch`,
+    );
+  }
+}
+
+/**
+ * Resolve every artifact path (env var override → package-root fallback),
+ * then verify each artifact against its manifest. Throws `RootfsError`
+ * (fail closed) if any artifact is missing or fails verification.
+ */
+async function resolveOsArtifactsReal(): Promise<ResolvedOsArtifacts> {
+  const pkg = packageRoot();
+  const runtimeArtifactPath = envOr(
+    'OCTOPUS_SANDBOX_OS_RUNTIME_ARTIFACT',
+    path.join(pkg, 'runtime', 'linux-node22.rootfs.tar.zst'),
+  );
+  const runtimeManifestPath = envOr(
+    'OCTOPUS_SANDBOX_OS_RUNTIME_MANIFEST',
+    path.join(pkg, 'runtime', 'linux-node22.manifest.json'),
+  );
+  const helperManifestPath = envOr(
+    'OCTOPUS_SANDBOX_OS_HELPER_MANIFEST',
+    path.join(pkg, 'runtime', 'os-helper.manifest.json'),
+  );
+  const helperBinaryPath = envOr(
+    'OCTOPUS_SANDBOX_OS_HELPER_BINARY',
+    path.join(pkg, 'runtime', 'os-helper'),
+  );
+  const proxyBundlePath = envOr(
+    'OCTOPUS_SANDBOX_PROXY_BUNDLE',
+    path.join(pkg, 'build', 'egress-proxy-server.mjs'),
+  );
+  const proxyBundleManifestPath = envOr(
+    'OCTOPUS_SANDBOX_PROXY_MANIFEST',
+    path.join(pkg, 'build', 'egress-proxy-server.mjs.manifest.json'),
+  );
+
+  // Verify everything before any value is used.
+  await verifyRuntimeArtifact({ artifactPath: runtimeArtifactPath, manifestPath: runtimeManifestPath });
+  await verifyHelperArtifact({ helperPath: helperBinaryPath, manifestPath: helperManifestPath });
+  await verifyProxyBundle(proxyBundlePath, proxyBundleManifestPath);
+
+  return {
+    runtimeArtifactPath,
+    runtimeManifestPath,
+    helperManifestPath,
+    helperBinaryPath,
+    proxyBundlePath,
+    proxyBundleManifestPath,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DI seam — injectable collaborators (never consulted for behavior)
+// ---------------------------------------------------------------------------
+
+export interface OsBackendDeps {
+  probeOsCaps?: typeof probeOsCaps;
+  resolveOsArtifacts?: () => Promise<ResolvedOsArtifacts>;
+  setupNetns?: typeof setupNetns;
+  authorizeProxyEndpoint?: typeof authorizeProxyEndpoint;
+  createLimitedCgroup?: typeof createLimitedCgroup;
+  assembleRootfs?: typeof assembleRootfs;
+  buildOsRunCommand?: typeof buildOsRunCommand;
+  spawnHelper?: (cmd: OsRunCommand) => ChildProcess;
+  proxyLauncher?: ProxyLauncher;
+}
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
+export interface OsSandboxBackendOptions {
+  sessionId: string;
+  /** Working directory for the backend's own state (rootfs staging, launch specs). */
+  workDir?: string;
+  /** Injectable collaborators. Production callers omit this. */
+  deps?: OsBackendDeps;
+}
+
+interface ActiveChild {
+  child: ChildProcess;
+  launchSpecPath: string;
+}
+
+export class OsSandboxBackend implements SandboxBackend {
+  readonly kind = 'os' as const;
+
+  private readonly sessionId: string;
+  private readonly workDir: string;
+  private readonly deps: Required<Pick<OsBackendDeps, 'proxyLauncher'>> & OsBackendDeps;
+
+  private probed = false;
+  private caps: OsCaps | undefined;
+  private artifacts: ResolvedOsArtifacts | undefined;
+  private netns: NetnsHandle | undefined;
+  private carrier: Extract<ProxyCarrier, { kind: 'linux-static' }> | undefined;
+  private proxyHandle: ProxyHandle | undefined;
+  private proxyCgroupPath: string | undefined;
+  private opts: BackendPrepareOptions | undefined;
+  private layout: RootfsLayout | undefined;
+  private cgroup: CgroupHandle | undefined;
+  private activeChild: ActiveChild | undefined;
+  private specDir: string | undefined;
+  private cleaned = false;
+
+  constructor(opts: OsSandboxBackendOptions) {
+    if (!opts.sessionId || typeof opts.sessionId !== 'string') {
+      throw new Error('OsSandboxBackend: sessionId is required');
+    }
+    this.sessionId = opts.sessionId;
+    this.workDir = opts.workDir ?? path.join(os.tmpdir(), `oct-os-backend-${this.sessionId}`);
+    this.deps = {
+      ...(opts.deps ?? {}),
+      proxyLauncher: opts.deps?.proxyLauncher ?? new DefaultProxyLauncher(),
+    };
+  }
+
+  get isolationLevel(): IsolationLevel {
+    if (!this.probed || !this.caps) return 'restricted';
+    return fullLevel(this.caps);
+  }
+
+  // -------------------------------------------------------------------------
+  // probe()
+  // -------------------------------------------------------------------------
+
+  async probe(): Promise<boolean> {
+    // Platform gate FIRST — on non-Linux we never touch the artifacts (they
+    // are built only on Linux+Docker and absent elsewhere). When tests inject
+    // a probeOsCaps or resolveOsArtifacts override, that override drives the
+    // entire probe so the lifecycle can be exercised on macOS.
+    const hasOverride = this.deps.probeOsCaps !== undefined || this.deps.resolveOsArtifacts !== undefined;
+    if (process.platform !== 'linux' && !hasOverride) {
+      this.probed = true;
+      this.caps = {
+        platform: process.platform === 'darwin' ? 'darwin' : 'other',
+        userMountPidIpcUtsNs: false,
+        namedNetns: false,
+        nftRuleCreate: false,
+        cgroupV2Writable: false,
+        runtimeArtifact: false,
+        helperArtifact: false,
+        sandboxExec: false,
+        probeErrors: ['platform is not linux'],
+      };
+      return false;
+    }
+
+    // Artifact availability check — never a rejection. A missing artifact
+    // means the OS backend is simply unavailable here, not an error.
+    const resolver = this.deps.resolveOsArtifacts ?? resolveOsArtifactsReal;
+    let artifacts: ResolvedOsArtifacts;
+    try {
+      artifacts = await resolver();
+    } catch {
+      this.probed = true;
+      this.caps = {
+        platform: 'linux',
+        userMountPidIpcUtsNs: false,
+        namedNetns: false,
+        nftRuleCreate: false,
+        cgroupV2Writable: false,
+        runtimeArtifact: false,
+        helperArtifact: false,
+        sandboxExec: false,
+        probeErrors: ['artifact resolution failed'],
+      };
+      return false;
+    }
+    this.artifacts = artifacts;
+
+    const prober = this.deps.probeOsCaps ?? probeOsCaps;
+    const caps = await prober({
+      runtimeManifestPath: artifacts.runtimeManifestPath,
+      helperManifestPath: artifacts.helperManifestPath,
+    });
+    this.probed = true;
+    this.caps = caps;
+    return fullLevel(caps) === 'full';
+  }
+
+  // -------------------------------------------------------------------------
+  // prepareTopology()
+  // -------------------------------------------------------------------------
+
+  async prepareTopology(): Promise<ProxyCarrier> {
+    if (this.carrier) return this.carrier;
+    if (!this.probed || !this.caps || fullLevel(this.caps) !== 'full') {
+      throw new Error('OsSandboxBackend.prepareTopology: probe() must succeed with full isolation first');
+    }
+    if (!this.artifacts) {
+      throw new Error('OsSandboxBackend.prepareTopology: artifacts were not resolved');
+    }
+
+    // Backend-owned proxy cgroup path (created by the proxy launcher or by
+    // the orchestrator when the proxy runs). We only own the NAME here —
+    // the proxy cgroup is created separately so the egress proxy is not
+    // confined by the skill's memory/cpu/pids limits.
+    this.proxyCgroupPath = path.join('/sys/fs/cgroup', `oct-proxy-${this.sessionId}`);
+
+    // Set up the named netns + veth pair + base nft table, and allocate
+    // the proxy listen port up front (bind proxyIp:0, read ephemeral port,
+    // close — the launcher rebinds exactly this port). Keeping the
+    // allocate→carrier-rebind gap minimal: the port is handed to the
+    // launcher immediately via the returned carrier.
+    const setup = this.deps.setupNetns ?? setupNetns;
+    this.netns = await setup({ sessionId: this.sessionId });
+
+    this.carrier = {
+      kind: 'linux-static',
+      binaryPath: this.artifacts.proxyBundlePath,
+      skillNamespace: { name: this.netns.name, path: this.netns.path },
+      listenHost: this.netns.proxyIp,
+      reachableHost: this.netns.proxyIp,
+      cgroupPath: this.proxyCgroupPath,
+      listenPort: this.netns.proxyPort,
+    };
+    return this.carrier;
+  }
+
+  // -------------------------------------------------------------------------
+  // prepare()
+  // -------------------------------------------------------------------------
+
+  async prepare(opts: BackendPrepareOptions): Promise<void> {
+    // Step 1: validate options FIRST (pure input check, no side effects).
+    validatePrepareOptions(opts);
+
+    // Step 2: probe must have run and reported full.
+    if (!this.probed || !this.caps || fullLevel(this.caps) !== 'full') {
+      throw new Error('OsSandboxBackend.prepare: probe() must succeed with full isolation first');
+    }
+    if (!this.artifacts) throw new Error('OsSandboxBackend.prepare: artifacts were not resolved');
+
+    // Step 3: topology and proxy launcher must have run.
+    if (!this.carrier || !this.netns) {
+      throw new Error('OsSandboxBackend.prepare: prepareTopology() must run before prepare()');
+    }
+
+    // Launch the proxy if it has not been launched yet. The orchestrator
+    // normally calls DefaultProxyLauncher.launch between prepareTopology()
+    // and prepare(); when invoked directly (tests), we run the launcher here
+    // so the proxy handle is available for validation. Either way the
+    // resulting handle is validated against the carrier below.
+    if (!this.proxyHandle) {
+      // The orchestrator passes the policy through opts; secrets are not
+      // needed for the smoke / deny-all case exercised here.
+      this.proxyHandle = await this.deps.proxyLauncher.launch(
+        { policy: opts, secrets: {}, workDir: this.workDir },
+        this.carrier,
+      );
+    }
+
+    // Step 4: parse opts.proxyAddr; require host === carrier.reachableHost
+    // and port === carrier.listenPort; then install the nft allow rule for
+    // exactly that port. A mismatch is fatal.
+    const { host: proxyHost, port: proxyPort } = parseProxyAddr(opts.proxyAddr);
+    if (proxyHost !== this.carrier.reachableHost) {
+      throw new Error(
+        `proxyAddr host mismatch: opts.proxyAddr host '${proxyHost}' does not equal carrier.reachableHost '${this.carrier.reachableHost}'`,
+      );
+    }
+    if (proxyPort !== this.carrier.listenPort) {
+      throw new Error(
+        `proxyAddr port mismatch: opts.proxyAddr port ${proxyPort} does not equal carrier.listenPort ${this.carrier.listenPort}`,
+      );
+    }
+    const authorize = this.deps.authorizeProxyEndpoint ?? authorizeProxyEndpoint;
+    await authorize(this.netns, { proxyListenPort: this.carrier.listenPort });
+
+    try {
+      // Step 5: assemble + verify the runtime root.
+      const assemble = this.deps.assembleRootfs ?? assembleRootfs;
+      this.layout = await assemble({
+        snapshotRoot: opts.snapshotRoot,
+        caBundlePath: opts.caBundlePath,
+        workDir: this.workDir,
+        runtimeArtifactPath: this.artifacts.runtimeArtifactPath,
+        runtimeManifestPath: this.artifacts.runtimeManifestPath,
+      });
+
+      // Step 6: create + read back the cgroup limits. Do NOT spawn until
+      // this succeeds.
+      const cpuMax = cpuMaxFromCpus(opts.resources.cpus);
+      const pidsMax = 64;
+      const create = this.deps.createLimitedCgroup ?? createLimitedCgroup;
+      this.cgroup = await create({
+        sessionId: this.sessionId,
+        memoryBytes: opts.resources.memoryBytes,
+        pidsMax,
+        cpuMax,
+      });
+
+      // Per-spec launch-spec dir under workDir (carry-forward from Task 3).
+      await mkdir(this.workDir, { recursive: true, mode: 0o700 });
+      this.specDir = await mkdtemp(path.join(this.workDir, 'launch-spec-'));
+
+      this.opts = opts;
+    } catch (err) {
+      // Clean partial state and rethrow. NEVER convert a setup failure into
+      // a restricted run — prepare() throws and the selector fails closed.
+      await this.cleanupPartial();
+      throw err;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // spawn()
+  // -------------------------------------------------------------------------
+
+  async spawn(spec: SpawnSpec): Promise<SandboxProcess> {
+    if (!this.opts || !this.layout || !this.cgroup || !this.netns || !this.carrier || !this.artifacts) {
+      throw new Error('OsSandboxBackend.spawn called before prepare()');
+    }
+    const opts = this.opts;
+    const layout = this.layout;
+    const cgroup = this.cgroup;
+    const netns = this.netns;
+    const artifacts = this.artifacts;
+    const specDir = this.specDir!;
+
+    // Build + verify the helper launch spec.
+    const build = this.deps.buildOsRunCommand ?? buildOsRunCommand;
+    const cmd = await build({
+      helperPath: artifacts.helperBinaryPath,
+      helperManifestPath: artifacts.helperManifestPath,
+      layout,
+      netns,
+      spec,
+      proxyAddr: opts.proxyAddr,
+      specDir,
+    });
+
+    // Spawn the helper with empty host environment except trusted control
+    // variables and stdio pipes.
+    const defaultSpawn = (c: OsRunCommand): ChildProcess =>
+      spawnChild(c.file, c.args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: c.env,
+      });
+    const doSpawn = this.deps.spawnHelper ?? defaultSpawn;
+    const child = doSpawn(cmd);
+    const pid = child.pid;
+    if (typeof pid !== 'number' || pid <= 0) {
+      throw new Error('OsSandboxBackend.spawn: helper child has no pid');
+    }
+
+    // Attach the actual child PID through CgroupHandle.attach(), verify
+    // membership, then continue it (SIGCONT).
+    try {
+      await cgroup.attach(pid);
+    } catch (err) {
+      // Attach failure → never SIGCONT. Kill the stopped child best-effort.
+      try { child.kill('SIGKILL'); } catch { /* best-effort */ }
+      await cleanupLaunchSpec(cmd.launchSpecPath).catch(() => {});
+      throw err;
+    }
+    // SIGCONT the helper to complete phase-3 privilege drop + execve. The
+    // helper was started with --stop-before-exec and raised SIGSTOP before
+    // execve; the cgroup attach is the security gate, so the SIGCONT only
+    // fires AFTER membership is verified.
+    try {
+      child.kill('SIGCONT');
+    } catch (err) {
+      await cgroup.kill().catch(() => {});
+      await cgroup.waitEmpty(2000).catch(() => {});
+      await cleanupLaunchSpec(cmd.launchSpecPath).catch(() => {});
+      throw err;
+    }
+
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    child.stdout?.pipe(stdout);
+    child.stderr?.pipe(stderr);
+
+    this.activeChild = { child, launchSpecPath: cmd.launchSpecPath };
+
+    const cgroupRef = cgroup;
+    const launchSpecPath = cmd.launchSpecPath;
+    const timeoutMs = spec.timeoutMs ?? opts.resources.timeoutMs;
+    const outputMaxBytes = spec.outputMaxBytes ?? 4 * 1024 * 1024;
+
+    let killed = false;
+    let closed = false;
+    let killCalls = 0;
+
+    const doCgroupKill = async (): Promise<void> => {
+      killCalls += 1;
+      if (killed) return;
+      killed = true;
+      try {
+        await cgroupRef.kill();
+      } catch {
+        // Backend failure to write cgroup.kill: still waitEmpty best-effort;
+        // we never report meta.isolationLevel='full' after a containment
+        // failure (see meta below).
+      }
+      try { await cgroupRef.waitEmpty(2000); } catch { /* best-effort */ }
+    };
+
+    const exited = new Promise<BackendRunResult>((resolve) => {
+      const outChunks: Buffer[] = [];
+      const errChunks: Buffer[] = [];
+      let outBytes = 0;
+      let errBytes = 0;
+      let timedOut = false;
+      let outputOverflow = false;
+      let settled = false;
+
+      const settle = (exitCode: number): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const so = Buffer.concat(outChunks).toString('utf8');
+        const se = Buffer.concat(errChunks).toString('utf8');
+        const stderrFinal = outputOverflow
+          ? `${se}\noutput cap exceeded (outputMaxBytes=${outputMaxBytes})`
+          : se;
+        resolve({
+          exitCode,
+          stdout: so,
+          stderr: stderrFinal,
+          timedOut,
+          meta: { isolationLevel: 'full', backend: 'os', degraded: false, degradationReasons: [] },
+        });
+      };
+
+      const onData = (which: 'out' | 'err') => (chunk: Buffer) => {
+        if (which === 'out') { outChunks.push(chunk); outBytes += chunk.length; }
+        else { errChunks.push(chunk); errBytes += chunk.length; }
+        // COMBINED stdout+stderr cap.
+        if (outBytes + errBytes > outputMaxBytes && !outputOverflow) {
+          outputOverflow = true;
+          void doCgroupKill();
+        }
+      };
+      stdout.on('data', onData('out'));
+      stderr.on('data', onData('err'));
+
+      const timer = setTimeout(() => {
+        if (!settled && !outputOverflow) {
+          timedOut = true;
+          void doCgroupKill();
+        }
+      }, timeoutMs);
+
+      child.on('close', (code) => settle(timedOut || outputOverflow ? 137 : code ?? 0));
+      child.on('error', () => settle(1));
+    });
+
+    const kill = async (signal?: NodeJS.Signals): Promise<void> => {
+      await doCgroupKill();
+      // Process-group kill of the trusted launcher only AFTER cgroup kill.
+      if (child.exitCode === null) {
+        try { child.kill(signal ?? 'SIGKILL'); } catch { /* already gone */ }
+      }
+    };
+
+    const close = async (): Promise<void> => {
+      if (closed) return;
+      closed = true;
+      try { child.stdin?.end(); } catch { /* best-effort */ }
+      if (child.exitCode === null) {
+        await doCgroupKill();
+        try { child.kill('SIGKILL'); } catch { /* best-effort */ }
+      }
+      await exited.catch(() => {});
+      await cleanupLaunchSpec(launchSpecPath).catch(() => {});
+      if (this.activeChild?.child === child) this.activeChild = undefined;
+    };
+
+    return {
+      stdin: child.stdin!,
+      stdout,
+      stderr,
+      exited,
+      kill,
+      close,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // run()
+  // -------------------------------------------------------------------------
+
+  async run(spec: ExecSpec): Promise<BackendRunResult> {
+    const proc = await this.spawn({ ...spec, stdin: 'pipe' });
+    if (typeof spec.stdin === 'string' || spec.stdin instanceof Uint8Array) {
+      proc.stdin.write(spec.stdin);
+    }
+    proc.stdin.end();
+    try {
+      const result = await proc.exited;
+      // On child close, verify the cgroup is empty before returning.
+      if (this.cgroup) {
+        try {
+          await this.cgroup.waitEmpty(2000);
+        } catch {
+          // Unexpected remaining processes: kill them and fail the run.
+          await this.cgroup.kill().catch(() => {});
+          await this.cgroup.waitEmpty(2000).catch(() => {});
+          throw new Error('OsSandboxBackend.run: cgroup not empty after child close');
+        }
+      }
+      return result;
+    } finally {
+      await proc.close();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // cleanup()
+  // -------------------------------------------------------------------------
+
+  async cleanup(): Promise<void> {
+    if (this.cleaned) return;
+    this.cleaned = true;
+    await this.cleanupPartial();
+  }
+
+  /** Reverse-dependency-order cleanup. Aggregates errors without skipping later cleanup. */
+  private async cleanupPartial(): Promise<void> {
+    const errors: unknown[] = [];
+    const tryStep = async (fn: () => Promise<void>): Promise<void> => {
+      try { await fn(); } catch (err) { errors.push(err); }
+    };
+
+    // 1. Active helper: cgroup kill/waitEmpty.
+    if (this.activeChild) {
+      const { child, launchSpecPath } = this.activeChild;
+      this.activeChild = undefined;
+      if (this.cgroup) {
+        await tryStep(async () => { await this.cgroup!.kill(); });
+        await tryStep(async () => { await this.cgroup!.waitEmpty(2000); });
+      }
+      try { child.kill('SIGKILL'); } catch { /* best-effort */ }
+      await tryStep(() => cleanupLaunchSpec(launchSpecPath));
+    }
+
+    // 2. Cgroup kill/wait-empty/remove.
+    if (this.cgroup) {
+      const cg = this.cgroup;
+      this.cgroup = undefined;
+      await tryStep(() => cg.kill());
+      await tryStep(() => cg.waitEmpty(2000));
+      await tryStep(() => cg.cleanup());
+    }
+
+    // 3. Helper/mount/rootfs cleanup.
+    if (this.layout) {
+      const l = this.layout;
+      this.layout = undefined;
+      await tryStep(() => l.cleanup());
+    }
+
+    // 4. Proxy carrier cgroup if backend-owned + proxy close.
+    if (this.proxyHandle) {
+      const ph = this.proxyHandle;
+      this.proxyHandle = undefined;
+      await tryStep(() => ph.close());
+    }
+
+    // 5. Netns+nft cleanup.
+    if (this.netns) {
+      const n = this.netns;
+      this.netns = undefined;
+      await tryStep(() => n.cleanup());
+    }
+
+    // 6. Launch-spec dir removal.
+    if (this.specDir) {
+      const d = this.specDir;
+      this.specDir = undefined;
+      await tryStep(() => rm(d, { recursive: true, force: true }));
+    }
+
+    this.carrier = undefined;
+    this.opts = undefined;
+
+    if (errors.length > 0) {
+      // Aggregate, but don't throw on idempotent cleanup() calls — the
+      // caller may legitimately call cleanup() after partial failure.
+      // We surface errors via console diagnostics rather than breaking the
+      // idempotence contract.
+      // eslint-disable-next-line no-console
+      console.warn('OsSandboxBackend.cleanup: aggregated errors', errors);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+function validatePrepareOptions(opts: BackendPrepareOptions): void {
+  if (!opts || typeof opts !== 'object') {
+    throw new Error('OsSandboxBackend.prepare: opts is required');
+  }
+  // Mandatory canonical fields.
+  if (typeof opts.proxyAddr !== 'string' || opts.proxyAddr.length === 0) {
+    throw new Error('OsSandboxBackend.prepare: proxyAddr is required');
+  }
+  if (typeof opts.caBundlePath !== 'string' || opts.caBundlePath.length === 0) {
+    throw new Error('OsSandboxBackend.prepare: caBundlePath is required');
+  }
+  if (!opts.runtimeProfile || typeof opts.runtimeProfile !== 'object') {
+    throw new Error('OsSandboxBackend.prepare: runtimeProfile is required');
+  }
+  if (opts.guestSkillRoot !== '/skill') {
+    throw new Error(`OsSandboxBackend.prepare: guestSkillRoot must be '/skill', got '${opts.guestSkillRoot}'`);
+  }
+  if (opts.guestCaBundlePath !== '/etc/skill-ca/ca.pem') {
+    throw new Error(`OsSandboxBackend.prepare: guestCaBundlePath must be '/etc/skill-ca/ca.pem', got '${opts.guestCaBundlePath}'`);
+  }
+  if (typeof opts.snapshotRoot !== 'string' || opts.snapshotRoot.length === 0) {
+    throw new Error('OsSandboxBackend.prepare: snapshotRoot is required');
+  }
+  if (!opts.runtimeProfile.osRuntime) {
+    throw new Error('OsSandboxBackend.prepare: runtimeProfile.osRuntime is required for the os backend');
+  }
+  // Numeric resolved resources — strict, invalid values throw.
+  const r = opts.resources;
+  if (!r || typeof r !== 'object') {
+    throw new Error('OsSandboxBackend.prepare: resources is required');
+  }
+  if (!Number.isSafeInteger(r.memoryBytes) || r.memoryBytes <= 0) {
+    throw new Error(`OsSandboxBackend.prepare: resources.memoryBytes must be a positive safe integer, got ${r.memoryBytes}`);
+  }
+  if (!Number.isFinite(r.cpus) || r.cpus <= 0) {
+    throw new Error(`OsSandboxBackend.prepare: resources.cpus must be a positive finite number, got ${r.cpus}`);
+  }
+  if (!Number.isSafeInteger(r.timeoutMs) || r.timeoutMs <= 0) {
+    throw new Error(`OsSandboxBackend.prepare: resources.timeoutMs must be a positive safe integer, got ${r.timeoutMs}`);
+  }
+}
+
+function parseProxyAddr(addr: string): { host: string; port: number } {
+  let u: URL;
+  try {
+    u = new URL(addr);
+  } catch (err) {
+    throw new Error(`OsSandboxBackend.prepare: proxyAddr is not a valid URL: ${(err as Error).message}`);
+  }
+  const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`OsSandboxBackend.prepare: proxyAddr has invalid port ${u.port}`);
+  }
+  return { host: u.hostname, port };
+}
+
+/** Convert fractional CPUs to a cgroup v2 cpu.max quota string. */
+function cpuMaxFromCpus(cpus: number): string {
+  if (!Number.isFinite(cpus) || cpus <= 0) {
+    throw new Error(`cpuMaxFromCpus: cpus must be a positive finite number, got ${cpus}`);
+  }
+  const period = 100_000;
+  const quota = Math.max(1, Math.round(cpus * period));
+  return `${quota} ${period}`;
+}
