@@ -19,7 +19,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { resolve, join, dirname, basename } from 'node:path';
+import { verifyRuntimeArtifact } from './rootfs.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -69,16 +70,16 @@ function detectPlatform(): OsPlatform {
 // ---------------------------------------------------------------------------
 // Artifact verification seam
 // ---------------------------------------------------------------------------
-// Task 2/3 will implement the full ELF/tree/manifest verification in
-// `src/os/rootfs.ts` (runtime) and the helper module. For Task 1 we only
-// validate that each manifest exists, parses as JSON, has a plausible shape
-// (`files` array of `{path, sha256}` entries with valid digest shape), and
-// contains no absolute or `..` paths. This is intentionally minimal — the
-// real schema/ELF/digest logic is Task 2/3's job and will replace this seam.
+// Task 2 ships the real runtime verifier in `src/os/rootfs.ts` — the runtime
+// seam below delegates to it. The helper verifier is Task 3's job; until it
+// lands we keep the minimal shape check for the helper manifest only.
 //
-// When `rootfs.ts` ships, swap `verifyArtifactSeam` for the real
-// `verifyRuntimeArtifact` / `verifyHelperArtifact` and the call sites below
-// continue to work unchanged.
+// Manifest naming convention (Task 2.5): the runtime manifest is
+//   <dir>/linux-node22.manifest.json     artifact: <dir>/linux-node22.rootfs.tar.zst
+// The probe derives the artifact path from the manifest filename so callers
+// only need to pass the manifest path. If the manifest filename does not
+// match the convention, the probe reports the runtime artifact as missing
+// (fail-closed) rather than guess.
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
@@ -93,7 +94,24 @@ interface ArtifactManifestShape {
   files?: unknown;
 }
 
-async function verifyArtifactSeam(manifestPath: string, kind: 'runtime' | 'helper'): Promise<void> {
+/** Derive the sibling runtime artifact path from a Task 2.5 manifest path. */
+function runtimeArtifactPathFromManifest(manifestPath: string): string {
+  const dir = dirname(manifestPath);
+  const base = basename(manifestPath);
+  // <name>.manifest.json -> <name>.rootfs.tar.zst
+  const m = base.match(/^(.+)\.manifest\.json$/);
+  if (!m) throw new Error(`runtime manifest filename does not match *.manifest.json: ${base}`);
+  return join(dir, `${m[1]}.rootfs.tar.zst`);
+}
+
+async function verifyRuntimeSeam(manifestPath: string): Promise<void> {
+  const st = await stat(manifestPath);
+  if (!st.isFile()) throw new Error(`runtime manifest is not a regular file: ${manifestPath}`);
+  const artifactPath = runtimeArtifactPathFromManifest(manifestPath);
+  await verifyRuntimeArtifact({ artifactPath, manifestPath });
+}
+
+async function verifyArtifactSeam(manifestPath: string, kind: 'helper'): Promise<void> {
   const st = await stat(manifestPath);
   if (!st.isFile()) throw new Error(`${kind} manifest is not a regular file: ${manifestPath}`);
 
@@ -163,7 +181,7 @@ async function probeArtifacts(opts: ProbeOptions, errors: string[]): Promise<{ r
   let runtime = false;
   let helper = false;
   try {
-    await verifyArtifactSeam(opts.runtimeManifestPath, 'runtime');
+    await verifyRuntimeSeam(opts.runtimeManifestPath);
     runtime = true;
   } catch (err) {
     errors.push(`runtime artifact: ${(err as Error).message}`);
