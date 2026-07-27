@@ -4,6 +4,20 @@ export { createChatClient, createEmbedClient, skillToText, type ChatClient, type
 export { Planner, type ExecutionPlan, type PlanStep, type PlanStepResult, type PlanExecutionResult } from './planner.js';
 export { SkillComposer, type CompositionPlan, type CompositionStep, type CompositionResult } from './composer.js';
 export { dbg } from './debug.js';
+export {
+  SandboxRunner,
+  SANDBOX_ERROR,
+  type SandboxErrorCode,
+  type SandboxRunnerDeps,
+  type SandboxRunnerHooks,
+  type SandboxInvocation,
+  type SandboxCommandInput,
+  type SandboxRunInput,
+  type SandboxSpawnInput,
+  type SandboxRunOutput,
+  type SandboxSession,
+  type BoundSandboxExecutionPort,
+} from './sandbox-runner.js';
 
 export {
   loadConfig, getConfig, resetConfig,
