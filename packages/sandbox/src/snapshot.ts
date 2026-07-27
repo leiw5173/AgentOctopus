@@ -73,7 +73,10 @@ async function walk(root: string, rel: string, entries: ManifestEntry[]): Promis
 }
 
 function canonicalDigest(entries: ManifestEntry[]): string {
-  const sorted = [...entries].sort((a, b) => a.path.localeCompare(b.path));
+  // Code-unit (ECMA-262) order — NOT localeCompare, which is ICU/locale-sensitive
+  // and reorders e.g. ['Zebra/x','apple/y'] differently across hosts. The digest
+  // is the grant key, so it must be a pure function of content.
+  const sorted = [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   // Detect case/Unicode collisions: two distinct paths that fold to the same key.
   const seen = new Map<string, string>();
   for (const e of sorted) {

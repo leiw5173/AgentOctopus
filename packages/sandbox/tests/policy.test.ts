@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolvePolicy } from '../src/policy.js';
+import { resolvePolicy, clampResources } from '../src/policy.js';
 import type { SandboxSkillDescriptor } from '../src/types.js';
 import { SandboxConfigSchema } from '../src/schema.js';
 
@@ -55,5 +55,19 @@ describe('resolvePolicy (requested ∩ granted)', () => {
   it('allows a skill to request smaller resources and returns canonical values', () => {
     const p = resolvePolicy(desc({ resources: { memory: '128m', timeoutMs: 5000, cpus: '0.25' } }), config);
     expect(p.resources).toEqual({ memoryBytes: 128 * 1024 * 1024, timeoutMs: 5000, cpus: 0.25 });
+  });
+});
+
+describe('clampResources (trusted caps required)', () => {
+  it('throws when trusted memory cap is missing', () => {
+    expect(() => clampResources(undefined, { timeoutMs: 30000, cpus: '1' })).toThrow(/memory/i);
+  });
+
+  it('throws when trusted timeoutMs cap is missing', () => {
+    expect(() => clampResources(undefined, { memory: '512m', cpus: '1' })).toThrow(/timeout/i);
+  });
+
+  it('throws when trusted cpus cap is missing', () => {
+    expect(() => clampResources(undefined, { memory: '512m', timeoutMs: 30000 })).toThrow(/cpu/i);
   });
 });

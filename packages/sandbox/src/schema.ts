@@ -24,26 +24,30 @@ export const SandboxRequestSchema = z
 export type SandboxRequestInput = z.infer<typeof SandboxRequestSchema>;
 
 /** Trusted credential grant. Scope comes ONLY from here, never from the skill. */
-export const CredentialGrantSchema = z.object({
-  key: z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'credential key must be an env-var name'),
-  host: z.string(),
-  port: z.number().int().positive(),
-  scheme: z.enum(['http', 'https']),
-  methods: z.array(z.string()).nonempty(),
-  pathPrefix: z.string(),
-  header: z.string(),
-  prefix: z.string().optional(),
-  highRisk: z.boolean().optional(),
-});
+export const CredentialGrantSchema = z
+  .object({
+    key: z.string().regex(/^[A-Z][A-Z0-9_]*$/, 'credential key must be an env-var name'),
+    host: z.string(),
+    port: z.number().int().positive(),
+    scheme: z.enum(['http', 'https']),
+    methods: z.array(z.string()).nonempty(),
+    pathPrefix: z.string(),
+    header: z.string(),
+    prefix: z.string().optional(),
+    highRisk: z.boolean().optional(),
+  })
+  .strict();
 export type CredentialGrant = z.infer<typeof CredentialGrantSchema>;
 
 /** Trusted grant keyed by stable installation identity (installationId+digest). */
-export const InstallationGrantSchema = z.object({
-  installationId: z.string(),
-  digest: z.string(),
-  hosts: z.array(z.string()).optional(),
-  credentials: z.array(CredentialGrantSchema).optional(),
-});
+export const InstallationGrantSchema = z
+  .object({
+    installationId: z.string(),
+    digest: z.string(),
+    hosts: z.array(z.string()).optional(),
+    credentials: z.array(CredentialGrantSchema).optional(),
+  })
+  .strict();
 export type InstallationGrant = z.infer<typeof InstallationGrantSchema>;
 
 /**

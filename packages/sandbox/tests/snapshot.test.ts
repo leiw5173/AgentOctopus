@@ -52,13 +52,38 @@ describe('buildSnapshot', () => {
       .rejects.toBeInstanceOf(SnapshotError);
   });
 
-  it('rejects FIFOs', async () => {
+  it('allows in-root symlinks', async () => {
     fs.mkdirSync(path.join(src, 'subdir'));
-    // create a fifo via mkfifo is not in fs; use a socket-free approach:
-    // emulate by checking the type-rejection path with a directory symlink instead.
     fs.symlinkSync('subdir', path.join(src, 'oklink')); // in-root symlink is allowed
     const s = await buildSnapshot({ sourceDir: src, storeDir: store, installationId: 'u1' });
     expect(s.identity.digest).toBeDefined();
+  });
+
+  describe.skipIf(process.platform === 'win32')('special files (POSIX)', () => {
+    it('rejects special files (FIFO)', async () => {
+      execSync(`mkfifo "${path.join(src, 'myfifo')}"`);
+      await expect(buildSnapshot({ sourceDir: src, storeDir: store, installationId: 'u1' }))
+        .rejects.toBeInstanceOf(SnapshotError);
+    });
+  });
+
+  it('produces a stable digest independent of locale collation (mixed-case paths)', async () => {
+    // 'Zebra' and 'apple' sort differently under localeCompare (locale-sensitive)
+    // vs code-unit order. The digest must be a pure function of content, so two
+    // builds of the same tree must produce the same digest regardless of host
+    // locale or ICU version.
+    fs.mkdirSync(path.join(src, 'Zebra'));
+    fs.writeFileSync(path.join(src, 'Zebra', 'x'), 'zx');
+    fs.mkdirSync(path.join(src, 'apple'));
+    fs.writeFileSync(path.join(src, 'apple', 'y'), 'ay');
+    const a = await buildSnapshot({ sourceDir: src, storeDir: store, installationId: 'u1' });
+    // Remove the staged snapshot and rebuild to prove determinism from source.
+    // Snapshots are chmod read-only; restore u+w before removal (macOS guard).
+    try { execSync(`chmod -R u+w "${a.snapshotRoot}"`, { stdio: 'ignore' }); } catch { /* best effort */ }
+    fs.rmSync(a.snapshotRoot, { recursive: true, force: true });
+    const b = await buildSnapshot({ sourceDir: src, storeDir: store, installationId: 'u1' });
+    expect(b.identity.digest).toBe(a.identity.digest);
+    expect(a.identity.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('verifySnapshot detects tampering after explicitly making one file writable', async () => {

@@ -53,4 +53,28 @@ describe('sandbox schemas', () => {
     });
     expect(g.credentials?.[0]?.pathPrefix).toBe('/data');
   });
+
+  it('rejects unknown fields on credential grants (strict mode catches typos like highrisk)', () => {
+    expect(() =>
+      InstallationGrantSchema.parse({
+        installationId: 'u1',
+        digest: 'sha256:abc',
+        credentials: [{
+          key: 'WTR_API_KEY', host: 'wttr.in', port: 443, scheme: 'https',
+          methods: ['GET'], pathPrefix: '/data', header: 'Authorization',
+          highrisk: true, // typo of `highRisk` — must not be silently stripped
+        }],
+      }),
+    ).toThrow();
+  });
+
+  it('rejects unknown fields on installation grants', () => {
+    expect(() =>
+      InstallationGrantSchema.parse({
+        installationId: 'u1',
+        digest: 'sha256:abc',
+        unknownField: 'x',
+      }),
+    ).toThrow();
+  });
 });

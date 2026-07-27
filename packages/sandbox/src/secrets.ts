@@ -27,6 +27,10 @@ export class MapSecretProvider implements SecretProvider {
  * '[REDACTED]'. Only keys present in the provider for this identity are
  * considered — but since resolve() needs concrete keys, this helper scans a
  * provided list of candidate keys.
+ *
+ * Implementation walks the value tree directly (not via JSON round-trip) so
+ * secrets containing JSON-escaped characters (quotes, backslashes, control
+ * chars) are still matched against raw string leaves.
  */
 export async function redactSecrets<T>(
   obj: T,
@@ -39,10 +43,32 @@ export async function redactSecrets<T>(
     const v = await provider.resolve(identity, k);
     if (v) secrets.push(v);
   }
-  const json = JSON.stringify(obj) ?? '';
-  let out = json;
-  for (const s of secrets) {
-    out = out.split(s).join('[REDACTED]');
+  return walkRedact(obj, secrets) as T;
+}
+
+function walkRedact(value: unknown, secrets: string[]): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    let out = value;
+    for (const s of secrets) {
+      out = out.split(s).join('[REDACTED]');
+    }
+    return out;
   }
-  return JSON.parse(out) as T;
+  if (Array.isArray(value)) {
+    return value.map(v => walkRedact(v, secrets));
+  }
+  if (typeof value === 'object') {
+    // Only walk plain objects — leave Date, Map, Set, Buffer, etc. untouched.
+    const proto = Object.getPrototypeOf(value);
+    if (proto === Object.prototype || proto === null) {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        out[k] = walkRedact(v, secrets);
+      }
+      return out;
+    }
+  }
+  // number, boolean, bigint, symbol, function, Date, Map, Set, Buffer, etc.
+  return value;
 }

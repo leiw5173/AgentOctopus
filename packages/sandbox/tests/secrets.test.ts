@@ -26,4 +26,23 @@ describe('redactSecrets', () => {
     expect(JSON.stringify(clean)).not.toContain('topsecret');
     expect(JSON.stringify(clean)).toContain('[REDACTED]');
   });
+
+  it('redacts secrets containing JSON-escaped characters (quotes, backslashes)', async () => {
+    // Secret contains a literal " and \ — the old JSON.stringify approach escaped
+    // these and the raw secret never matched, leaking the value.
+    const secret = 'to"p\\secret';
+    const p = new MapSecretProvider(new Map([['u1:TRICKY', secret]]));
+    const leaky = { result: `token is ${secret} ok`, nested: { deep: [secret, 'safe'] } };
+    const clean = await redactSecrets(leaky, p, identity, ['TRICKY']);
+    const serialized = JSON.stringify(clean);
+    expect(serialized).not.toContain('to"p');
+    expect(serialized).not.toContain('p\\secret');
+    expect(serialized).toContain('[REDACTED]');
+  });
+
+  it('returns input unchanged when input is null or undefined', async () => {
+    const p = new MapSecretProvider(new Map([['u1:K', 's']]));
+    await expect(redactSecrets(null, p, identity, ['K'])).resolves.toBeNull();
+    await expect(redactSecrets(undefined, p, identity, ['K'])).resolves.toBeUndefined();
+  });
 });
