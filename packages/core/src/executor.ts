@@ -1,7 +1,7 @@
 import type { LoadedSkill, SkillRegistry, RequiredEnvVar } from '@agentoctopus/registry';
 import { getRequiredEnvVars, getRequiredBins, getSkillEntry } from '@agentoctopus/registry';
 import type { AdapterResult } from '@agentoctopus/adapters';
-import { HttpAdapter, McpAdapter, SubprocessAdapter, DockerAdapter, SshAdapter, OpenShellAdapter } from '@agentoctopus/adapters';
+import { HttpAdapter, McpAdapter, SubprocessAdapter, DockerAdapter } from '@agentoctopus/adapters';
 import { applySkillEnvOverrides, installMissingBins } from '@agentoctopus/skills';
 import type { SkillEntry, SkillsConfig } from '@agentoctopus/skills';
 import type { ChatClient } from './llm-client.js';
@@ -140,8 +140,6 @@ export class Executor {
   private mcp = new McpAdapter();
   private subprocess = new SubprocessAdapter();
   private docker = new DockerAdapter();
-  private ssh?: SshAdapter;
-  private openshell = new OpenShellAdapter();
   private composer?: SkillComposer;
 
   constructor(
@@ -149,15 +147,6 @@ export class Executor {
     private chatClient?: ChatClient,
     private router?: Router,
   ) {
-    // Lazy-init SSH adapter from config
-    const config = getConfig();
-    if (config.sandbox.ssh?.host && config.sandbox.ssh?.user) {
-      this.ssh = new SshAdapter({
-        host: config.sandbox.ssh.host,
-        user: config.sandbox.ssh.user,
-        keyPath: config.sandbox.ssh.keyPath,
-      });
-    }
     if (this.router && this.chatClient) {
       this.composer = new SkillComposer(this.registry, this.router, this, this.chatClient);
     }
@@ -700,19 +689,6 @@ If you're not confident about the URL, say "Visit the provider's website" instea
   }
 
   private pickAdapter(skill: LoadedSkill) {
-    // Check sandbox override first
-    const sandboxBackend = skill.manifest.sandbox?.backend;
-    if (sandboxBackend && sandboxBackend !== 'none') {
-      switch (sandboxBackend) {
-        case 'docker':
-          return this.docker;
-        case 'ssh':
-          return this.ssh ?? this.subprocess;
-        case 'openshell':
-          return this.openshell;
-      }
-    }
-
     switch (skill.manifest.adapter) {
       case 'mcp':
         return this.mcp;

@@ -17,6 +17,7 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
+    "@agentoctopus/sandbox": "workspace:*",
     "@agentoctopus/skills": "workspace:*",
     "zod": "^4.4.3",
     "gray-matter": "^4.0.3",

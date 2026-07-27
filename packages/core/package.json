@@ -19,6 +19,7 @@
   "dependencies": {
     "@agentoctopus/adapters": "workspace:*",
     "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/sandbox": "workspace:*",
     "@agentoctopus/skills": "workspace:*",
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^17.4.2",

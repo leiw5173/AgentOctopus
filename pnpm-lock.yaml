@@ -132,6 +132,9 @@ importers:
       '@agentoctopus/registry':
         specifier: workspace:*
         version: link:../registry
+      '@agentoctopus/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -163,6 +166,9 @@ importers:
       '@agentoctopus/registry':
         specifier: workspace:*
         version: link:../registry
+      '@agentoctopus/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
     devDependencies:
       typescript:
         specifier: ^6.0.3
@@ -176,6 +182,9 @@ importers:
       '@agentoctopus/registry':
         specifier: workspace:*
         version: link:../registry
+      '@agentoctopus/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@agentoctopus/skills':
         specifier: workspace:*
         version: link:../skills
@@ -262,6 +271,9 @@ importers:
 
   packages/registry:
     dependencies:
+      '@agentoctopus/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@agentoctopus/skills':
         specifier: workspace:*
         version: link:../skills
@@ -312,6 +324,9 @@ importers:
 
   packages/skills:
     dependencies:
+      '@agentoctopus/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       glob:
         specifier: ^13.0.6
         version: 13.0.6

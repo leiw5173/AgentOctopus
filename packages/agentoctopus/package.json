@@ -22,7 +22,8 @@
     "@agentoctopus/adapters": "workspace:*",
     "@agentoctopus/core": "workspace:*",
     "@agentoctopus/gateway": "workspace:*",
-    "@agentoctopus/cli": "workspace:*"
+    "@agentoctopus/cli": "workspace:*",
+    "@agentoctopus/sandbox": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^6.0.3"

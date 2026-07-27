@@ -18,7 +18,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@agentoctopus/registry": "workspace:*"
+    "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/sandbox": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",

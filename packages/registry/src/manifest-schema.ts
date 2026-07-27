@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SandboxRequestSchema } from '@agentoctopus/sandbox';
 
 export const AuthSchema = z.enum(['none', 'api_key', 'oauth', 'bearer']);
 export const AdapterSchema = z.enum(['http', 'mcp', 'subprocess', 'openai', 'composed']);
@@ -32,13 +33,9 @@ export const SkillManifestSchema = z.object({
   // optional LLM-based skill (no endpoint, uses system LLM)
   llm_powered: z.boolean().default(false),
   credentials: z.array(CredentialSchema).optional(),
-  // Sandbox configuration for isolated execution
-  sandbox: z.object({
-    backend: z.enum(['docker', 'ssh', 'openshell', 'none']).optional(),
-    image: z.string().optional(),
-    memory: z.string().optional(),
-    timeout: z.number().int().optional(),
-  }).optional(),
+  // Sandbox configuration for isolated execution — untrusted requests only,
+  // owned by @agentoctopus/sandbox. Trusted config/grants live in octopus.json.
+  sandbox: SandboxRequestSchema.optional(),
   // Composition: skill chaining DAG
   compose: z.object({
     steps: z.array(z.object({

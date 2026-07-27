@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SandboxConfigSchema as CanonicalSandboxConfigSchema } from '@agentoctopus/sandbox';
 
 export const LLMConfigSchema = z.object({
   provider: z.enum(['openai', 'gemini', 'ollama', 'anthropic']).default('openai'),
@@ -130,20 +131,10 @@ export const AgentsConfigSchema = z.object({
 export type AgentsConfigSection = z.infer<typeof AgentsConfigSchema>;
 
 // ── Sandbox Config (global defaults) ─────────────────────────────────────
-
-export const SandboxConfigSchema = z.object({
-  defaultBackend: z.enum(['docker', 'ssh', 'openshell', 'none']).default('none'),
-  docker: z.object({
-    image: z.string().default('node:20-alpine'),
-    memory: z.string().default('512m'),
-    network: z.enum(['bridge', 'none', 'host']).default('none'),
-  }).optional(),
-  ssh: z.object({
-    host: z.string().optional(),
-    user: z.string().optional(),
-    keyPath: z.string().optional(),
-  }).optional(),
-});
+//
+// The canonical shape is owned by @agentoctopus/sandbox (Plan 1). Core
+// re-exports it so callers see one definition; it must NOT be redefined here.
+export const SandboxConfigSchema = CanonicalSandboxConfigSchema;
 export type SandboxConfigSection = z.infer<typeof SandboxConfigSchema>;
 
 // ── Canvas Config ────────────────────────────────────────────────────────
