@@ -85,9 +85,101 @@ describe('buildDockerArgs', () => {
     expect(args.at(-2)).toBe(DUMMY_IMAGE);
   });
 
-  it('rejects a mutable image before any Docker operation', async () => {
+  it('emits the full hardening argument set with correct adjacent values', () => {
+    const prepare = prepareOpts();
+    const args = buildDockerArgs({
+      config: unitConfig,
+      prepare,
+      spec: { command: ['true'] },
+      networkName: 'octopus-test-net',
+      containerName: 'octopus-test-container',
+    });
+
+    // Capability and privilege restrictions
+    const capDropIdx = args.indexOf('--cap-drop');
+    expect(capDropIdx).toBeGreaterThan(-1);
+    expect(args[capDropIdx + 1]).toBe('ALL');
+
+    const secOptIdx = args.indexOf('--security-opt');
+    expect(secOptIdx).toBeGreaterThan(-1);
+    expect(args[secOptIdx + 1]).toBe('no-new-privileges');
+
+    const userIdx = args.indexOf('--user');
+    expect(userIdx).toBeGreaterThan(-1);
+    expect(args[userIdx + 1]).toBe('65534:65534');
+
+    expect(args).toContain('--read-only');
+
+    const tmpfsIdx = args.indexOf('--tmpfs');
+    expect(tmpfsIdx).toBeGreaterThan(-1);
+    expect(args[tmpfsIdx + 1]).toMatch(/noexec/);
+    expect(args[tmpfsIdx + 1]).toMatch(/nosuid/);
+
+    // Resource limits
+    const pidsIdx = args.indexOf('--pids-limit');
+    expect(pidsIdx).toBeGreaterThan(-1);
+    expect(args[pidsIdx + 1]).toBe('32');
+
+    const ulimitIdx = args.indexOf('--ulimit');
+    expect(ulimitIdx).toBeGreaterThan(-1);
+    expect(args[ulimitIdx + 1]).toBe('nofile=128');
+
+    // Network isolation (invariant-1 wiring)
+    const netIdx = args.indexOf('--network');
+    expect(netIdx).toBeGreaterThan(-1);
+    expect(args[netIdx + 1]).toBe('octopus-test-net');
+
+    // Mount points
+    const volumeArgs = args.filter((a, i) => args[i - 1] === '-v');
+    expect(volumeArgs.some((v) => v.endsWith(':/skill:ro'))).toBe(true);
+    expect(volumeArgs).toContain('/host/session-ca.pem:/etc/skill-ca/ca.pem:ro');
+
+    // Every -e value must contain '=' (no bare passthrough)
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-e') {
+        expect(args[i + 1]).toMatch(/=/);
+      }
+    }
+  });
+
+  it('trusted env wins over spec.env on collision (last-wins ordering)', () => {
+    const prepare = prepareOpts();
+    const args = buildDockerArgs({
+      config: unitConfig,
+      prepare,
+      spec: { command: ['true'], env: { HTTPS_PROXY: 'http://evil' } },
+      networkName: 'octopus-test-net',
+      containerName: 'octopus-test-container',
+    });
+
+    // Collect all -e values starting with HTTPS_PROXY=
+    const httpsProxyValues: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-e' && args[i + 1]?.startsWith('HTTPS_PROXY=')) {
+        httpsProxyValues.push(args[i + 1]);
+      }
+    }
+    // The LAST one must be the trusted value (Docker applies last-wins)
+    expect(httpsProxyValues.length).toBeGreaterThanOrEqual(2);
+    expect(httpsProxyValues.at(-1)).toBe(`HTTPS_PROXY=${prepare.proxyAddr}`);
+  });
+
+  it('rejects a mutable runtime image before any Docker operation', async () => {
     const invalidConfig = { ...unitConfig, docker: { ...unitConfig.docker, image: 'example/runtime:latest' } } as typeof unitConfig;
     const be = new DockerBackend({ config: invalidConfig, sessionId: `invalid-${process.pid}` });
+    await expect(be.prepareTopology()).rejects.toThrow(/immutable|sha256/i);
+  });
+});
+
+describe('DockerBackend fail-closed', () => {
+  it('run() rejects when called before prepare()', async () => {
+    const be = new DockerBackend({ config: unitConfig, sessionId: `noprep-${process.pid}` });
+    await expect(be.run({ command: ['true'] })).rejects.toThrow(/prepare/i);
+  });
+
+  it('prepareTopology() rejects a mutable proxy artifact before network creation', async () => {
+    const invalidConfig = { ...unitConfig, proxy: { artifact: 'example/proxy:latest' } } as typeof unitConfig;
+    const be = new DockerBackend({ config: invalidConfig, sessionId: `mutproxy-${process.pid}` });
     await expect(be.prepareTopology()).rejects.toThrow(/immutable|sha256/i);
   });
 });

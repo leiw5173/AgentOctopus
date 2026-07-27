@@ -10,7 +10,6 @@ import type {
   BackendRunResult,
   ProxyCarrier,
 } from '../backend.js';
-import type { SandboxResultMeta } from '../types.js';
 import type { SandboxConfig } from '../schema.js';
 import { ImmutableImageRefSchema } from '../schema.js';
 import { parseByteSize, parseCpuCount, parseTimeoutMs } from '../policy.js';
@@ -41,11 +40,12 @@ export function buildDockerArgs(input: {
   args.push('--ulimit', `nofile=${dcfg.ulimits.nofile}`);
   args.push('--ulimit', `fsize=${parseByteSize(dcfg.ulimits.fsize)}`);
   args.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges');
+  for (const [k, v] of Object.entries(spec.env ?? {})) args.push('-e', `${k}=${v}`);
+  // Trusted env pushed AFTER spec.env so trusted values win on collision (Docker last-wins).
   args.push('-e', `HTTP_PROXY=${prepare.proxyAddr}`, '-e', `HTTPS_PROXY=${prepare.proxyAddr}`);
   args.push('-e', `SSL_CERT_FILE=${prepare.guestCaBundlePath}`);
   args.push('-e', `NODE_EXTRA_CA_CERTS=${prepare.guestCaBundlePath}`);
   args.push('-e', `REQUESTS_CA_BUNDLE=${prepare.guestCaBundlePath}`);
-  for (const [k, v] of Object.entries(spec.env ?? {})) args.push('-e', `${k}=${v}`);
   args.push(image, ...spec.command);
   return args;
 }
@@ -76,7 +76,7 @@ export class DockerBackend implements SandboxBackend {
     if (this.carrier) return this.carrier;
     const config = this.input.config;
     if (!config.docker || !config.proxy) throw new Error('Docker topology requires docker and proxy config');
-    const runtimeImage = ImmutableImageRefSchema.parse(config.docker.image);
+    ImmutableImageRefSchema.parse(config.docker.image);
     const proxyImage = ImmutableImageRefSchema.parse(config.proxy.artifact);
     try {
       await createInternalNetwork(this.internalNetwork);
