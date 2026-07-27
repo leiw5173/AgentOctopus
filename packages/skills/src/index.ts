@@ -20,6 +20,12 @@ export type { InstallPreferences, MissingBinInstallResult, InstallAttempt } from
 export { buildWorkspaceSkillCommandSpecs } from "./command-specs.js";
 export { buildWorkspaceSkillSnapshot } from "./snapshot.js";
 export type { SnapshotLimits } from "./snapshot.js";
+export {
+  ensureInstallationId,
+  lookupInstallationId,
+  removeInstallationId,
+  INSTALLATION_ID_MISSING,
+} from "./install-registry.js";
 export { registerSkillsChangeListener, bumpSnapshotVersion, watchSkillsDir } from "./refresh.js";
 export {
   DEFAULT_REGISTRY,
