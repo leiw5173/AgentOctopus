@@ -9,7 +9,7 @@
  * `name` is untrusted display only.
  */
 import type { LoadedSkill } from '@agentoctopus/registry';
-import { getSkillEntry } from '@agentoctopus/registry';
+import { getRequiredBins, getSkillEntry } from '@agentoctopus/registry';
 import type { SandboxSkillDescriptor } from '@agentoctopus/sandbox';
 
 /** Request-only credential side: key names only; scope comes from trusted grants. */
@@ -28,16 +28,32 @@ export function requestedHosts(skill: LoadedSkill, instructions: string): string
   return [...hosts];
 }
 
-/** Request-only binaries; resolution is against trusted runtime profiles. */
+/**
+ * Request-only binaries; resolution is against trusted runtime profiles.
+ *
+ * Union of every real location a SKILL.md `bins:` request can land:
+ *  - `manifest.sandbox.bins` — explicit sandbox block.
+ *  - `getRequiredBins(manifest)` — canonical helper for
+ *    `manifest.metadata.openclaw.requires.bins` and
+ *    `manifest.metadata.clawdbot.requires.bins`.
+ *  - `getSkillEntry(skill).metadata.requires?.bins` — where a TOP-LEVEL
+ *    `requires:` block in SKILL.md frontmatter actually lands in production
+ *    (`skillEntryToLoadedSkill` never copies it onto the manifest). Going
+ *    through `getSkillEntry` covers both live entries and the cache-restored
+ *    fallback path.
+ *
+ * Deduped. Request-side only — never triggers an install command.
+ */
 export function requestedBins(skill: LoadedSkill): string[] {
-  const manifest = skill.manifest as unknown as {
-    sandbox?: { bins?: string[] };
-    requires?: { bins?: string[] };
-  };
-  return [...new Set([
-    ...(manifest.sandbox?.bins ?? []),
-    ...(manifest.requires?.bins ?? []),
-  ])];
+  const fromSandbox = skill.manifest.sandbox?.bins ?? [];
+  const fromManifestMeta = getRequiredBins(skill.manifest);
+  const entryRequires = (getSkillEntry(skill).metadata?.requires ?? undefined) as
+    | { bins?: unknown }
+    | undefined;
+  const fromEntryRequires = Array.isArray(entryRequires?.bins)
+    ? (entryRequires!.bins as unknown[]).filter((b): b is string => typeof b === 'string')
+    : [];
+  return [...new Set([...fromSandbox, ...fromManifestMeta, ...fromEntryRequires])];
 }
 
 /**
