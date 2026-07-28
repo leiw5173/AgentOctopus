@@ -180,6 +180,9 @@ function makeDeps(overrides?: Partial<{
       launchSpecPath: '/tmp/spec.json',
     })),
     spawnHelper: vi.fn(),
+    // Default stat stub: reports any cgroup root as a valid directory so the
+    // fail-closed validation passes on macOS without touching the real fs.
+    stat: vi.fn(async () => ({ isDirectory: () => true })),
   };
 }
 

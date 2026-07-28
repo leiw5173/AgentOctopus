@@ -255,6 +255,26 @@ describe('createLimitedCgroup (injected fake cgroupfs)', () => {
     fake.corruptReads.set(path.join(ROOT, 'oct-stuck', 'cgroup.events'), 'populated 1\n');
     await expect(h.waitEmpty(150)).rejects.toThrow(/timeout|timed out/i);
   });
+
+  it('honors a delegated (non-default) cgroupRoot for the handle path', async () => {
+    // A delegated sub-hierarchy root (e.g. /sys/fs/cgroup/user.slice/... or a
+    // temp root used in tests). The handle path must be joined under that root.
+    const tempRoot = path.join(os.tmpdir(), `oct-cg-root-${process.pid}-${Date.now()}`);
+    const fake = new FakeCgroupFs(tempRoot);
+    const h = await createLimitedCgroup({
+      name: 'oct-delegated',
+      memoryBytes: 64 * 1024 * 1024,
+      pidsMax: 64,
+      cpuMax: '50000 100000',
+      cgroupRoot: tempRoot,
+      fs: fake,
+    });
+    expect(h.path).toBe(path.join(tempRoot, 'oct-delegated'));
+    // The mkdir landed under the delegated root, not under /sys/fs/cgroup.
+    const mkdirs = fake.ops.filter((o) => o.op === 'mkdir').map((o) => o.path);
+    expect(mkdirs).toContain(path.join(tempRoot, 'oct-delegated'));
+    await h.cleanup();
+  });
 });
 
 // ---------------------------------------------------------------------------

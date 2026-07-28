@@ -234,6 +234,13 @@ export interface OsBackendDeps {
   assembleRootfs?: typeof assembleRootfs;
   buildOsRunCommand?: typeof buildOsRunCommand;
   spawnHelper?: (cmd: OsRunCommand) => ChildProcess;
+  /**
+   * Injectable cgroup-root stat (fail-closed validation). Production callers
+   * never set this; unit tests on macOS inject a stub so the directory check
+   * can be exercised without a real /sys/fs/cgroup. Never consulted for
+   * behavior — only for the existence/directory I/O gate.
+   */
+  stat?: (p: string) => Promise<{ isDirectory: () => boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +251,13 @@ export interface OsSandboxBackendOptions {
   sessionId: string;
   /** Working directory for the backend's own state (rootfs staging, launch specs). */
   workDir?: string;
+  /**
+   * Delegated cgroup v2 mount root. Defaults to `/sys/fs/cgroup`; the
+   * `OCTOPUS_TEST_CGROUP_PARENT` env var provides a fallback for tests on
+   * hosts that don't own the cgroup root. The root is validated fail-closed
+   * (must exist and be a directory) before any cgroup is created.
+   */
+  cgroupRoot?: string;
   /** Injectable collaborators. Production callers omit this. */
   deps?: OsBackendDeps;
 }
@@ -259,6 +273,7 @@ export class OsSandboxBackend implements SandboxBackend {
   private readonly sessionId: string;
   private readonly workDir: string;
   private readonly deps: OsBackendDeps;
+  private readonly cgroupRoot: string;
 
   private probed = false;
   private caps: OsCaps | undefined;
@@ -280,6 +295,22 @@ export class OsSandboxBackend implements SandboxBackend {
     this.sessionId = opts.sessionId;
     this.workDir = opts.workDir ?? path.join(os.tmpdir(), `oct-os-backend-${this.sessionId}`);
     this.deps = opts.deps ?? {};
+    // Precedence: explicit option > OCTOPUS_TEST_CGROUP_PARENT env > /sys/fs/cgroup.
+    const envRoot = process.env.OCTOPUS_TEST_CGROUP_PARENT;
+    this.cgroupRoot = opts.cgroupRoot ?? (envRoot && envRoot.length > 0 ? envRoot : '/sys/fs/cgroup');
+  }
+
+  /**
+   * Absolute path of the skill cgroup created by prepare(), as reported by
+   * the CgroupHandle. Undefined before prepare() and after cleanup().
+   *
+   * This is a CONCRETE-CLASS-ONLY getter — it is intentionally NOT on the
+   * SandboxBackend interface. Callers that hold only the interface type
+   * cannot see it; the privileged Linux lane (Task 6) downcasts or uses the
+   * concrete OsSandboxBackend type to access it.
+   */
+  get skillCgroupPath(): string | undefined {
+    return this.cgroup?.path;
   }
 
   get isolationLevel(): IsolationLevel {
@@ -365,8 +396,9 @@ export class OsSandboxBackend implements SandboxBackend {
     // the skill cgroup. This name is surfaced on the carrier for the
     // orchestrator/launcher; this backend does NOT create, own, or destroy it,
     // and no test asserts its existence. The skill cgroup (created later in
-    // prepare()) is the only cgroup this backend owns.
-    this.proxyCgroupPath = path.join('/sys/fs/cgroup', `oct-proxy-${this.sessionId}`);
+    // prepare()) is the only cgroup this backend owns. The path is joined under
+    // the delegated cgroupRoot for consistency with the skill cgroup.
+    this.proxyCgroupPath = path.join(this.cgroupRoot, `oct-proxy-${this.sessionId}`);
 
     // Set up the named netns + veth pair + base nft table, and allocate
     // the proxy listen port up front (bind proxyIp:0, read ephemeral port,
@@ -445,6 +477,25 @@ export class OsSandboxBackend implements SandboxBackend {
 
       // Step 6: create + read back the cgroup limits. Do NOT spawn until
       // this succeeds.
+      // Fail-closed root validation: the delegated cgroup root must exist and
+      // be a directory before we attempt to create a cgroup under it. If the
+      // root is absent or not a directory, throw — never proceed to create a
+      // cgroup that would land in the wrong place or fail mid-creation.
+      const statFn = this.deps.stat ?? stat;
+      let rootSt: { isDirectory: () => boolean };
+      try {
+        rootSt = await statFn(this.cgroupRoot);
+      } catch (err) {
+        throw new Error(
+          `OsSandboxBackend.prepare: cgroup root '${this.cgroupRoot}' is not accessible: ${(err as Error).message}`,
+        );
+      }
+      if (!rootSt.isDirectory()) {
+        throw new Error(
+          `OsSandboxBackend.prepare: cgroup root '${this.cgroupRoot}' is not a directory`,
+        );
+      }
+
       const cpuMax = cpuMaxFromCpus(opts.resources.cpus);
       const pidsMax = 64;
       const create = this.deps.createLimitedCgroup ?? createLimitedCgroup;
@@ -453,6 +504,7 @@ export class OsSandboxBackend implements SandboxBackend {
         memoryBytes: opts.resources.memoryBytes,
         pidsMax,
         cpuMax,
+        cgroupRoot: this.cgroupRoot,
       });
 
       // Per-spec launch-spec dir under workDir (carry-forward from Task 3).

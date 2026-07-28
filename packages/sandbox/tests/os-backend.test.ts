@@ -13,7 +13,7 @@
  * DI discipline: no vi.mock('node:child_process'). All external effects go
  * through the seams exposed on OsSandboxBackendOptions.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { OsSandboxBackend, type OsBackendDeps } from '../src/os/os-backend.js';
 import type { OsCaps } from '../src/os/probe.js';
 import type { RootfsLayout } from '../src/os/rootfs.js';
@@ -188,6 +188,10 @@ function makeDeps(overrides?: Partial<{
       launchSpecPath: '/tmp/spec.json',
     })),
     spawnHelper: vi.fn(),
+    // Default stat stub: reports any cgroup root as a valid directory so the
+    // fail-closed validation passes on macOS without touching the real fs.
+    // Tests that need to exercise the validation override this on the instance.
+    stat: vi.fn(async () => ({ isDirectory: () => true })),
   };
 }
 
@@ -734,5 +738,137 @@ describe('OsSandboxBackend review-fix regressions', () => {
 
     expect(legacyLaunch).not.toHaveBeenCalled();
     expect(externalClose).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 5 — delegated cgroup root + skill cgroup path exposure
+// ---------------------------------------------------------------------------
+
+describe('OsSandboxBackend cgroupRoot + skillCgroupPath', () => {
+  const prevEnv = { ...process.env };
+  afterEach(() => {
+    // Restore env between tests so OCTOPUS_TEST_CGROUP_PARENT leakage cannot
+    // contaminate sibling assertions.
+    process.env = { ...prevEnv };
+  });
+
+  it('defaults cgroupRoot to /sys/fs/cgroup when neither option nor env is set', async () => {
+    delete process.env.OCTOPUS_TEST_CGROUP_PARENT;
+    const deps = makeDeps();
+    const captured: Record<string, unknown> = {};
+    deps.createLimitedCgroup.mockImplementation(async (opts: any) => {
+      captured.cgroupRoot = opts.cgroupRoot;
+      return fakeCgroup();
+    });
+    const b = new OsSandboxBackend({ sessionId: 'cg-default', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    // Inject a stat stub that says /sys/fs/cgroup is a directory.
+    (b as any).deps.stat = vi.fn(async () => ({ isDirectory: () => true }));
+    await b.prepare(validPrepareOpts(carrier));
+    expect(captured.cgroupRoot).toBe('/sys/fs/cgroup');
+  });
+
+  it('honors OCTOPUS_TEST_CGROUP_PARENT env fallback when option is absent', async () => {
+    process.env.OCTOPUS_TEST_CGROUP_PARENT = '/tmp/delegated-cg';
+    const deps = makeDeps();
+    const captured: Record<string, unknown> = {};
+    deps.createLimitedCgroup.mockImplementation(async (opts: any) => {
+      captured.cgroupRoot = opts.cgroupRoot;
+      return fakeCgroup();
+    });
+    const b = new OsSandboxBackend({ sessionId: 'cg-env', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    (b as any).deps.stat = vi.fn(async () => ({ isDirectory: () => true }));
+    await b.prepare(validPrepareOpts(carrier));
+    expect(captured.cgroupRoot).toBe('/tmp/delegated-cg');
+  });
+
+  it('option takes precedence over OCTOPUS_TEST_CGROUP_PARENT env', async () => {
+    process.env.OCTOPUS_TEST_CGROUP_PARENT = '/from-env';
+    const deps = makeDeps();
+    const captured: Record<string, unknown> = {};
+    deps.createLimitedCgroup.mockImplementation(async (opts: any) => {
+      captured.cgroupRoot = opts.cgroupRoot;
+      return fakeCgroup();
+    });
+    const b = new OsSandboxBackend({
+      sessionId: 'cg-opt',
+      cgroupRoot: '/from-option',
+      deps: deps as unknown as OsBackendDeps,
+    });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    (b as any).deps.stat = vi.fn(async () => ({ isDirectory: () => true }));
+    await b.prepare(validPrepareOpts(carrier));
+    expect(captured.cgroupRoot).toBe('/from-option');
+  });
+
+  it('proxyCgroupPath on the carrier uses the delegated cgroupRoot', async () => {
+    process.env.OCTOPUS_TEST_CGROUP_PARENT = '/tmp/delegated-cg';
+    const deps = makeDeps();
+    const b = new OsSandboxBackend({ sessionId: 'cg-proxy', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    expect(carrier.cgroupPath).toBe('/tmp/delegated-cg/oct-proxy-cg-proxy');
+  });
+
+  it('skillCgroupPath is undefined before prepare, set after prepare, cleared after cleanup', async () => {
+    delete process.env.OCTOPUS_TEST_CGROUP_PARENT;
+    const deps = makeDeps();
+    const skillCgPath = '/sys/fs/cgroup/oct-skill-lifecycle';
+    deps.createLimitedCgroup.mockResolvedValue(fakeCgroup(skillCgPath));
+    const b = new OsSandboxBackend({ sessionId: 'cg-life', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    // Before prepareTopology/prepare: undefined.
+    expect(b.skillCgroupPath).toBeUndefined();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    // After topology but before prepare: still undefined (cgroup not created yet).
+    expect(b.skillCgroupPath).toBeUndefined();
+    (b as any).deps.stat = vi.fn(async () => ({ isDirectory: () => true }));
+    await b.prepare(validPrepareOpts(carrier));
+    // After prepare: the handle's path is exposed.
+    expect(b.skillCgroupPath).toBe(skillCgPath);
+    await b.cleanup();
+    // After cleanup: cleared.
+    expect(b.skillCgroupPath).toBeUndefined();
+  });
+
+  it('fails closed (throws) when the cgroup root does not exist', async () => {
+    delete process.env.OCTOPUS_TEST_CGROUP_PARENT;
+    const deps = makeDeps();
+    deps.createLimitedCgroup.mockResolvedValue(fakeCgroup());
+    const b = new OsSandboxBackend({
+      sessionId: 'cg-missing-root',
+      cgroupRoot: '/nonexistent-cg-root-xyz',
+      deps: deps as unknown as OsBackendDeps,
+    });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    // stat rejects — simulates ENOENT.
+    (b as any).deps.stat = vi.fn(async () => { throw new Error('ENOENT: no such file or directory'); });
+    await expect(b.prepare(validPrepareOpts(carrier))).rejects.toThrow(/cgroup root/i);
+    // createLimitedCgroup must NOT have been called — fail-closed before creation.
+    expect(deps.createLimitedCgroup).not.toHaveBeenCalled();
+    // skillCgroupPath stays undefined.
+    expect(b.skillCgroupPath).toBeUndefined();
+  });
+
+  it('fails closed (throws) when the cgroup root exists but is not a directory', async () => {
+    delete process.env.OCTOPUS_TEST_CGROUP_PARENT;
+    const deps = makeDeps();
+    deps.createLimitedCgroup.mockResolvedValue(fakeCgroup());
+    const b = new OsSandboxBackend({
+      sessionId: 'cg-not-dir',
+      cgroupRoot: '/some/file',
+      deps: deps as unknown as OsBackendDeps,
+    });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    (b as any).deps.stat = vi.fn(async () => ({ isDirectory: () => false }));
+    await expect(b.prepare(validPrepareOpts(carrier))).rejects.toThrow(/not a directory|cgroup root/i);
+    expect(deps.createLimitedCgroup).not.toHaveBeenCalled();
   });
 });
