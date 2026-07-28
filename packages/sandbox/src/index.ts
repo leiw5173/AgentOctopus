@@ -23,3 +23,4 @@ export * from './os/cgroup.js';
 export * from './os/netns.js';
 export * from './os/os-backend.js';
 export * from './mcp-stdio-relay.js';
+export * from './image-lock.js';

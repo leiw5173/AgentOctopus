@@ -76,6 +76,8 @@ docs/superpowers/
 
 # Sandbox reproducible runtime artifacts (built by packages/sandbox/scripts/)
 packages/sandbox/runtime/
+# Sandbox bundled egress-proxy artifact (built by bundle-egress-proxy.mjs)
+packages/sandbox/build/
 
 # Python virtual env
 .venv/

@@ -112,7 +112,10 @@ export const SandboxConfigSchema = z
       .optional(),
     proxy: z
       .object({
-        artifact: z.string(), // digest-pinned proxy artifact (image or binary)
+        // Digest-pinned proxy artifact (image or binary). Validated with the
+        // same immutable-reference regex as docker.image so a mutable tag
+        // (e.g. `proxy:latest`) is rejected during config parsing.
+        artifact: ImmutableImageRefSchema,
         maxReqBytes: z.number().int().positive().default(1_048_576),
         maxRespBytes: z.number().int().positive().default(10_485_760),
         maxConns: z.number().int().positive().default(32),
