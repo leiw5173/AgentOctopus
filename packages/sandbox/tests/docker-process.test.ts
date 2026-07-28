@@ -290,7 +290,7 @@ describe('DockerBackend persistent duplex (daemon-independent)', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildDockerArgs — persistent child isolation surface (daemon-independent)', () => {
-  it('mounts snapshot at /skill:ro, CA bundle at /etc/skill-ca/ca.pem:ro, and binds only the internal network', () => {
+  it('mounts snapshot at /skill and CA bundle at /etc/skill-ca/ca.pem (read-only), and binds only the internal network', () => {
     const args = buildDockerArgs({
       config: unitConfig,
       prepare: makePrepareOpts(),
@@ -309,10 +309,11 @@ describe('buildDockerArgs — persistent child isolation surface (daemon-indepen
     // Read-only root + tmpfs.
     expect(args).toContain('--read-only');
 
-    // Mounts use the canonical literal guest paths.
-    const volumes = args.filter((a, i) => args[i - 1] === '-v');
-    expect(volumes.some((v) => v.endsWith(':/skill:ro'))).toBe(true);
-    expect(volumes).toContain('/host/session-ca.pem:/etc/skill-ca/ca.pem:ro');
+    // Mounts use the canonical literal guest paths (--mount form: the snapshot
+    // source path contains a colon, which -v would reject as "too many colons").
+    const mounts = args.filter((a, i) => args[i - 1] === '--mount');
+    expect(mounts.some((v) => v.endsWith(',target=/skill,readonly'))).toBe(true);
+    expect(mounts).toContain('type=bind,source=/host/session-ca.pem,target=/etc/skill-ca/ca.pem,readonly');
 
     // Trusted proxy + CA envs are pushed with the literal guest paths.
     expect(args).toContain('SSL_CERT_FILE=/etc/skill-ca/ca.pem');

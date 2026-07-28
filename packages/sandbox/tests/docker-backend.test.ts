@@ -80,7 +80,7 @@ describe('buildDockerArgs', () => {
     expect(args).toContain('134217728'); // Docker's trusted 128m cap, in bytes
     expect(args).toContain('0.5');
     expect(args).toContain('fsize=16777216'); // Docker requires numeric bytes
-    expect(args).toContain('/host/session-ca.pem:/etc/skill-ca/ca.pem:ro');
+    expect(args).toContain('type=bind,source=/host/session-ca.pem,target=/etc/skill-ca/ca.pem,readonly');
     expect(args).toContain('SSL_CERT_FILE=/etc/skill-ca/ca.pem');
     expect(args.at(-2)).toBe(DUMMY_IMAGE);
   });
@@ -129,10 +129,11 @@ describe('buildDockerArgs', () => {
     expect(netIdx).toBeGreaterThan(-1);
     expect(args[netIdx + 1]).toBe('octopus-test-net');
 
-    // Mount points
-    const volumeArgs = args.filter((a, i) => args[i - 1] === '-v');
-    expect(volumeArgs.some((v) => v.endsWith(':/skill:ro'))).toBe(true);
-    expect(volumeArgs).toContain('/host/session-ca.pem:/etc/skill-ca/ca.pem:ro');
+    // Mount points (--mount form: snapshot/CA source paths may contain a colon,
+    // which -v would reject with "too many colons").
+    const mountArgs = args.filter((a, i) => args[i - 1] === '--mount');
+    expect(mountArgs.some((v) => v.endsWith(',target=/skill,readonly'))).toBe(true);
+    expect(mountArgs).toContain('type=bind,source=/host/session-ca.pem,target=/etc/skill-ca/ca.pem,readonly');
 
     // Every -e value must contain '=' (no bare passthrough)
     for (let i = 0; i < args.length; i++) {

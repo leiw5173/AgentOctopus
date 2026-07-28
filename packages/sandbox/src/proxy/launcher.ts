@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { EgressProxy } from './egress-proxy.js';
 import { SessionCa, writeCaBundle } from './ca.js';
 import { createOneShotSecretWriter } from './secret-channel.js';
-import { runDocker } from '../docker/cli.js';
+import { runDocker, waitForContainerRunning } from '../docker/cli.js';
 import { connectNetwork, disconnectNetwork } from '../docker/network.js';
 import type { SandboxPolicy } from '../policy.js';
 import type { ResolvedSecrets } from './egress-proxy.js';
@@ -119,6 +119,11 @@ export class DefaultProxyLauncher implements ProxyLauncher {
 
           // Write the one-shot secret frame to stdin, then close stdin
           await writer.writeTo(child.stdin!);
+
+          // `docker run` returns before the daemon registers the container as
+          // running; an immediate `network connect` races the daemon and fails
+          // with "No such container". Wait for the running state first.
+          await waitForContainerRunning(containerName);
 
           // Attach ONLY the proxy sidecar to the egress network
           await connectNetwork(carrier.egressNetwork, containerName);

@@ -32,8 +32,12 @@ export function buildDockerArgs(input: {
 
   const args = ['run', '--rm', '-i', '--name', containerName, '--network', networkName];
   args.push('--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m');
-  args.push('-v', `${prepare.snapshotRoot}:${prepare.guestSkillRoot}:ro`);
-  args.push('-v', `${prepare.caBundlePath}:${prepare.guestCaBundlePath}:ro`);
+  // Use --mount (not -v): the content-addressed snapshotRoot contains a colon
+  // (`<store>/sha256:<hex>`), which -v parses as a field separator and rejects
+  // with "too many colons". --mount splits on commas, so a colon in the source
+  // path is preserved.
+  args.push('--mount', `type=bind,source=${prepare.snapshotRoot},target=${prepare.guestSkillRoot},readonly`);
+  args.push('--mount', `type=bind,source=${prepare.caBundlePath},target=${prepare.guestCaBundlePath},readonly`);
   args.push('-w', prepare.guestSkillRoot, '--user', '65534:65534');
   args.push('--memory', String(memoryBytes), '--cpus', String(cpus));
   args.push('--pids-limit', String(dcfg.pids));
