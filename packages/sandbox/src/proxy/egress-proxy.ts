@@ -25,6 +25,22 @@ export interface UpstreamTlsOptions {
   agent?: https.Agent;
 }
 
+/**
+ * Test-only connector override (spec §9 Task 4). When supplied, the proxy calls
+ * this to originate the upstream socket instead of the default
+ * `net.connect`/`tls.connect`. The proxy ALWAYS passes the validated, pinned IP
+ * it is about to dial; the connector may remap that address (e.g. a doc-range
+ * IP → a loopback fixture) but the proxy itself never re-resolves. Production
+ * omits this and dials the pinned IP directly.
+ */
+export type UpstreamConnector = (args: {
+  pinnedIp: string;
+  port: number;
+  isHttps: boolean;
+  servername?: string;
+  ca?: string | Buffer | Array<string | Buffer>;
+}) => net.Socket | tls.TLSSocket;
+
 export interface EgressProxyOptions {
   policy: SandboxPolicy;
   secrets: ResolvedSecrets;
@@ -32,9 +48,16 @@ export interface EgressProxyOptions {
   explicitTargets?: ExplicitTargetGrant[];
   dnsLookup?: DnsLookup;
   upstreamTls?: UpstreamTlsOptions;
+  connector?: UpstreamConnector;
   maxReqBytes?: number;
   maxRespBytes?: number;
   maxConns?: number;
+  /**
+   * Idle window (ms) granted to a CONNECT tunnel to complete its TLS handshake
+   * before the slot is reclaimed. Defaults to CONNECT_HANDSHAKE_TIMEOUT_MS.
+   * Tests override this to a small value to exercise the reclaim path quickly.
+   */
+  connectHandshakeTimeoutMs?: number;
 }
 
 // Header size cap enforced on the server in listen() (review M10 — actually
@@ -43,6 +66,31 @@ export interface EgressProxyOptions {
 const HEADER_BYTES_CAP = 16 * 1024;
 const MAX_REDIRECTS = 10;
 const UPSTREAM_ERROR_BODY = 'upstream error';
+// Idle window granted to a CONNECT tunnel to complete its TLS handshake before
+// the slot is reclaimed. Generous enough for a real client, short enough to
+// bound a resource-exhaustion attempt that opens tunnels and stalls.
+const CONNECT_HANDSHAKE_TIMEOUT_MS = 10_000;
+
+/**
+ * Validate the raw Transfer-Encoding chain (spec §9). The only legal chain is
+ * exactly one terminal `chunked` coding — no comma-joined stack, no split
+ * headers, and no non-identity coding before/after it. Operating on
+ * `rawHeaders` (not Node's normalized `req.headers`) so a comma-joined value
+ * such as `gzip, chunked` that the parser tolerates is still rejected here.
+ * Throws SmugglingError on any deviation.
+ */
+export function assertTransferEncodingChain(rawHeaders: readonly string[]): void {
+  const codings: string[] = [];
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    if (rawHeaders[i]?.toLowerCase() !== 'transfer-encoding') continue;
+    const value = rawHeaders[i + 1] ?? '';
+    for (const part of value.split(',')) codings.push(part.trim().toLowerCase());
+  }
+  if (codings.length === 0) return; // no TE header — fine
+  if (codings.length !== 1 || codings[0] !== 'chunked') {
+    throw new SmugglingError(`unsupported Transfer-Encoding chain: ${codings.join(', ')}`);
+  }
+}
 
 /**
  * Trusted egress proxy (spec §9): the only network path out of the sandbox.
@@ -55,8 +103,16 @@ export class EgressProxy {
   private server?: http.Server;
   private port = 0;
   private openConns = 0;
+  private readonly liveSockets = new Set<net.Socket>();
 
   get activeConnections(): number { return this.openConns; }
+
+  /**
+   * Test-only snapshot of currently open downstream connections. Alias of
+   * `activeConnections` so the security lane can assert connection accounting
+   * returns to zero after every slot is released exactly once.
+   */
+  openConnectionCountForTest(): number { return this.openConns; }
 
   private trackSocket(socket: net.Socket): void {
     if (this.openConns >= (this.opts.maxConns ?? 32)) {
@@ -64,10 +120,12 @@ export class EgressProxy {
       return;
     }
     this.openConns++;
+    this.liveSockets.add(socket);
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
+      this.liveSockets.delete(socket);
       this.openConns = Math.max(0, this.openConns - 1);
     };
     socket.once('close', release);
@@ -97,6 +155,11 @@ export class EgressProxy {
 
   async close(): Promise<void> {
     this.opts.ca.destroy();
+    // Destroy every live downstream socket (including CONNECT tunnels handed to
+    // the internal MITM https.Server) so server.close() is not held open by an
+    // idle keepalive or tunnelled connection. Each destroy fires that socket's
+    // 'close' → its slot is released exactly once.
+    for (const socket of this.liveSockets) socket.destroy();
     if (!this.server) return;
     const s = this.server;
     this.server = undefined;
@@ -167,10 +230,19 @@ export class EgressProxy {
       const hostHeaderValue = target.port === (isHttps ? 443 : 80)
         ? target.host
         : `${target.host}:${target.port}`;
+      const servername = isHttps && net.isIP(target.host) === 0 ? target.host : undefined;
+      const upstreamCa = isHttps ? this.opts.upstreamTls?.ca : undefined;
+
+      // Test-only connector override: originate the socket through the injected
+      // connector (which may remap the pinned IP to a local fixture). The proxy
+      // always supplies the validated pinnedIp — it never re-resolves here.
+      const createConnection = this.opts.connector
+        ? () => this.opts.connector!({ pinnedIp, port: target.port, isHttps, servername, ca: upstreamCa })
+        : undefined;
 
       const upstreamReq = client.request({
         host: pinnedIp,
-        servername: isHttps && net.isIP(target.host) === 0 ? target.host : undefined,
+        servername,
         port: target.port,
         method: target.method,
         path: target.path,
@@ -179,8 +251,9 @@ export class EgressProxy {
           host: hostHeaderValue,
         },
         rejectUnauthorized: true,
-        ca: isHttps ? this.opts.upstreamTls?.ca : undefined,
+        ca: upstreamCa,
         agent: isHttps ? this.opts.upstreamTls?.agent : undefined,
+        createConnection,
       } as https.RequestOptions, (upstreamRes) => {
         void this.relayOrRedirect({ target, reqHeaders, body, res, upstreamRes, redirects });
       });
@@ -299,6 +372,29 @@ export class EgressProxy {
     let headers: Record<string, string | string[]>;
     try {
       headers = sanitizeRequestHeaders(req.headers, req.rawHeaders);
+      assertTransferEncodingChain(req.rawHeaders);
+      // Desync guard: in a forward proxy the client legitimately sets Host to
+      // the PROXY's own address while the request line carries the absolute-form
+      // target. The proxy always forwards an authority derived from the parsed
+      // request-line target (never the client Host), so it is internally
+      // consistent. We only reject when the client supplies a Host header that
+      // names a *third* authority — neither the proxy nor the request-line
+      // target — which is the ambiguous smuggling shape.
+      const hostHeader = headers.host === undefined ? undefined : String(headers.host).toLowerCase();
+      if (hostHeader !== undefined) {
+        const defaultPort = target.scheme === 'https' ? 443 : 80;
+        const targetAuthority = (target.port === defaultPort ? target.host : `${target.host}:${target.port}`).toLowerCase();
+        const proxyAuthority = this.address().replace(/^https?:\/\//, '').toLowerCase();
+        const proxyHost = proxyAuthority.split(':')[0]!;
+        if (
+          hostHeader !== targetAuthority &&
+          hostHeader !== target.host.toLowerCase() &&
+          hostHeader !== proxyAuthority &&
+          hostHeader !== proxyHost
+        ) {
+          throw new SmugglingError('absolute-form authority disagrees with Host header');
+        }
+      }
     } catch (err) {
       if (err instanceof SmugglingError) {
         res.writeHead(400, { 'content-type': 'text/plain' });
@@ -339,6 +435,29 @@ export class EgressProxy {
     }
 
     const target: ProxyTarget = { scheme: 'https', host, port, method: 'GET', path: '/' };
+
+    // Desync guard: a CONNECT client legitimately sets Host to the PROXY's own
+    // address while the request line carries the CONNECT authority. The proxy
+    // always uses the request-line authority, so it is internally consistent.
+    // Reject only when Host names a *third* authority — neither the CONNECT
+    // authority nor the proxy — which is the ambiguous smuggling shape.
+    const rawHost = req.headers.host;
+    if (rawHost !== undefined) {
+      const connectAuthority = (port === 443 ? host : `${host}:${port}`).toLowerCase();
+      const proxyAuthority = this.address().replace(/^https?:\/\//, '').toLowerCase();
+      const proxyHost = proxyAuthority.split(':')[0]!;
+      const normalizedRaw = rawHost.toLowerCase();
+      if (
+        normalizedRaw !== connectAuthority &&
+        normalizedRaw !== host.toLowerCase() &&
+        normalizedRaw !== proxyAuthority &&
+        normalizedRaw !== proxyHost
+      ) {
+        socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+        return;
+      }
+    }
+
     const decision = this.engine.decide(target);
     if (!decision.allow) {
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -381,7 +500,10 @@ export class EgressProxy {
       },
     });
 
-    httpsServer.on('secureConnection', () => { /* handshake done; requests follow */ });
+    httpsServer.on('secureConnection', () => {
+      // Handshake complete — cancel the pre-handshake idle guard.
+      socket.setTimeout(0);
+    });
     httpsServer.on('request', (innerReq, innerRes) => {
       const innerTarget: ProxyTarget = {
         scheme: 'https',
@@ -393,6 +515,14 @@ export class EgressProxy {
       this.handleInnerHttps(innerTarget, innerReq, innerRes);
     });
     httpsServer.on('tlsClientError', () => socket.destroy());
+
+    // Pre-handshake idle guard: a CONNECT client that never completes the TLS
+    // handshake (or disconnects abruptly, whose FIN/RST the kernel may not
+    // surface promptly on an unread socket) would otherwise pin a connection
+    // slot forever and exhaust maxConns. Bound the handshake window; on expiry
+    // destroy the socket so trackSocket's release runs exactly once.
+    socket.setTimeout(this.opts.connectHandshakeTimeoutMs ?? CONNECT_HANDSHAKE_TIMEOUT_MS, () => socket.destroy());
+
     // Hand the RAW socket to the server; it wraps + handshakes internally.
     httpsServer.emit('connection', socket);
   }
@@ -401,6 +531,7 @@ export class EgressProxy {
     let headers: Record<string, string | string[]>;
     try {
       headers = sanitizeRequestHeaders(req.headers, req.rawHeaders);
+      assertTransferEncodingChain(req.rawHeaders);
       const expectedAuthority = target.port === 443 ? target.host : `${target.host}:${target.port}`;
       if (headers.host !== expectedAuthority) throw new SmugglingError('inner Host disagrees with CONNECT authority');
     } catch (err) {
