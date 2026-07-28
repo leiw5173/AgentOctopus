@@ -12,6 +12,12 @@
  *
  * DI discipline: no vi.mock('node:child_process'). All effects go through
  * OsSandboxBackendOptions.deps.
+ *
+ * Proxy ownership: the orchestrator (SandboxRunner + DefaultProxyLauncher)
+ * has ALREADY launched the proxy and supplies its coordinates via
+ * prepareOpts.proxyAddr / caBundlePath. The backend validates those against
+ * the carrier and authorizes nft — it must NOT launch or own a proxy itself.
+ * Mirrors the supplied-coordinate fixture pattern from os-backend.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { OsSandboxBackend, type OsBackendDeps } from '../src/os/os-backend.js';
@@ -20,7 +26,6 @@ import type { RootfsLayout } from '../src/os/rootfs.js';
 import type { CgroupHandle } from '../src/os/cgroup.js';
 import type { NetnsHandle } from '../src/os/netns.js';
 import type { ProxyCarrier, BackendPrepareOptions } from '../src/backend.js';
-import type { ProxyHandle, ProxyLauncher } from '../src/proxy/launcher.js';
 
 // ---------------------------------------------------------------------------
 // Fixture builders (verbatim from os-backend.test.ts)
@@ -88,23 +93,28 @@ function fakeLayout(root = '/tmp/oct-rootfs-test'): RootfsLayout {
   };
 }
 
-function fakeProxyHandle(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>): ProxyHandle {
-  return {
-    reachableAddr: `http://${carrier.reachableHost}:${carrier.listenPort}`,
-    caBundlePath: '/tmp/ca-bundle.pem',
-    close: vi.fn(async () => {}),
-  };
+/**
+ * Supplied-endpoint fixture: the orchestrator (SandboxRunner +
+ * DefaultProxyLauncher) has ALREADY launched the proxy and supplies its
+ * coordinates via prepareOpts.proxyAddr / caBundlePath. The backend must
+ * validate those coordinates against the carrier and authorize nft — it
+ * must NOT launch or own a proxy itself.
+ */
+function suppliedProxyAddr(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>): string {
+  return `http://${carrier.reachableHost}:${carrier.listenPort}`;
 }
 
-function validPrepareOpts(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>, proxy: ProxyHandle): BackendPrepareOptions {
+const SUPPLIED_CA_BUNDLE = '/tmp/ca-bundle.pem';
+
+function validPrepareOpts(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>): BackendPrepareOptions {
   return {
     hosts: ['example.com'],
     credentials: [],
     denied: { hosts: [], credentials: [] },
     resources: { memoryBytes: 64 * 1024 * 1024, cpus: 0.5, timeoutMs: 5000 },
     snapshotRoot: '/snap/a',
-    proxyAddr: proxy.reachableAddr,
-    caBundlePath: proxy.caBundlePath,
+    proxyAddr: suppliedProxyAddr(carrier),
+    caBundlePath: SUPPLIED_CA_BUNDLE,
     runtimeProfile: {
       id: 'linux-node22',
       bins: ['node'],
@@ -129,7 +139,6 @@ interface FakeDeps {
   assembleRootfs: ReturnType<typeof vi.fn>;
   buildOsRunCommand: ReturnType<typeof vi.fn>;
   spawnHelper: ReturnType<typeof vi.fn>;
-  proxyLauncher: ProxyLauncher;
 }
 
 function makeDeps(overrides?: Partial<{
@@ -137,7 +146,6 @@ function makeDeps(overrides?: Partial<{
   netns: NetnsHandle;
   cgroup: CgroupHandle;
   layout: RootfsLayout;
-  proxyHandle: ProxyHandle;
   artifacts: {
     runtimeArtifactPath: string;
     runtimeManifestPath: string;
@@ -158,17 +166,6 @@ function makeDeps(overrides?: Partial<{
     proxyBundlePath: '/build/egress-proxy-server.mjs',
   };
 
-  const carrier: Extract<ProxyCarrier, { kind: 'linux-static' }> = {
-    kind: 'linux-static',
-    binaryPath: artifacts.proxyBundlePath,
-    skillNamespace: { name: netns.name, path: netns.path },
-    listenHost: netns.proxyIp,
-    reachableHost: netns.proxyIp,
-    cgroupPath: cgroup.path,
-    listenPort: netns.proxyPort,
-  };
-  const proxyHandle = overrides?.proxyHandle ?? fakeProxyHandle(carrier);
-
   return {
     probeOsCaps: vi.fn(async () => caps),
     resolveOsArtifacts: vi.fn(async () => artifacts),
@@ -183,9 +180,6 @@ function makeDeps(overrides?: Partial<{
       launchSpecPath: '/tmp/spec.json',
     })),
     spawnHelper: vi.fn(),
-    proxyLauncher: {
-      launch: vi.fn(async () => proxyHandle),
-    },
   };
 }
 
@@ -259,8 +253,7 @@ describe('OsSandboxBackend persistent process', () => {
     const b = new OsSandboxBackend({ sessionId: 'persist-1', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const proc = await b.spawn({ command: ['/usr/bin/node', '/skill/invoke.js'] });
     // Two newline-delimited requests on the SAME child PID (no new spawn).
@@ -293,8 +286,7 @@ describe('OsSandboxBackend persistent process', () => {
     const b = new OsSandboxBackend({ sessionId: 'to-1', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const result = await b.run({ command: ['/usr/bin/node'], timeoutMs: 30 });
     expect(result.timedOut).toBe(true);
@@ -314,8 +306,7 @@ describe('OsSandboxBackend persistent process', () => {
     const b = new OsSandboxBackend({ sessionId: 'ovf-1', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const proc = await b.spawn({
       command: ['/usr/bin/node'],
@@ -340,8 +331,7 @@ describe('OsSandboxBackend persistent process', () => {
     const b = new OsSandboxBackend({ sessionId: 'cgfail', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await expect(b.prepare(validPrepareOpts(carrier, proxy))).rejects.toThrow(/read-back/);
+    await expect(b.prepare(validPrepareOpts(carrier))).rejects.toThrow(/read-back/);
     // Cannot spawn after failed prepare.
     await expect(b.spawn({ command: ['/usr/bin/node'] })).rejects.toThrow(/before prepare/);
   });
@@ -357,8 +347,7 @@ describe('OsSandboxBackend persistent process', () => {
     const b = new OsSandboxBackend({ sessionId: 'att-1', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
     await expect(b.spawn({ command: ['/usr/bin/node'] })).rejects.toThrow(/read-back/);
     // SIGCONT was never sent; only SIGKILL cleanup.
     const killSigs = (fakeChild.kill as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
