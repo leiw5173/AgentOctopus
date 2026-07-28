@@ -162,15 +162,21 @@ function assertIfName(name: string, what: string): void {
 }
 
 function buildInitialNftRules(nftTable: string): string[] {
-  // Default-drop posture. Loopback + established/related only. No forward
-  // chain, no nat chain, no egress allow — the proxy endpoint is authorized
-  // later via an atomic replace.
+  // Default-drop posture. Loopback + established/related only. A forward-hook
+  // default-drop chain is declared so forwarded traffic is dropped by policy
+  // (it does NOT enable IP forwarding — that is controlled by the
+  // net.ipv4.ip_forward sysctl, which this code never touches). No NAT chain,
+  // no egress allow — the proxy endpoint is authorized later via an atomic
+  // replace that re-declares the forward chain.
   return [
     `table inet ${nftTable} {`,
     `  chain input {`,
     `    type filter hook input priority 0; policy drop;`,
     `    iifname "lo" accept`,
     `    ct state established,related accept`,
+    `  }`,
+    `  chain forward {`,
+    `    type filter hook forward priority 0; policy drop;`,
     `  }`,
     `  chain output {`,
     `    type filter hook output priority 0; policy drop;`,
@@ -191,7 +197,10 @@ function buildAuthorizeProxyRules(
   }
   // Atomic replace of the same table. Output allows NEW TCP only to
   // proxyIp:proxyListenPort; input permits the established return. Drop
-  // everything else. No forward, no NAT.
+  // everything else. The forward-hook default-drop chain is re-declared here
+  // because the atomic replace drops the whole table — omitting it would
+  // remove the forward default-drop. No NAT, no accept rule in the forward
+  // chain, no sysctl mutation.
   return [
     `table inet ${nftTable} {`,
     `  chain input {`,
@@ -199,6 +208,9 @@ function buildAuthorizeProxyRules(
     `    iifname "lo" accept`,
     `    ct state established,related accept`,
     `    ip saddr ${proxyIp} tcp sport ${proxyListenPort} accept`,
+    `  }`,
+    `  chain forward {`,
+    `    type filter hook forward priority 0; policy drop;`,
     `  }`,
     `  chain output {`,
     `    type filter hook output priority 0; policy drop;`,
@@ -213,7 +225,10 @@ function buildAuthorizeProxyRules(
 /**
  * Pure command-plan builder. Returns the argv arrays and nft ruleset text the
  * real setup will execute. Never invokes a shell; never references sysctl,
- * ip_forward, unshare --net, masquerade, snat, dnat, or a forward hook.
+ * ip_forward, unshare --net, masquerade, snat, or dnat. The ruleset declares
+ * a forward-hook default-drop chain (policy drop, no accept rule) — this
+ * drops forwarded traffic but does NOT enable IP forwarding, which is
+ * controlled by net.ipv4.ip_forward and is never mutated here.
  */
 export function buildNetnsCommands(opts: BuildNetnsCommandsOptions): NetnsCommandPlan {
   assertIfName(opts.hostIf, 'hostIf');
@@ -469,7 +484,7 @@ export async function authorizeProxyEndpoint(
   // Substring matching is not sufficient: a missing output rule or a port
   // string coincidentally matching an unrelated chain handle/priority/counter
   // must fail closed.
-  const missing = findMissingProxyRules(parsed, handle.proxyIp, opts.proxyListenPort);
+  const missing = findMissingProxyRules(parsed, handle.proxyIp, opts.proxyListenPort, handle.nftTable);
   if (missing.length > 0) {
     throw new NetnsError(
       `read-back verification failed: table inet ${handle.nftTable} is missing ` +
@@ -502,15 +517,38 @@ interface NftRule {
   };
 }
 
+interface NftChain {
+  chain?: {
+    family?: string;
+    table?: string;
+    name?: string;
+    handle?: number;
+    type?: string;
+    hook?: string;
+    /** nft -j emits `prio` (numeric, sometimes string) for the priority. */
+    prio?: unknown;
+    /** Some builds emit `priority` instead of `prio` — tolerate both. */
+    priority?: unknown;
+    policy?: string;
+  };
+}
+
 /**
  * Inspect a parsed `nft -j list` dump and return a list of missing rules.
- * Returns an empty array when both the output daddr/dport accept rule and
- * the input saddr/sport accept rule are present.
+ * Returns an empty array when ALL of the following hold:
+ *   - the output daddr/dport accept rule is present,
+ *   - the input saddr/sport accept rule is present,
+ *   - a `forward` base chain exists with `type filter`, `hook forward`,
+ *     normalized priority === 0, and `policy drop`.
+ *
+ * Priority normalization: `Number(chain.prio ?? chain.priority) === 0`. nft
+ * emits `prio` in JSON, but tolerate `priority` and string values ("0").
  */
 function findMissingProxyRules(
   parsed: unknown,
   proxyIp: string,
   port: number,
+  nftTable: string,
 ): string[] {
   const missing: string[] = [];
   const nftables = (parsed as { nftables?: unknown[] })?.nftables;
@@ -520,8 +558,34 @@ function findMissingProxyRules(
 
   let hasOutputRule = false;
   let hasInputRule = false;
+  let forwardChainOk = false;
 
   for (const entry of nftables) {
+    // Chain entry: `{ "chain": { family, table, name, handle, type, hook, prio, policy } }`.
+    const chainEntry = (entry as NftChain)?.chain;
+    if (chainEntry) {
+      if (chainEntry.name === 'forward') {
+        const typeOk = chainEntry.type === 'filter';
+        const hookOk = chainEntry.hook === 'forward';
+        const policyOk = chainEntry.policy === 'drop';
+        const prioRaw = chainEntry.prio ?? chainEntry.priority;
+        const prioOk = prioRaw !== undefined && prioRaw !== null && Number(prioRaw) === 0;
+        // Fail closed if the forward chain exists but is malformed — surface a
+        // precise reason so the operator can see which field is wrong.
+        if (typeOk && hookOk && policyOk && prioOk) {
+          forwardChainOk = true;
+        } else {
+          const reasons: string[] = [];
+          if (!typeOk) reasons.push(`type=${chainEntry.type ?? '<missing>'}`);
+          if (!hookOk) reasons.push(`hook=${chainEntry.hook ?? '<missing>'}`);
+          if (!policyOk) reasons.push(`policy=${chainEntry.policy ?? '<missing>'}`);
+          if (!prioOk) reasons.push(`prio=${prioRaw === undefined ? '<missing>' : JSON.stringify(prioRaw)}`);
+          missing.push(`forward chain malformed: ${reasons.join(', ')}`);
+        }
+      }
+      continue;
+    }
+
     const rule = (entry as NftRule)?.rule;
     if (!rule || !Array.isArray(rule.expr)) continue;
     const chain = rule.chain;
@@ -559,6 +623,13 @@ function findMissingProxyRules(
   }
   if (!hasInputRule) {
     missing.push(`input chain rule: ip saddr ${proxyIp} tcp sport ${port} accept`);
+  }
+  if (!forwardChainOk) {
+    // Only emit the "missing" reason if no malformed reason was already pushed.
+    const hasForwardReason = missing.some((m) => m.startsWith('forward chain'));
+    if (!hasForwardReason) {
+      missing.push(`forward chain missing: table inet ${nftTable} must declare a 'forward' base chain with type filter, hook forward, priority 0, policy drop`);
+    }
   }
   return missing;
 }

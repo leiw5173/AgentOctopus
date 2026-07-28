@@ -52,7 +52,10 @@ describe('buildNetnsCommands', () => {
     expect(nft).toContain('ip daddr 169.254.7.1 tcp dport 43123 accept');
     expect(nft).toContain('ip saddr 169.254.7.1 tcp sport 43123 accept');
     expect(nft).toMatch(/policy drop/);
-    expect(nft).not.toMatch(/masquerade|snat|dnat|hook forward/i);
+    // NAT-negative invariant: no masquerade/snat/dnat anywhere.
+    expect(nft).not.toMatch(/masquerade|snat|dnat/i);
+    // A forward-hook default-drop chain MUST be declared (Plan 6 posture).
+    expect(nft).toMatch(/chain forward[^}]*type filter hook forward priority 0; policy drop/s);
     expect(JSON.stringify(p)).not.toMatch(/sysctl|ip_forward|unshare --net/);
   });
 
@@ -87,10 +90,22 @@ describe('buildNetnsCommands', () => {
     expect(s).not.toMatch(/sysctl/i);
     expect(s).not.toMatch(/ip_forward/i);
     expect(s).not.toMatch(/unshare --net/i);
-    expect(s).not.toMatch(/masquerade|snat|dnat|hook forward/i);
-    // No forward chain in initial rules.
-    expect(p.initialNftRules.join('\n')).not.toMatch(/chain forward/i);
-    expect(p.authorizeProxyRules(43210).join('\n')).not.toMatch(/chain forward/i);
+    expect(s).not.toMatch(/masquerade|snat|dnat/i);
+    // A forward-hook default-drop chain MUST be declared in BOTH the initial
+    // and the authorized tables (the authorized table is an atomic replace,
+    // so it has to re-declare the forward chain or the chain would be lost
+    // on authorize).
+    const expectForwardDrop = (rules: string) => {
+      // Whitespace-tolerant: `chain forward { ... type filter hook forward
+      // priority 0; policy drop; ... }` — the inner body has no accept rule.
+      const m = rules.match(/chain forward\s*\{([^}]*)\}/);
+      expect(m).not.toBeNull();
+      const body = m![1];
+      expect(body).toMatch(/type filter hook forward priority 0;\s*policy drop;/);
+      expect(body).not.toMatch(/accept/i);
+    };
+    expectForwardDrop(p.initialNftRules.join('\n'));
+    expectForwardDrop(p.authorizeProxyRules(43210).join('\n'));
   });
 
   it('initial rules drop everything except loopback and established/related — no egress window', () => {
@@ -109,8 +124,9 @@ describe('buildNetnsCommands', () => {
     expect(init).toMatch(/ct state established,related accept/);
     // No egress allow rule for any non-loopback destination.
     expect(init).not.toMatch(/ip daddr .* accept/);
-    // No forward / nat chain.
-    expect(init).not.toMatch(/type filter hook forward/i);
+    // A forward-hook default-drop chain MUST be present (no accept rule inside).
+    expect(init).toMatch(/chain forward[^}]*type filter hook forward priority 0; policy drop/s);
+    // No NAT chain.
     expect(init).not.toMatch(/type nat /i);
   });
 });
@@ -344,6 +360,12 @@ describe('setupNetns (injected fake exec)', () => {
       nftables: [
         { table: { family: 'inet', name: h.nftTable } },
         {
+          chain: {
+            family: 'inet', table: h.nftTable, name: 'forward', handle: 3,
+            type: 'filter', hook: 'forward', prio: 0, policy: 'drop',
+          },
+        },
+        {
           rule: {
             family: 'inet', table: h.nftTable, chain: 'output',
             expr: [
@@ -394,10 +416,59 @@ describe('setupNetns (injected fake exec)', () => {
 });
 
 describe('authorizeProxyEndpoint (injected fake exec)', () => {
-  function buildFakeNftList(host: { proxyIp: string; nftTable: string }, port: number, opts?: { omitOutput?: boolean; bogusPort?: number }): string {
+  /**
+   * Build a forward base chain entry as emitted by `nft -j list`. Accepts a
+   * `variant` so priority-variant tests can mutate one field at a time and
+   * verify the walker's normalization / fail-closed behavior.
+   */
+  function forwardChainEntry(
+    nftTable: string,
+    variant: Partial<{ prio: unknown; priority: unknown; policy: string; hook: string; type: string }> = {},
+  ): { chain: { family: string; table: string; name: string; handle: number; type: string; hook: string; prio: unknown; policy: string } } {
+    return {
+      chain: {
+        family: 'inet',
+        table: nftTable,
+        name: 'forward',
+        handle: 3,
+        type: variant.type ?? 'filter',
+        hook: variant.hook ?? 'forward',
+        prio: variant.prio ?? 0,
+        policy: variant.policy ?? 'drop',
+      },
+    };
+  }
+
+  function buildFakeNftList(
+    host: { proxyIp: string; nftTable: string },
+    port: number,
+    opts?: {
+      omitOutput?: boolean;
+      bogusPort?: number;
+      /** Omit the forward base chain entirely (for fail-closed walker tests). */
+      omitForward?: boolean;
+      /** Mutate the forward chain entry (wrong priority/policy/hook/type). */
+      forwardVariant?: Partial<{ prio: unknown; priority: unknown; policy: string; hook: string; type: string }>;
+    },
+  ): string {
     const rules: unknown[] = [
       { table: { family: 'inet', name: host.nftTable } },
     ];
+    if (!opts?.omitForward) {
+      // When `forwardVariant.priority` (not `prio`) is set, drop `prio` so the
+      // walker exercises the `priority` fallback path.
+      if (opts?.forwardVariant?.priority !== undefined) {
+        const { prio: _drop, ...rest } = opts.forwardVariant;
+        rules.push(forwardChainEntry(host.nftTable, { ...rest, prio: undefined }));
+        // forwardChainEntry sets prio:undefined → undefined falls back to priority
+        // via the `??` chain in the walker. Patch the entry in place.
+        const entry = rules[rules.length - 1] as { chain: Record<string, unknown> };
+        entry.chain.prio = undefined;
+        entry.chain.priority = opts.forwardVariant.priority;
+      } else {
+        rules.push(forwardChainEntry(host.nftTable, opts?.forwardVariant));
+      }
+    }
     if (!opts?.omitOutput) {
       rules.push({
         rule: {
@@ -455,8 +526,16 @@ describe('authorizeProxyEndpoint (injected fake exec)', () => {
       c.argv[0] === 'ip' && c.argv[1] === 'netns' && c.argv[2] === 'exec' &&
       c.argv.includes('nft') && c.argv.includes('-j') && c.argv.includes('list'));
     expect(listCall).toBeDefined();
-    // No forward/nat anywhere.
-    expect(replaceCall!.stdin).not.toMatch(/masquerade|snat|dnat|hook forward/i);
+    // NAT-negative invariant: no masquerade/snat/dnat anywhere in the
+    // authorized ruleset. The forward-hook default-drop chain is expected
+    // (asserted structurally by the read-back walker below).
+    expect(replaceCall!.stdin).not.toMatch(/masquerade|snat|dnat/i);
+    // The authorized ruleset re-declares the forward default-drop chain.
+    expect(replaceCall!.stdin).toMatch(/chain forward[^}]*type filter hook forward priority 0; policy drop/s);
+    // No accept rule lives inside the forward chain body.
+    const fwdBody = replaceCall!.stdin!.match(/chain forward\s*\{([^}]*)\}/);
+    expect(fwdBody).not.toBeNull();
+    expect(fwdBody![1]).not.toMatch(/accept/i);
   });
 
   it('a mismatched proxyListenPort is fatal (refuses to authorize)', async () => {
@@ -495,6 +574,77 @@ describe('authorizeProxyEndpoint (injected fake exec)', () => {
     fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { omitOutput: true, bogusPort: h.proxyPort });
     await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
       .rejects.toThrow(/output chain rule/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Forward-chain read-back walker: priority normalization + fail-closed.
+  // nft -j emits `prio` (numeric, sometimes string) for the priority; some
+  // builds emit `priority` instead. The walker normalizes via
+  // `Number(chain.prio ?? chain.priority) === 0` and tolerates "0" strings.
+  // -------------------------------------------------------------------------
+
+  it('accepts a forward chain with prio:0 (numeric, canonical nft -j output)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess prio0', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { forwardVariant: { prio: 0 } });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .resolves.toBe(h);
+  });
+
+  it('accepts a forward chain with priority:0 (priority-key fallback)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess pk0', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { forwardVariant: { priority: 0 } });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .resolves.toBe(h);
+  });
+
+  it('accepts a forward chain with priority:"0" (string-tolerant normalization)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess pks0', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { forwardVariant: { priority: '0' } });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .resolves.toBe(h);
+  });
+
+  it('fails closed when the forward chain has the wrong priority (prio:1)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess badprio', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { forwardVariant: { prio: 1 } });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .rejects.toThrow(/forward chain malformed.*prio=1/i);
+  });
+
+  it('fails closed when the forward chain has the wrong policy (policy accept)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess badpol', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { forwardVariant: { policy: 'accept' } });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .rejects.toThrow(/forward chain malformed.*policy=accept/i);
+  });
+
+  it('fails closed when the forward chain has the wrong hook (hook input)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess badhook', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { forwardVariant: { hook: 'input' } });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .rejects.toThrow(/forward chain malformed.*hook=input/i);
+  });
+
+  it('fails closed when the forward chain has the wrong type (type route)', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess badtype', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { forwardVariant: { type: 'route' } });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .rejects.toThrow(/forward chain malformed.*type=route/i);
+  });
+
+  it('fails closed when the forward chain is entirely absent from the dump', async () => {
+    const fake = new FakeExec();
+    const h = await setupNetns({ sessionId: 'sess nofwd', exec: fake });
+    fake.nftListOutput = buildFakeNftList(h, h.proxyPort, { omitForward: true });
+    await expect(authorizeProxyEndpoint(h, { proxyListenPort: h.proxyPort, exec: fake }))
+      .rejects.toThrow(/forward chain missing/i);
   });
 });
 
@@ -573,7 +723,21 @@ describe.skipIf(!isLinux)('setupNetns — real Linux netns smoke', () => {
       const blob = JSON.stringify(parsed);
       expect(blob).toContain(String(h.proxyPort));
       expect(blob).toContain(h.proxyIp);
-      expect(blob).not.toMatch(/masquerade|snat|dnat|hook forward/i);
+      // NAT-negative invariant: no masquerade/snat/dnat anywhere.
+      expect(blob).not.toMatch(/masquerade|snat|dnat/i);
+      // Structural forward-chain parse: a `forward` base chain with type
+      // filter, hook forward, normalized priority === 0, policy drop MUST be
+      // present in the read-back dump. The walker already enforces this in
+      // authorizeProxyEndpoint; here we assert the JSON shape directly so a
+      // regression in either the ruleset builder or the walker is caught.
+      const fwdChain = (parsed.nftables as Array<{ chain?: { name?: string; type?: string; hook?: string; prio?: unknown; priority?: unknown; policy?: string } }>)
+        .find((e) => e.chain?.name === 'forward')?.chain;
+      expect(fwdChain).toBeDefined();
+      expect(fwdChain!.type).toBe('filter');
+      expect(fwdChain!.hook).toBe('forward');
+      expect(fwdChain!.policy).toBe('drop');
+      const prioRaw = fwdChain!.prio ?? fwdChain!.priority;
+      expect(Number(prioRaw)).toBe(0);
 
       // Connectivity: a listener bound to proxyIp:proxyPort is reachable
       // from the netns; the same IP on a different port is NOT.
