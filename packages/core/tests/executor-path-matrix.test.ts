@@ -28,6 +28,7 @@ vi.mock('../src/utils.js', () => ({
 
 const CORE_SRC = path.join(__dirname, '..', 'src');
 const ADAPTERS_SRC = path.join(__dirname, '..', '..', 'adapters', 'src');
+const CLI_SRC = path.join(__dirname, '..', '..', '..', 'apps', 'cli', 'src');
 
 function readSrc(dir: string, file: string): string {
   return fs.readFileSync(path.join(dir, file), 'utf-8');
@@ -63,6 +64,74 @@ describe('path-matrix source guards', () => {
     for (const f of ['docker-adapter.ts', 'ssh-adapter.ts', 'openshell-adapter.ts']) {
       expect(fs.existsSync(path.join(ADAPTERS_SRC, 'sandbox', f)), f).toBe(false);
     }
+  });
+
+  // Task 8: bin-allowlist guard. `bin` originates from the UNTRUSTED skill
+  // manifest field metadata.{openclaw,clawdbot}.requires.bins (only
+  // type-checked as string). isBinAvailable is called during ROUTING
+  // (router.ts:248,249,371,447; executor.ts:200) — a pre-sandbox phase — so it
+  // must never interpolate a non-conforming name into a shell string.
+  it('utils.isBinAvailable never interpolates ${bin} into a shell string and uses execFileSync', () => {
+    const utilsSource = readSrc(CORE_SRC, 'utils.ts');
+    expect(utilsSource).not.toMatch(/`[^`]*\$\{bin\}[^`]*`/);
+    expect(utilsSource).not.toMatch(/\bexecSync\b/);
+    expect(utilsSource).toMatch(/execFileSync/);
+    expect(utilsSource).toMatch(/\^\[A-Za-z0-9\]\[A-Za-z0-9\._-\]\*\$/);
+  });
+
+  // Task 8: llm-client fetch is trusted LLM provider egress only
+  // (api.anthropic.com chat / api.openai.com-or-configured-baseUrl embed), NOT
+  // skill-provided content. llm-client is NOT part of the skill-execution
+  // source set. This guard pins that its fetch targets are provider endpoints
+  // only, so a later edit cannot repurpose it for skill HTTP egress.
+  it('llm-client fetch targets only trusted LLM provider endpoints (no skill-provided URLs)', () => {
+    const llmSource = readSrc(CORE_SRC, 'llm-client.ts');
+    // Every fetch( must target a provider endpoint.
+    const fetchLines = llmSource
+      .split('\n')
+      .filter((l) => /\bfetch\s*\(/.test(l));
+    expect(fetchLines.length).toBeGreaterThan(0);
+    for (const line of fetchLines) {
+      expect(line).toMatch(/api\.anthropic\.com|this\.config\.baseUrl/);
+    }
+    // And no axios/http.request/https.request host-network escape hatches.
+    expect(llmSource).not.toMatch(/axios\.|http\.request|https\.request/);
+  });
+
+  // Task 8: apps/cli/src/update.ts execSync is the CLI self-update npm
+  // version check. Its only argument is a package name from the hardcoded
+  // PACKAGES list of @agentoctopus/* scope names the CLI controls — never
+  // skill-provided content. This guard pins that the exec input is only ever
+  // `npm view <controlled-pkg> version` against package names the CLI itself
+  // declares, so a later edit cannot route skill content through it.
+  it('cli update.ts exec input is only npm view against the CLI-controlled @agentoctopus package list', () => {
+    const updateSource = readSrc(CLI_SRC, 'update.ts');
+    // The single exec site is `npm view ${pkg} version` where pkg is drawn
+    // from the PACKAGES constant (all @agentoctopus/* scope).
+    expect(updateSource).toMatch(/npm view \$\{pkg\} version/);
+    // PACKAGES list must contain only @agentoctopus/* scope names.
+    const packagesBlock = updateSource.match(/const PACKAGES = \[([\s\S]*?)\]/);
+    expect(packagesBlock, 'PACKAGES constant must exist in update.ts').not.toBeNull();
+    const items = packagesBlock![1]
+      .split(',')
+      .map((s) => s.trim().replace(/['"`]/g, ''))
+      .filter(Boolean);
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item, `package ${item} must be @agentoctopus/* scope`).toMatch(/^@agentoctopus\//);
+    }
+  });
+
+  // Task 8: onboard.ts legacy openshell option writes (Task 0 schema
+  // tightening, PRE-EXISTING). PARKED to Plan 6 — do NOT fix here. This guard
+  // documents the park: onboard.ts is explicitly OUT of the converged skill-
+  // execution source set. If onboard.ts is later fixed, this assertion can be
+  // strengthened; until then it pins that the legacy option string is the
+  // only openshell reference and there is no execution-path call.
+  it('onboard.ts openshell references are legacy config writes only (parked Plan 6), no execution-path spawn', () => {
+    const onboardSource = readSrc(CLI_SRC, 'onboard.ts');
+    // Legacy option strings only; no host spawn / child_process execution.
+    expect(onboardSource).not.toMatch(/node:child_process|execSync\(|execFileSync\(|cp\.spawn|spawn\(['"]bash/);
   });
 });
 
