@@ -3,9 +3,9 @@
  * security-cleanup-linux.mjs — idempotent teardown of stale session artifacts
  * left behind by a failed/interrupted privileged run:
  *
- *   - named network namespaces   `octn-*`      (ip netns)
- *   - per-session nft tables     `oct_*`       (inet family)
- *   - per-session cgroup v2 dirs `oct-*`       (/sys/fs/cgroup)
+ *   - named network namespaces   `octn-*` / legacy `octns-*`
+ *   - per-session nft tables     `oct_*` / legacy `octsbx_*`
+ *   - per-session cgroup v2 dirs `oct-*`, `oct-sbx-*`, `octsbx-*`
  *
  * Naming matches Plan 4 (os/netns.ts deriveNames, os/cgroup.ts deriveName).
  *
@@ -20,10 +20,14 @@ import path from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
-const NETNS_PREFIX = 'octn-';
-const NFT_PREFIX = 'oct_';
-const CGROUP_PREFIX = 'oct-';
-const CGROUP_ROOT = '/sys/fs/cgroup';
+const NETNS_PREFIXES = ['octn-', 'octns-'];
+const NFT_PREFIXES = ['oct_', 'octsbx_'];
+const CGROUP_PREFIXES = ['oct-', 'oct-sbx-', 'octsbx-'];
+const CGROUP_ROOT = process.env.OCTOPUS_TEST_CGROUP_PARENT || '/sys/fs/cgroup';
+
+function hasPrefix(name, prefixes) {
+  return prefixes.some((prefix) => name.startsWith(prefix));
+}
 
 let cleaned = 0;
 const warnings = [];
@@ -53,7 +57,7 @@ async function cleanNetns() {
   if (list.code !== 0) return; // iproute2 absent or no privilege — nothing we can do.
   for (const line of list.stdout.split('\n')) {
     const name = line.trim().split(/\s+/)[0];
-    if (!name || !name.startsWith(NETNS_PREFIX)) continue;
+    if (!name || !hasPrefix(name, NETNS_PREFIXES)) continue;
     const del = await run(['ip', 'netns', 'delete', name]);
     if (del.code === 0) cleaned++;
     else warn(`ip netns delete ${name}: ${del.stderr.trim() || del.stdout.trim()}`);
@@ -74,7 +78,7 @@ async function cleanNft() {
     return; // unparsable — do not guess.
   }
   for (const name of tables) {
-    if (!name.startsWith(NFT_PREFIX)) continue;
+    if (!hasPrefix(name, NFT_PREFIXES)) continue;
     const del = await run(['nft', 'delete', 'table', 'inet', name]);
     if (del.code === 0) cleaned++;
     else warn(`nft delete table inet ${name}: ${del.stderr.trim() || del.stdout.trim()}`);
@@ -90,7 +94,7 @@ async function cleanCgroups() {
     return; // cgroup v2 not mounted/readable — nothing to clean.
   }
   for (const e of entries) {
-    if (!e.isDirectory() || !e.name.startsWith(CGROUP_PREFIX)) continue;
+    if (!e.isDirectory() || !hasPrefix(e.name, CGROUP_PREFIXES)) continue;
     const dir = path.join(CGROUP_ROOT, e.name);
     // Reap any stragglers, then remove. Best-effort; cgroup.kill may be absent.
     try {

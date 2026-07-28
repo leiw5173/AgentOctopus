@@ -20,6 +20,10 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   validate-gate:
     name: 🔐 Validate Publish Gate
@@ -31,22 +35,24 @@ jobs:
         run: |
           echo "ERROR: Publish must be triggered from master branch."
           exit 1
-      - name: Validate preflight run ID exists
-        run: |
-          gh run view ${{ inputs.preflight_run_id }} --json name,status,conclusion > /tmp/preflight-check.json
-          NAME=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/preflight-check.json','utf8')).name")
-          CONCLUSION=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/preflight-check.json','utf8')).conclusion")
-          if [ "$NAME" != "Release Preflight" ]; then
-            echo "ERROR: Run ${{ inputs.preflight_run_id }} is not a Release Preflight run."
-            exit 1
-          fi
-          if [ "$CONCLUSION" != "success" ]; then
-            echo "ERROR: Preflight run ${{ inputs.preflight_run_id }} did not succeed (conclusion: $CONCLUSION)."
-            exit 1
-          fi
-          echo "OK: Preflight run ${{ inputs.preflight_run_id }} is valid."
+      - name: Validate preflight run exists and succeeded
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PREFLIGHT_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: preflight run ID must be a positive integer.' >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID" > /tmp/preflight-run.json
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const run = JSON.parse(readFileSync('/tmp/preflight-run.json', 'utf8'));
+          if (run.name !== 'Release Preflight') throw new Error(`run ${run.id} is not Release Preflight`);
+          if (run.status !== 'completed' || run.conclusion !== 'success') {
+            throw new Error(`preflight run ${run.id} did not succeed (status=${run.status}, conclusion=${run.conclusion})`);
+          }
+          console.log(`Preflight run ${run.id} completed successfully; artifact security metadata will be independently verified before publish.`);
+          NODE
 
   publish:
     name: 🚀 Publish to npm
@@ -57,6 +63,7 @@ jobs:
       contents: write
       actions: read
     env:
+      NPM_DIST_TAG: ${{ inputs.npm_dist_tag }}
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
     steps:
@@ -73,82 +80,128 @@ jobs:
           run-id: ${{ inputs.preflight_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify provenance
+      - name: Verify preflight provenance and sandbox security gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREFLIGHT_RUN_ID: ${{ inputs.preflight_run_id }}
+        shell: bash
         run: |
-          CURRENT_SHA=$(git rev-parse HEAD)
-          ARTIFACT_SHA=$(cat /tmp/preflight/release-sha.txt)
-          ARTIFACT_TAG=$(cat /tmp/preflight/release-tag.txt)
-          ARTIFACT_VERSION=$(cat /tmp/preflight/release-version.txt)
+          set -euo pipefail
+          test -f /tmp/preflight/security-metadata.json
+          test -f /tmp/preflight/release-sha.txt
+          test -f /tmp/preflight/release-tag.txt
+          test -f /tmp/preflight/release-version.txt
 
-          echo "Current SHA:  $CURRENT_SHA"
-          echo "Artifact SHA: $ARTIFACT_SHA"
-          echo "Artifact tag: $ARTIFACT_TAG"
-          echo "Artifact version: $ARTIFACT_VERSION"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID" > /tmp/preflight-run.json
 
-          if [ "$CURRENT_SHA" != "$ARTIFACT_SHA" ]; then
-            echo "⚠️  SHA differs from preflight (commits were pushed since preflight ran)."
-            echo "Publishing preflight's tarballs (SHA: $ARTIFACT_SHA)."
-          else
-            echo "OK: SHA matches preflight."
+          RUN_ATTEMPT=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/preflight-run.json','utf8')).run_attempt")
+          [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: invalid preflight run attempt.' >&2; exit 1; }
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" > /tmp/preflight-job-pages.json
+
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const pages = JSON.parse(readFileSync('/tmp/preflight-job-pages.json', 'utf8'));
+          if (!Array.isArray(pages)) throw new Error('GitHub jobs response is not a paginated array');
+          const jobs = pages.flatMap((page) => Array.isArray(page.jobs) ? page.jobs : []);
+          writeFileSync('/tmp/preflight-jobs.json', JSON.stringify({ total_count: jobs.length, jobs }, null, 2) + '\n');
+          NODE
+
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const metadata = JSON.parse(readFileSync('/tmp/preflight/security-metadata.json', 'utf8'));
+          const run = JSON.parse(readFileSync('/tmp/preflight-run.json', 'utf8'));
+          const jobs = JSON.parse(readFileSync('/tmp/preflight-jobs.json', 'utf8'));
+          writeFileSync('/tmp/publish-gate-input.json', JSON.stringify({
+            expectedRunId: process.env.PREFLIGHT_RUN_ID,
+            metadata,
+            run,
+            jobs,
+          }, null, 2) + '\n');
+          NODE
+
+          node packages/sandbox/scripts/validate-publish-gate.mjs /tmp/publish-gate-input.json
+
+          ARTIFACT_SHA=$(tr -d '\r\n' < /tmp/preflight/release-sha.txt)
+          SECURITY_SHA=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/preflight/security-metadata.json','utf8')).securitySha")
+          if [ "$ARTIFACT_SHA" != "$SECURITY_SHA" ]; then
+            echo 'ERROR: release tarball SHA does not match the recorded security SHA.' >&2
+            exit 1
           fi
+          echo "Verified release tarballs and sandbox security gate for SHA $SECURITY_SHA."
+
+      - name: Publish @agentoctopus/sandbox
+        run: |
+          for i in 1 2 3; do
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-sandbox-*.tgz && exit 0
+            echo "Attempt $i failed, retrying in $((10 * i))s..."
+            sleep $((10 * i))
+          done
+          exit 1
 
       - name: Publish @agentoctopus/skills
         run: |
           for i in 1 2 3; do
-            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-skills-*.tgz && break
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-skills-*.tgz && exit 0
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
+          exit 1
 
       - name: Publish @agentoctopus/registry
         run: |
           for i in 1 2 3; do
-            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-registry-*.tgz && break
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-registry-*.tgz && exit 0
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
+          exit 1
 
       - name: Publish @agentoctopus/adapters
         run: |
           for i in 1 2 3; do
-            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-adapters-*.tgz && break
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-adapters-*.tgz && exit 0
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
+          exit 1
 
       - name: Publish @agentoctopus/core
         run: |
           for i in 1 2 3; do
-            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-core-*.tgz && break
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-core-*.tgz && exit 0
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
+          exit 1
 
       - name: Publish @agentoctopus/gateway
         run: |
           for i in 1 2 3; do
-            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-gateway-*.tgz && break
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-gateway-*.tgz && exit 0
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
+          exit 1
 
       - name: Publish @agentoctopus/cli
         run: |
           for i in 1 2 3; do
-            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-cli-*.tgz && break
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-cli-*.tgz && exit 0
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
+          exit 1
 
       - name: Publish agentoctopus (umbrella)
         run: |
           # Use [0-9] glob pattern to only match agentoctopus-X.Y.Z.tgz
           # and NOT the scoped packages (agentoctopus-skills-X.Y.Z.tgz etc.)
           for i in 1 2 3; do
-            npm publish --access public --tag ${{ inputs.npm_dist_tag }} /tmp/preflight/agentoctopus-[0-9]*.tgz && break
+            npm publish --access public --tag "$NPM_DIST_TAG" /tmp/preflight/agentoctopus-[0-9]*.tgz && exit 0
             echo "Attempt $i failed, retrying in $((10 * i))s..."
             sleep $((10 * i))
           done
+          exit 1
 
       - name: Extract changelog entry
         id: changelog
@@ -183,10 +236,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Package | Version | Tag |" >> $GITHUB_STEP_SUMMARY
           echo "| ------- | ------- | --- |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`@agentoctopus/skills\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`@agentoctopus/registry\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`@agentoctopus/adapters\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`@agentoctopus/core\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`@agentoctopus/gateway\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`@agentoctopus/cli\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`agentoctopus\` | \`$VERSION\` | \`${{ inputs.npm_dist_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/sandbox\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/skills\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/registry\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/adapters\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/core\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/gateway\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`@agentoctopus/cli\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`agentoctopus\` | \`$VERSION\` | \`$NPM_DIST_TAG\` |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,149 @@
+name: Sandbox Security
+
+on:
+  pull_request:
+  push:
+    branches: [master, feat/sandbox]
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      runtime_digest:
+        description: Immutable local runtime image ID tested by the hosted lane
+        value: ${{ jobs.hosted-docker-proxy.outputs.runtime_digest }}
+      proxy_digest:
+        description: Immutable local proxy image ID tested by the hosted lane
+        value: ${{ jobs.hosted-docker-proxy.outputs.proxy_digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-docker-proxy:
+    name: hosted-docker-proxy
+    runs-on: ubuntu-latest
+    outputs:
+      runtime_digest: ${{ steps.images.outputs.runtime_digest }}
+      proxy_digest: ${{ steps.images.outputs.proxy_digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+      - name: Build package and immutable local test images
+        id: images
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --filter @agentoctopus/sandbox build
+          env_file="$(mktemp)"
+          pnpm --silent --filter @agentoctopus/sandbox security:images -- --print-env > "$env_file"
+
+          runtime_digest=''
+          proxy_digest=''
+          while IFS='=' read -r name value; do
+            case "$name" in
+              OCTOPUS_TEST_RUNTIME_IMAGE) runtime_digest="$value" ;;
+              OCTOPUS_TEST_PROXY_IMAGE) proxy_digest="$value" ;;
+              '') ;;
+              *) echo "ERROR: unexpected security image output name: $name" >&2; exit 1 ;;
+            esac
+          done < "$env_file"
+          rm -f "$env_file"
+
+          digest_re='^sha256:[0-9a-f]{64}$'
+          [[ "$runtime_digest" =~ $digest_re ]] || { echo 'ERROR: runtime image ID is not immutable' >&2; exit 1; }
+          [[ "$proxy_digest" =~ $digest_re ]] || { echo 'ERROR: proxy image ID is not immutable' >&2; exit 1; }
+
+          printf 'OCTOPUS_TEST_RUNTIME_IMAGE=%s\n' "$runtime_digest" >> "$GITHUB_ENV"
+          printf 'OCTOPUS_TEST_PROXY_IMAGE=%s\n' "$proxy_digest" >> "$GITHUB_ENV"
+          printf 'runtime_digest=%s\n' "$runtime_digest" >> "$GITHUB_OUTPUT"
+          printf 'proxy_digest=%s\n' "$proxy_digest" >> "$GITHUB_OUTPUT"
+      - name: Run hosted sandbox Docker, proxy, and identity lanes
+        run: |
+          pnpm --filter @agentoctopus/sandbox exec vitest run \
+            tests/security/harness.test.ts \
+            tests/security/image-contract.test.ts \
+            tests/security/docker-lane.test.ts \
+            tests/security/docker-topology.test.ts \
+            tests/security/proxy-lane.test.ts \
+            tests/security/identity-lane.test.ts \
+            --reporter=verbose
+      - name: Run MCP stdio over the production Docker sandbox path
+        run: pnpm --filter @agentoctopus/core exec vitest run tests/mcp-stdio-docker-e2e.test.ts --reporter=verbose
+
+  privileged-linux:
+    name: privileged-linux
+    runs-on: [self-hosted, linux, x64, sandbox-privileged]
+    env:
+      OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
+      OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+      - name: Clean stale privileged state before the lane
+        run: pnpm --filter @agentoctopus/sandbox security:cleanup-linux
+      - name: Restore provisioned verified Linux runtime artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR:?runner must set OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}"
+          install -d -m 0755 packages/sandbox/runtime
+          for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
+            test -f "$OCTOPUS_CI_RUNTIME_ARTIFACT_DIR/$file"
+            install -m 0644 "$OCTOPUS_CI_RUNTIME_ARTIFACT_DIR/$file" "packages/sandbox/runtime/$file"
+          done
+          chmod 0755 packages/sandbox/runtime/os-helper
+      - name: Build package and Linux proxy artifact
+        run: |
+          pnpm --filter @agentoctopus/sandbox build
+          node packages/sandbox/scripts/bundle-egress-proxy.mjs
+      - name: Require real privileged Linux capability
+        run: pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
+      - name: Run privileged Linux lanes with zero skips
+        run: |
+          pnpm --filter @agentoctopus/sandbox exec vitest run \
+            tests/security/linux-lane.test.ts \
+            tests/security/linux-topology.test.ts \
+            --reporter=json --outputFile=/tmp/linux-security.json
+          node packages/sandbox/scripts/assert-no-skipped-tests.mjs /tmp/linux-security.json
+      - name: Clean stale privileged state after the lane
+        if: always()
+        shell: bash
+        run: |
+          pnpm --filter @agentoctopus/sandbox security:cleanup-linux
+          if command -v docker >/dev/null 2>&1; then
+            while IFS= read -r container; do
+              test -z "$container" || docker rm -f "$container" || true
+            done < <(docker ps -aq --filter 'name=octopus-' 2>/dev/null || true)
+            while IFS= read -r network; do
+              case "$network" in
+                octopus-sbx-*|oct-sbx-*|octsbx-*) docker network rm "$network" || true ;;
+              esac
+            done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
+          fi
+          rm -rf packages/sandbox/runtime packages/sandbox/build
+
+  macos-restricted:
+    name: macos-restricted
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+      - name: Build sandbox package
+        run: pnpm --filter @agentoctopus/sandbox build
+      - name: Run macOS restricted or fail-closed unavailable branch
+        run: pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/macos-restricted-lane.test.ts --reporter=verbose
+
+  security-gate:
+    name: security-gate
+    if: always()
+    needs: [hosted-docker-proxy, privileged-linux, macos-restricted]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every security lane
+        env:
+          HOSTED_RESULT: ${{ needs.hosted-docker-proxy.result }}
+          LINUX_RESULT: ${{ needs.privileged-linux.result }}
+          MACOS_RESULT: ${{ needs.macos-restricted.result }}
+        run: |
+          test "$HOSTED_RESULT" = success
+          test "$LINUX_RESULT" = success
+          test "$MACOS_RESULT" = success
