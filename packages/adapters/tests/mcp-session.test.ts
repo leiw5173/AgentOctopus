@@ -69,6 +69,13 @@ function makeFakeMcpServer(toolName: string) {
   const parse = createFrameParser((m) => respond(m));
   stdin.on('data', (chunk) => parse(chunk as Uint8Array));
 
+  const exitResult: BackendRunResult = {
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+    timedOut: false,
+    meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
+  };
   const proc = {
     stdin,
     stdout,
@@ -79,16 +86,14 @@ function makeFakeMcpServer(toolName: string) {
       closeCount++;
       stdout.end();
       stderr.end();
-      resolveExited({
-        exitCode: 0,
-        stdout: '',
-        stderr: '',
-        timedOut: false,
-        meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
-      });
+      resolveExited(exitResult);
     },
   };
-  return { proc, getCloseCount: () => closeCount };
+  return {
+    proc,
+    getCloseCount: () => closeCount,
+    peerExit: () => resolveExited(exitResult),
+  };
 }
 
 class SessionPort implements BoundSandboxExecutionPort {
@@ -122,6 +127,10 @@ class SessionPort implements BoundSandboxExecutionPort {
 
   get stderrBuf() {
     return this.server.proc.stderr;
+  }
+
+  peerExit() {
+    this.server.peerExit();
   }
 }
 
@@ -165,6 +174,24 @@ describe('SandboxMcpTransport session', () => {
     const transport = new SandboxMcpTransport({ port, command: ['x'], timeoutMs: 5000 });
     await transport.start();
     await transport.close();
+    await transport.close();
+    expect(port.closeCount).toBe(1);
+  });
+
+  it('peer exit closes the runner-owned session exactly once before onclose', async () => {
+    const port = new SessionPort();
+    const transport = new SandboxMcpTransport({ port, command: ['x'], timeoutMs: 5000 });
+    let observedCloseCount = -1;
+    transport.onclose = () => {
+      observedCloseCount = port.closeCount;
+    };
+
+    await transport.start();
+    port.peerExit();
+    await new Promise((r) => setImmediate(r));
+
+    expect(port.closeCount).toBe(1);
+    expect(observedCloseCount).toBe(1);
     await transport.close();
     expect(port.closeCount).toBe(1);
   });

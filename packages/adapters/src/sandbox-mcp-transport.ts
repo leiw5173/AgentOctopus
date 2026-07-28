@@ -40,6 +40,7 @@ export class SandboxMcpTransport implements Transport {
   private session: SandboxSessionHandle | undefined;
   private started = false;
   private closed = false;
+  private closing: Promise<void> | undefined;
 
   constructor(private readonly opts: SandboxMcpTransportOptions) {}
 
@@ -84,7 +85,7 @@ export class SandboxMcpTransport implements Transport {
       .then(() => this.handleProcessEnd())
       .catch((err) => {
         this.onerror?.(err instanceof Error ? err : new Error(String(err)));
-        this.handleProcessEnd();
+        return this.handleProcessEnd();
       });
   }
 
@@ -101,11 +102,16 @@ export class SandboxMcpTransport implements Transport {
   }
 
   /** Close the process exactly once; the session owner cleans backend/proxy. */
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
     this.closed = true;
     const session = this.session;
     this.session = undefined;
+    this.closing = this.finishClose(session);
+    return this.closing;
+  }
+
+  private async finishClose(session: SandboxSessionHandle | undefined): Promise<void> {
     try {
       await session?.close();
     } finally {
@@ -113,10 +119,18 @@ export class SandboxMcpTransport implements Transport {
     }
   }
 
-  private handleProcessEnd(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.session = undefined;
-    this.onclose?.();
+  /**
+   * A peer exit closes the transport AND releases the runner-owned session.
+   * Keeping cleanup here is essential: after the process has exited there may
+   * be no later explicit close() call, and the session owns backend topology +
+   * proxy teardown. close() memoizes the operation, so an explicit close racing
+   * peer exit joins the same cleanup and onclose fires exactly once.
+   */
+  private async handleProcessEnd(): Promise<void> {
+    try {
+      await this.close();
+    } catch (err) {
+      this.onerror?.(err instanceof Error ? err : new Error(String(err)));
+    }
   }
 }
