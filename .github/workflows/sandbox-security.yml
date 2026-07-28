@@ -73,6 +73,40 @@ jobs:
       - name: Run MCP stdio over the production Docker sandbox path
         run: pnpm --filter @agentoctopus/core exec vitest run tests/mcp-stdio-docker-e2e.test.ts --reporter=verbose
 
+  produce-linux-artifacts:
+    name: produce-linux-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+      - name: Provision toolchain for reviewed Linux OS artifacts
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd tar gcc libc6-dev
+      - name: Build the reviewed Linux runtime rootfs and OS helper
+        run: |
+          set -euo pipefail
+          node packages/sandbox/scripts/build-runtime-rootfs.mjs
+          node packages/sandbox/scripts/build-os-helper.mjs
+      - name: Verify the canonical artifact set is complete
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
+            test -f "packages/sandbox/runtime/$file" || { echo "ERROR: missing artifact packages/sandbox/runtime/$file" >&2; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-os-runtime-artifacts
+          path: |
+            packages/sandbox/runtime/linux-node22.rootfs.tar.zst
+            packages/sandbox/runtime/linux-node22.manifest.json
+            packages/sandbox/runtime/os-helper
+            packages/sandbox/runtime/os-helper.manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
   privileged-linux:
     name: privileged-linux
     # Trust boundary: self-hosted privileged runners must never execute code
@@ -80,41 +114,67 @@ jobs:
     # workflow_call runs (event_name is not pull_request) all execute the lane;
     # fork PRs get the hosted and macOS lanes only.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [produce-linux-artifacts]
     runs-on: [self-hosted, linux, x64, sandbox-privileged]
     env:
       OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
       OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
+      # probePrivilegedLinux() (harness) reads its canonical manifests from
+      # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it.
+      OCTOPUS_OS_PROBE_MANIFEST_ROOT: packages/sandbox/runtime
     steps:
       - uses: actions/checkout@v7
-      - name: Require privileged Linux lane files
+      - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
           set -euo pipefail
           missing=()
-          for file in tests/security/linux-lane.test.ts tests/security/linux-topology.test.ts; do
+          for file in tests/security/linux-lane-setup.ts tests/security/linux-lane.test.ts tests/security/linux-topology.test.ts; do
             if [ ! -f "packages/sandbox/$file" ]; then
               missing+=("packages/sandbox/$file")
             fi
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "ERROR: privileged Linux security lane not yet landed — missing: ${missing[*]}" >&2
-            echo "The lane is authored against fixed filenames but blocked on the supplemental Linux OS orchestration fixes (Task #19). This mandatory gate fails loudly until the lane lands and passes." >&2
+            echo "ERROR: privileged Linux security lane missing files: ${missing[*]}" >&2
             exit 1
           fi
       - uses: ./.github/actions/setup-node-env
       - name: Clean stale privileged state before the lane
         run: pnpm --filter @agentoctopus/sandbox security:cleanup-linux
-      - name: Restore provisioned verified Linux runtime artifacts
+      - name: Restore provisioned verified Linux runtime artifacts (runner-managed, preferred)
+        id: restore-runner
         shell: bash
         run: |
           set -euo pipefail
-          : "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR:?runner must set OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}"
+          if [ -z "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR:-}" ]; then
+            echo 'managed=false' >> "$GITHUB_OUTPUT"
+            echo 'OCTOPUS_CI_RUNTIME_ARTIFACT_DIR is not set; falling back to the same-run producer artifact.'
+            exit 0
+          fi
           install -d -m 0755 packages/sandbox/runtime
           for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
             test -f "$OCTOPUS_CI_RUNTIME_ARTIFACT_DIR/$file"
             install -m 0644 "$OCTOPUS_CI_RUNTIME_ARTIFACT_DIR/$file" "packages/sandbox/runtime/$file"
           done
           chmod 0755 packages/sandbox/runtime/os-helper
+          echo 'managed=true' >> "$GITHUB_OUTPUT"
+      - name: Download reviewed Linux runtime artifacts from the same-run producer (fallback)
+        if: steps.restore-runner.outputs.managed != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-os-runtime-artifacts
+          path: packages/sandbox/runtime
+      - name: Enforce canonical Linux runtime artifacts are present (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 0755 packages/sandbox/runtime/os-helper
+          for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
+            if [ ! -f "packages/sandbox/runtime/$file" ]; then
+              echo "ERROR: canonical artifact packages/sandbox/runtime/$file is absent after restore — provisioning is broken (C4)" >&2
+              exit 1
+            fi
+          done
       - name: Build package and Linux proxy artifact
         run: |
           pnpm --filter @agentoctopus/sandbox build
@@ -170,16 +230,23 @@ jobs:
   security-gate:
     name: security-gate
     if: always()
-    needs: [hosted-docker-proxy, privileged-linux, macos-restricted]
+    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted]
     runs-on: ubuntu-latest
     steps:
       - name: Require every security lane
         env:
           HOSTED_RESULT: ${{ needs.hosted-docker-proxy.result }}
+          PRODUCER_RESULT: ${{ needs.produce-linux-artifacts.result }}
           LINUX_RESULT: ${{ needs.privileged-linux.result }}
           MACOS_RESULT: ${{ needs.macos-restricted.result }}
         run: |
           test "$HOSTED_RESULT" = success
+          # The producer may be skipped only when the privileged lane itself
+          # is skipped (fork PRs); otherwise it must succeed — the privileged
+          # lane's fallback restore consumes its artifact.
+          if [ "$LINUX_RESULT" != skipped ]; then
+            test "$PRODUCER_RESULT" = success
+          fi
           # privileged-linux is skipped only for fork pull requests (trust
           # boundary gate); push/workflow_dispatch/workflow_call runs must
           # execute and succeed.

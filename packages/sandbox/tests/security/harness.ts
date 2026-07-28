@@ -316,6 +316,18 @@ export async function probeDocker(): Promise<CapabilityResult> {
 // ---- probePrivilegedLinux --------------------------------------------------
 
 /**
+ * Canonical reviewed-artifact names. These are the ONLY names the privileged
+ * Linux lane provisions (`OCTOPUS_CI_RUNTIME_ARTIFACT_DIR` → `runtime/`) and
+ * the ONLY names `resolveOsArtifacts()` looks up by default. The old generic
+ * names (`runtime.manifest.json`, `helper.manifest.json`, `helper`) are NOT
+ * probed — if a root holds only those, the probe reports unavailable with a
+ * reason so a stale provisioning can never be silently trusted.
+ */
+export const OS_RUNTIME_MANIFEST_NAME = 'linux-node22.manifest.json';
+export const OS_HELPER_MANIFEST_NAME = 'os-helper.manifest.json';
+export const OS_HELPER_BINARY_NAME = 'os-helper';
+
+/**
  * Delegate to Plan 4's `probeOsCaps()` — the single real-privilege probe
  * owner. `available` is true ONLY when `fullLevel(caps) === 'full'`, i.e. the
  * host PROVED (via real netns/veth/nft/cgroup create+cleanup) that it can grant
@@ -337,16 +349,27 @@ export async function probePrivilegedLinux(): Promise<CapabilityResult> {
   if (!root) {
     return { available: false, reason: 'probeOsCaps unavailable: OCTOPUS_OS_PROBE_MANIFEST_ROOT not set' };
   }
-  const runtimeManifestPath = join(root, 'runtime.manifest.json');
-  const helperManifestPath = join(root, 'helper.manifest.json');
-  // Fail fast if the manifests are not present — do NOT hand probeOsCaps a
-  // missing path that it would itself throw on (it expects real files).
-  const manifestProbe = await runArgv(['test', '-f', runtimeManifestPath, '-a', '-f', helperManifestPath], 5_000);
+  const runtimeManifestPath = join(root, OS_RUNTIME_MANIFEST_NAME);
+  const helperManifestPath = join(root, OS_HELPER_MANIFEST_NAME);
+  const helperBinaryPath = join(root, OS_HELPER_BINARY_NAME);
+  // Fail fast if the manifests/helper are not present — do NOT hand
+  // probeOsCaps a missing path that it would itself throw on (it expects real
+  // files). Fail closed on absence: the mandatory privileged lane must never
+  // silently downgrade to a fabricated probe.
+  const manifestProbe = await runArgv(
+    ['test', '-f', runtimeManifestPath, '-a', '-f', helperManifestPath, '-a', '-f', helperBinaryPath],
+    5_000,
+  );
   if (manifestProbe.code !== 0) {
-    return { available: false, reason: `probeOsCaps unavailable: manifests not found under ${root}` };
+    return {
+      available: false,
+      reason:
+        `probeOsCaps unavailable: canonical artifacts (${OS_RUNTIME_MANIFEST_NAME}, ` +
+        `${OS_HELPER_MANIFEST_NAME}, ${OS_HELPER_BINARY_NAME}) not found under ${root}`,
+    };
   }
   try {
-    const caps = await probeOsCaps({ runtimeManifestPath, helperManifestPath });
+    const caps = await probeOsCaps({ runtimeManifestPath, helperManifestPath, helperBinaryPath });
     if (fullLevel(caps) === 'full') {
       return { available: true };
     }

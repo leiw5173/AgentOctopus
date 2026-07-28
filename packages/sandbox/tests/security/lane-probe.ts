@@ -10,22 +10,36 @@
  * no /etc/passwd, no curl/wget. The runtime image ships none of those, so
  * asserting against them would be a tautology.
  *
+ * Action delivery: the OS backend deliberately strips caller env (the helper
+ * clears the environment and installs only a tiny SAFE allowlist), so the
+ * action is passed as the SECOND argv element after the script path
+ * (`node /skill/probe.js <action>`). The Docker backend passes it via the
+ * `PROBE_ACTION` env var. The probe accepts BOTH (`process.argv[2] ??
+ * process.env.PROBE_ACTION`) so one script serves both lanes.
+ *
  * Actions:
  *   argv              — { argv: process.argv.slice(2) }  (exact argv, no entrypoint mangling)
  *   host-canary-read  — { ok: boolean }  (true only if the unmounted canary was READABLE)
  *   host-canary-write — { ok: boolean }  (true only if the unmounted canary was WRITABLE)
  *   direct-internet   — { ok: boolean }  (true only if a raw TCP connect to the internet succeeded)
+ *   net-probe         — { ok: boolean }  (argv-driven: `probe.js net-probe <host> <port>`;
+ *                         the OS-lane TCP probe that works with env stripped)
  *   metadata          — { ok: boolean }  (true only if the cloud IMDS endpoint was reachable)
  *   env-names         — { names: string[] }  (env var NAMES only, never values)
+ *   ca-ro-probe       — { ok: boolean, mode, writeErr }  (read /etc/skill-ca/ca.pem,
+ *                         report stat mode + whether a write succeeded; ok=false when
+ *                         the write SUCCEEDED — a read-only violation)
+ *   pids-flood        — { ok: boolean, spawned, failErr }  (fork-bomb against
+ *                         pids.max=64; ok=false when MORE than 63 spawns succeeded)
  *   output-flood      — write deterministic chunks to stdout until killed
  *   process-tree      — spawn a detached grandchild, then block the parent forever
  *   block             — block forever (used for cgroup/inspect assertions)
  */
-export const LANE_PROBE_SCRIPT = `import { readFileSync, writeFileSync } from 'node:fs';
+export const LANE_PROBE_SCRIPT = `import { readFileSync, writeFileSync, statSync } from 'node:fs';
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
 
-const action = process.env.PROBE_ACTION;
+const action = process.argv[2] ?? process.env.PROBE_ACTION;
 const emit = (obj) => { process.stdout.write(JSON.stringify(obj) + '\\n'); };
 
 function tcpOk(host, port, ms) {
@@ -43,16 +57,32 @@ if (action === 'argv') {
 
 if (action === 'host-canary-read') {
   const p = process.env.HOST_CANARY_PATH;
+  // No env path under the OS backend: the host canary path is a HOST path
+  // that is simply absent inside the chrooted runtime — the probe's own
+  // absence (can't even be told the path) IS the containment proof, so emit
+  // ok:false. A leak would require the backend to mount host paths, in which
+  // case the lane's separate read of the canary content catches it.
   let ok = false;
-  try { readFileSync(p, 'utf8'); ok = true; } catch { ok = false; }
-  emit({ ok });
+  if (p) { try { readFileSync(p, 'utf8'); ok = true; } catch { ok = false; } }
+  emit({ ok, envPath: Boolean(p) });
   process.exit(0);
 }
 
 if (action === 'host-canary-write') {
   const p = process.env.HOST_CANARY_PATH;
   let ok = false;
-  try { writeFileSync(p, 'overwritten-by-probe'); ok = true; } catch { ok = false; }
+  if (p) { try { writeFileSync(p, 'overwritten-by-probe'); ok = true; } catch { ok = false; } }
+  emit({ ok, envPath: Boolean(p) });
+  process.exit(0);
+}
+
+if (action === 'net-probe') {
+  // OS-lane TCP probe: target comes from argv (env is stripped). Usage:
+  //   node /skill/probe.js net-probe <host> <port>
+  const host = process.argv[3];
+  const port = Number(process.argv[4]);
+  if (!host || !Number.isInteger(port) || port <= 0) { emit({ ok: false, error: 'bad-args' }); process.exit(0); }
+  const ok = await tcpOk(host, port, 4000);
   emit({ ok });
   process.exit(0);
 }
@@ -65,7 +95,8 @@ if (action === 'direct-internet') {
 
 if (action === 'metadata') {
   // Cloud instance-metadata endpoint (link-local). Must be unreachable: the
-  // runtime is on an --internal network with no route off-box.
+  // skill's netns has no route off-box and the nft output chain drops
+  // everything except the proxy.
   const ok = await tcpOk('169.254.169.254', 80, 4000);
   emit({ ok });
   process.exit(0);
@@ -74,6 +105,39 @@ if (action === 'metadata') {
 if (action === 'env-names') {
   emit({ names: Object.keys(process.env) });
   process.exit(0);
+}
+
+if (action === 'ca-ro-probe') {
+  // Read the session CA at the runtime contract path and prove it is mounted
+  // read-only: report the stat mode and whether a write SUCCEEDED. ok=false
+  // when the write succeeded (a read-only violation).
+  const p = '/etc/skill-ca/ca.pem';
+  let mode = -1;
+  let writeErr = 'none';
+  let wrote = false;
+  try { mode = statSync(p).mode & 0o777; } catch (e) { emit({ ok: false, mode, writeErr: 'stat:' + e.code }); process.exit(0); }
+  try { writeFileSync(p, 'tampered-by-probe'); wrote = true; } catch (e) { writeErr = e.code; }
+  emit({ ok: !wrote, mode, writeErr });
+  process.exit(0);
+}
+
+if (action === 'pids-flood') {
+  // Fork-bomb against the trusted pids.max=64 ceiling: spawn short-lived Node
+  // children until fork fails (EAGAIN). ok=false when MORE than 63 spawns
+  // succeeded — that would prove the cgroup PID ceiling is not enforced.
+  let spawned = 0;
+  let failErr = 'none';
+  for (let i = 0; i < 200; i++) {
+    try {
+      const c = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+      c.unref();
+      spawned++;
+    } catch (e) { failErr = e.code; break; }
+  }
+  emit({ ok: spawned <= 63, spawned, failErr });
+  // Keep the parent (and its children) inside the cgroup so pids.max stays
+  // accountable; the backend timeout reaps the whole cgroup.
+  setInterval(() => {}, 60000);
 }
 
 if (action === 'output-flood') {

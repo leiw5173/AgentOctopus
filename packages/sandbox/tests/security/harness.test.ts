@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -10,6 +10,9 @@ import {
   probeMacSandbox,
   makeProbeSkill,
   PROBE_SCRIPT,
+  OS_RUNTIME_MANIFEST_NAME,
+  OS_HELPER_MANIFEST_NAME,
+  OS_HELPER_BINARY_NAME,
 } from './harness.js';
 
 describe('security harness', () => {
@@ -63,5 +66,63 @@ describe('security harness', () => {
       expect(typeof result.available).toBe('boolean');
       if (!result.available) expect(result.reason).toBeTruthy();
     }
+  });
+
+  describe('probePrivilegedLinux canonical artifact names', () => {
+    let savedRoot: string | undefined;
+    let probeRoot: string | undefined;
+
+    afterEach(() => {
+      if (savedRoot === undefined) delete process.env.OCTOPUS_OS_PROBE_MANIFEST_ROOT;
+      else process.env.OCTOPUS_OS_PROBE_MANIFEST_ROOT = savedRoot;
+      if (probeRoot) { rmSync(probeRoot, { recursive: true, force: true }); probeRoot = undefined; }
+    });
+
+    function useFreshRoot(): string {
+      savedRoot = process.env.OCTOPUS_OS_PROBE_MANIFEST_ROOT;
+      probeRoot = mkdtempSync(join(tmpdir(), 'octopus-proberoot-'));
+      process.env.OCTOPUS_OS_PROBE_MANIFEST_ROOT = probeRoot;
+      return probeRoot;
+    }
+
+    it('declares the canonical reviewed artifact names', () => {
+      expect(OS_RUNTIME_MANIFEST_NAME).toBe('linux-node22.manifest.json');
+      expect(OS_HELPER_MANIFEST_NAME).toBe('os-helper.manifest.json');
+      expect(OS_HELPER_BINARY_NAME).toBe('os-helper');
+    });
+
+    it('reports unavailable with a reason when the manifest root is unset', async () => {
+      savedRoot = process.env.OCTOPUS_OS_PROBE_MANIFEST_ROOT;
+      delete process.env.OCTOPUS_OS_PROBE_MANIFEST_ROOT;
+      const result = await probePrivilegedLinux();
+      expect(result.available).toBe(false);
+      expect(result.reason).toMatch(/OCTOPUS_OS_PROBE_MANIFEST_ROOT not set/);
+    });
+
+    it('reports unavailable with a reason when the root holds only the OLD generic names (C2)', async () => {
+      const root = useFreshRoot();
+      // The pre-Task-6 names must NOT be picked up — a stale provisioning can
+      // never be silently trusted.
+      writeFileSync(join(root, 'runtime.manifest.json'), '{}');
+      writeFileSync(join(root, 'helper.manifest.json'), '{}');
+      writeFileSync(join(root, 'helper'), 'not-a-real-helper');
+      const result = await probePrivilegedLinux();
+      expect(result.available).toBe(false);
+      expect(result.reason).toMatch(/not found under/);
+      expect(result.reason).toContain(OS_RUNTIME_MANIFEST_NAME);
+      expect(result.reason).toContain(OS_HELPER_MANIFEST_NAME);
+      expect(result.reason).toContain(OS_HELPER_BINARY_NAME);
+    });
+
+    it('reports unavailable with a reason when only SOME canonical artifacts are present', async () => {
+      const root = useFreshRoot();
+      // Canonical manifests present but the helper binary missing → still
+      // unavailable (fail closed), never a fabricated probe.
+      writeFileSync(join(root, OS_RUNTIME_MANIFEST_NAME), '{}');
+      writeFileSync(join(root, OS_HELPER_MANIFEST_NAME), '{}');
+      const result = await probePrivilegedLinux();
+      expect(result.available).toBe(false);
+      expect(result.reason).toMatch(/not found under/);
+    });
   });
 });
