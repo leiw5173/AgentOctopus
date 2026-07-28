@@ -5,7 +5,7 @@
  *
  *   - named network namespaces   `octn-*` / legacy `octns-*`
  *   - per-session nft tables     `oct_*` / legacy `octsbx_*`
- *   - per-session cgroup v2 dirs `oct-*`, `oct-sbx-*`, `octsbx-*`
+ *   - per-session cgroup v2 dirs `oct-*` (subsumes legacy `oct-sbx-*`)
  *
  * Naming matches Plan 4 (os/netns.ts deriveNames, os/cgroup.ts deriveName).
  *
@@ -22,7 +22,7 @@ const execFileAsync = promisify(execFile);
 
 const NETNS_PREFIXES = ['octn-', 'octns-'];
 const NFT_PREFIXES = ['oct_', 'octsbx_'];
-const CGROUP_PREFIXES = ['oct-', 'oct-sbx-', 'octsbx-'];
+const CGROUP_PREFIXES = ['oct-'];
 const CGROUP_ROOT = process.env.OCTOPUS_TEST_CGROUP_PARENT || '/sys/fs/cgroup';
 
 function hasPrefix(name, prefixes) {

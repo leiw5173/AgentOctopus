@@ -8,7 +8,7 @@
     "securityJobName": "Sandbox Security / security-gate",
     "securityGateConclusion": "success",
     "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "proxyDigest": "ghcr.io/agentoctopus/egress-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "proxyDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "run": {
     "id": 123456,
@@ -27,9 +27,9 @@
       {
         "name": "Sandbox Security / security-gate",
         "status": "completed",
-        "conclusion": "success",
-        "head_sha": "0123456789abcdef0123456789abcdef01234567"
+        "conclusion": "success"
       }
     ]
-  }
+  },
+  "expectedError": "security job head SHA missing or does not match"
 }

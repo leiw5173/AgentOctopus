@@ -1,14 +1,14 @@
 {
   "expectedRunId": "123456",
   "metadata": {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "preflightRunId": "123456",
     "preflightRunAttempt": 1,
     "securitySha": "0123456789abcdef0123456789abcdef01234567",
     "securityJobName": "Sandbox Security / security-gate",
     "securityGateConclusion": "success",
     "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "proxyDigest": "ghcr.io/agentoctopus/egress-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "proxyDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "run": {
     "id": 123456,
@@ -31,5 +31,6 @@
         "head_sha": "0123456789abcdef0123456789abcdef01234567"
       }
     ]
-  }
+  },
+  "expectedError": "security metadata schemaVersion must be 1"
 }

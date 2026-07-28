@@ -8,11 +8,11 @@
     "securityJobName": "Sandbox Security / security-gate",
     "securityGateConclusion": "success",
     "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "proxyDigest": "ghcr.io/agentoctopus/egress-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "proxyDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "run": {
     "id": 123456,
-    "run_attempt": 1,
+    "run_attempt": 2,
     "name": "Release Preflight",
     "path": ".github/workflows/release-preflight.yml",
     "event": "push",
@@ -31,5 +31,6 @@
         "head_sha": "0123456789abcdef0123456789abcdef01234567"
       }
     ]
-  }
+  },
+  "expectedError": "preflight run attempt mismatch"
 }

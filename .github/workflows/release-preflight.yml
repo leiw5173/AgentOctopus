@@ -85,17 +85,19 @@ jobs:
           if (job.status !== 'completed' || job.conclusion !== 'success') {
             throw new Error(`security gate job did not succeed (status=${job.status}, conclusion=${job.conclusion})`);
           }
-          if (job.head_sha !== undefined && job.head_sha !== process.env.PREFLIGHT_SHA) {
-            throw new Error(`security gate job SHA mismatch (${job.head_sha} != ${process.env.PREFLIGHT_SHA})`);
+          if (typeof job.head_sha !== 'string' || job.head_sha !== process.env.PREFLIGHT_SHA) {
+            throw new Error(`security gate job SHA missing or mismatched (${String(job.head_sha)} != ${process.env.PREFLIGHT_SHA})`);
           }
           if (/[\r\n]/.test(job.name)) throw new Error('security gate job name is not a single line');
           appendFileSync(process.env.GITHUB_OUTPUT, `name=${job.name}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `conclusion=${job.conclusion}\n`);
           NODE
       - name: Pack and write metadata
         env:
           PREFLIGHT_RUN_ID: ${{ github.run_id }}
           PREFLIGHT_RUN_ATTEMPT: ${{ github.run_attempt }}
           SECURITY_JOB_NAME: ${{ steps.security-job.outputs.name }}
+          SECURITY_GATE_CONCLUSION: ${{ steps.security-job.outputs.conclusion }}
           SECURITY_RUNTIME_DIGEST: ${{ needs.sandbox-security.outputs.runtime_digest }}
           SECURITY_PROXY_DIGEST: ${{ needs.sandbox-security.outputs.proxy_digest }}
         shell: bash
@@ -115,7 +117,7 @@ jobs:
           printf '%s\n' "$PREFLIGHT_RUN_ATTEMPT" > /tmp/preflight/security-preflight-run-attempt.txt
           printf '%s\n' "$SHA" > /tmp/preflight/security-sha.txt
           printf '%s\n' "$SECURITY_JOB_NAME" > /tmp/preflight/security-job-name.txt
-          printf '%s\n' 'success' > /tmp/preflight/security-gate-conclusion.txt
+          printf '%s\n' "$SECURITY_GATE_CONCLUSION" > /tmp/preflight/security-gate-conclusion.txt
           printf '%s\n' "$SECURITY_RUNTIME_DIGEST" > /tmp/preflight/runtime-image-digest.txt
           printf '%s\n' "$SECURITY_PROXY_DIGEST" > /tmp/preflight/proxy-image-digest.txt
 
@@ -146,7 +148,6 @@ jobs:
 
           echo "Packed tarballs:"
           ls -la /tmp/preflight/*.tgz
-        shell: bash
       - name: Upload preflight artifact
         uses: actions/upload-artifact@v7
         with:

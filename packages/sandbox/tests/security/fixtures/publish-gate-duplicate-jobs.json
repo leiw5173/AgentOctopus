@@ -8,7 +8,7 @@
     "securityJobName": "Sandbox Security / security-gate",
     "securityGateConclusion": "success",
     "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "proxyDigest": "ghcr.io/agentoctopus/egress-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "proxyDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "run": {
     "id": 123456,
@@ -22,8 +22,14 @@
     "head_sha": "0123456789abcdef0123456789abcdef01234567"
   },
   "jobs": {
-    "total_count": 1,
+    "total_count": 2,
     "jobs": [
+      {
+        "name": "Sandbox Security / security-gate",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "0123456789abcdef0123456789abcdef01234567"
+      },
       {
         "name": "Sandbox Security / security-gate",
         "status": "completed",
@@ -31,5 +37,6 @@
         "head_sha": "0123456789abcdef0123456789abcdef01234567"
       }
     ]
-  }
+  },
+  "expectedError": "expected one security job"
 }

@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: sandbox-security-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   hosted-docker-proxy:
     name: hosted-docker-proxy
@@ -71,12 +75,32 @@ jobs:
 
   privileged-linux:
     name: privileged-linux
+    # Trust boundary: self-hosted privileged runners must never execute code
+    # from fork pull requests. Same-repo PRs, pushes, dispatches, and release
+    # workflow_call runs (event_name is not pull_request) all execute the lane;
+    # fork PRs get the hosted and macOS lanes only.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, sandbox-privileged]
     env:
       OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
       OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
     steps:
       - uses: actions/checkout@v7
+      - name: Require privileged Linux lane files
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for file in tests/security/linux-lane.test.ts tests/security/linux-topology.test.ts; do
+            if [ ! -f "packages/sandbox/$file" ]; then
+              missing+=("packages/sandbox/$file")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: privileged Linux security lane not yet landed — missing: ${missing[*]}" >&2
+            echo "The lane is authored against fixed filenames but blocked on the supplemental Linux OS orchestration fixes (Task #19). This mandatory gate fails loudly until the lane lands and passes." >&2
+            exit 1
+          fi
       - uses: ./.github/actions/setup-node-env
       - name: Clean stale privileged state before the lane
         run: pnpm --filter @agentoctopus/sandbox security:cleanup-linux
@@ -111,11 +135,13 @@ jobs:
           pnpm --filter @agentoctopus/sandbox security:cleanup-linux
           if command -v docker >/dev/null 2>&1; then
             while IFS= read -r container; do
-              test -z "$container" || docker rm -f "$container" || true
-            done < <(docker ps -aq --filter 'name=octopus-' 2>/dev/null || true)
+              case "$container" in
+                octopus-sbx-runtime-*|octopus-sbx-proxy-*|octopus-proxy-*) docker rm -f "$container" || true ;;
+              esac
+            done < <(docker ps -a --format '{{.Names}}' 2>/dev/null || true)
             while IFS= read -r network; do
               case "$network" in
-                octopus-sbx-*|oct-sbx-*|octsbx-*) docker network rm "$network" || true ;;
+                octopus-sbx-*) docker network rm "$network" || true ;;
               esac
             done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
           fi
@@ -123,9 +149,18 @@ jobs:
 
   macos-restricted:
     name: macos-restricted
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
+      - name: Require macOS restricted lane file
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f packages/sandbox/tests/security/macos-restricted-lane.test.ts ]; then
+            echo "ERROR: macOS restricted security lane not yet landed — missing: packages/sandbox/tests/security/macos-restricted-lane.test.ts" >&2
+            echo "The lane is authored against a fixed filename but blocked on the supplemental macOS restricted backend (Task #18). This mandatory gate fails loudly until the lane lands and passes." >&2
+            exit 1
+          fi
       - uses: ./.github/actions/setup-node-env
       - name: Build sandbox package
         run: pnpm --filter @agentoctopus/sandbox build
@@ -145,5 +180,11 @@ jobs:
           MACOS_RESULT: ${{ needs.macos-restricted.result }}
         run: |
           test "$HOSTED_RESULT" = success
-          test "$LINUX_RESULT" = success
+          # privileged-linux is skipped only for fork pull requests (trust
+          # boundary gate); push/workflow_dispatch/workflow_call runs must
+          # execute and succeed.
+          if [ "$LINUX_RESULT" != success ] && [ "$LINUX_RESULT" != skipped ]; then
+            echo "ERROR: privileged-linux must succeed or be skipped on fork PRs (got: $LINUX_RESULT)" >&2
+            exit 1
+          fi
           test "$MACOS_RESULT" = success

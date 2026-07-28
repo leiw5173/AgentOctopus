@@ -8,7 +8,7 @@
     "securityJobName": "Sandbox Security / security-gate",
     "securityGateConclusion": "success",
     "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "proxyDigest": "ghcr.io/agentoctopus/egress-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "proxyDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "run": {
     "id": 123456,
@@ -16,7 +16,7 @@
     "name": "Release Preflight",
     "path": ".github/workflows/release-preflight.yml",
     "event": "push",
-    "head_branch": "master",
+    "head_branch": "evil",
     "status": "completed",
     "conclusion": "success",
     "head_sha": "0123456789abcdef0123456789abcdef01234567"
@@ -31,5 +31,6 @@
         "head_sha": "0123456789abcdef0123456789abcdef01234567"
       }
     ]
-  }
+  },
+  "expectedError": "preflight run branch must be master"
 }

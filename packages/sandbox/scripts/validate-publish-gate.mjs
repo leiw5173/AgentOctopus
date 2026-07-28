@@ -53,6 +53,14 @@ export function validatePublishGate(input) {
     fail(`preflight run attempt mismatch (recorded ${recordedAttempt}, API ${apiAttempt})`);
   }
 
+  // Immutable run identity: `path` is load-bearing (a second workflow file can
+  // copy `name:`, but cannot copy its path); event/branch pin the genuine
+  // release-preflight trigger (push to master); name is secondary.
+  if (run.path !== '.github/workflows/release-preflight.yml') {
+    fail(`run is not the release-preflight workflow (path=${String(run.path)})`);
+  }
+  if (run.event !== 'push') fail(`preflight run event must be push (${String(run.event)})`);
+  if (run.head_branch !== 'master') fail(`preflight run branch must be master (${String(run.head_branch)})`);
   if (run.name !== 'Release Preflight') fail(`run ${apiRunId} is not Release Preflight`);
   if (run.status !== 'completed' || run.conclusion !== 'success') {
     fail(`preflight run did not succeed (status=${String(run.status)}, conclusion=${String(run.conclusion)})`);
@@ -85,8 +93,8 @@ export function validatePublishGate(input) {
   if (securityJob.status !== 'completed' || securityJob.conclusion !== 'success') {
     fail(`security job did not succeed (status=${String(securityJob.status)}, conclusion=${String(securityJob.conclusion)})`);
   }
-  if (securityJob.head_sha !== undefined && securityJob.head_sha !== securitySha) {
-    fail(`security job head SHA does not match recorded security SHA (${String(securityJob.head_sha)} != ${securitySha})`);
+  if (typeof securityJob.head_sha !== 'string' || securityJob.head_sha !== securitySha) {
+    fail(`security job head SHA missing or does not match recorded security SHA (${String(securityJob.head_sha)} != ${securitySha})`);
   }
 
   return {
