@@ -56,9 +56,18 @@ export type InstallationGrant = z.infer<typeof InstallationGrantSchema>;
  * content ID `sha256:<64 hex>` (what `docker image inspect --format '{{.Id}}'`
  * emits, used by the release security lane). Mutable tags like `repo:latest`
  * are rejected.
+ *
+ * This regex is the SINGLE source of truth for the immutable-image gate. The
+ * security harness (`tests/security/harness.ts` `requirePinnedImageRef`) and
+ * `ImmutableImageRefSchema` both use it so the harness can never be looser or
+ * stricter than the production schema. Lowercase only — no `i` flag — so an
+ * uppercase repo/digest the schema rejects is also rejected by the harness.
  */
+export const IMMUTABLE_IMAGE_RE =
+  /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@)?sha256:[0-9a-f]{64}$/;
+
 export const ImmutableImageRefSchema = z.string().regex(
-  /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@)?sha256:[0-9a-f]{64}$/,
+  IMMUTABLE_IMAGE_RE,
   'docker image must use immutable name@sha256:<64 lowercase hex> or sha256:<64 lowercase hex> syntax',
 );
 
