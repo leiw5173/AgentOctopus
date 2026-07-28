@@ -35,6 +35,8 @@ import { spawn } from 'node:child_process';
 
 let count = 0;
 let buffer = '';
+const parentArgToken = process.argv[2] ?? '';
+const childArgToken = parentArgToken.replace('oct-mcp-parent-', 'oct-mcp-child-');
 const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
 
 process.stdin.setEncoding('utf8');
@@ -83,16 +85,17 @@ function handle(message) {
         cwd: process.cwd(),
         hostSecretPresent: Boolean(process.env.OCTOPUS_HOST_SECRET_CANARY),
         hostCanaryReadable,
+        parentArgToken,
       });
       break;
     }
     case 'probe/spawn-child': {
-      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'], {
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)', childArgToken], {
         detached: true,
         stdio: 'ignore',
       });
       child.unref();
-      reply({ spawned: child.pid ?? null });
+      reply({ spawned: child.pid ?? null, childArgToken });
       break;
     }
     case 'probe/bad':
@@ -125,6 +128,8 @@ interface DockerTestFixture {
   beforeContainerIds: Set<string>;
   skillDir: string;
   storeDir: string;
+  parentArgToken: string;
+  childArgToken: string;
   fallbackCleanup(): Promise<void>;
 }
 
@@ -166,16 +171,75 @@ async function waitForRuntimeGone(containerName: string): Promise<void> {
   expect(ids, `runtime container ${containerName} still exists`).toBe('');
 }
 
-async function waitForParentAndGrandchild(containerName: string): Promise<void> {
+interface DockerTopRow {
+  pid: number;
+  ppid: number;
+  comm: string;
+  args: string;
+}
+
+function parseDockerTop(stdout: string): DockerTopRow[] {
+  const lines = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return [];
+  const header = lines[0]!.split(/\s+/).map((column) => column.toUpperCase());
+  const pidIndex = header.indexOf('PID');
+  const ppidIndex = header.indexOf('PPID');
+  const commIndex = header.findIndex((column) => column === 'COMMAND' || column === 'COMM');
+  if (pidIndex !== 0 || ppidIndex !== 1 || commIndex !== 2) return [];
+
+  const rows: DockerTopRow[] = [];
+  for (const line of lines.slice(1)) {
+    const match = /^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(ppid) || ppid < 0) continue;
+    rows.push({ pid, ppid, comm: match[3]!, args: match[4]! });
+  }
+  return rows;
+}
+
+function hasExactArgToken(args: string, token: string): boolean {
+  return args.split(/\s+/).includes(token);
+}
+
+function findFixtureProcessTree(
+  stdout: string,
+  parentArgToken: string,
+  childArgToken: string,
+): { parent: DockerTopRow; child: DockerTopRow } | undefined {
+  const rows = parseDockerTop(stdout);
+  const parents = rows.filter((row) => row.comm === 'node' && hasExactArgToken(row.args, parentArgToken));
+  const children = rows.filter((row) => row.comm === 'node' && hasExactArgToken(row.args, childArgToken));
+  if (parents.length !== 1 || children.length !== 1) return undefined;
+  const parent = parents[0]!;
+  const child = children[0]!;
+  if (parent.pid === child.pid) return undefined;
+  // Node's `detached:true` creates a new process group/session but does not
+  // reparent a still-live child. Docker top reports host-visible namespace PIDs;
+  // PPID is in the same table namespace, so this relation remains comparable
+  // even though process.pid returned inside the container may use different IDs.
+  if (child.ppid !== parent.pid) return undefined;
+  return { parent, child };
+}
+
+async function waitForParentAndGrandchild(
+  containerName: string,
+  parentArgToken: string,
+  childArgToken: string,
+): Promise<void> {
   const deadline = Date.now() + 10_000;
-  let nodeCount = 0;
+  let table = '';
   do {
-    const top = await runDocker(['top', containerName, '-eo', 'pid,ppid,comm']);
-    nodeCount = (top.stdout.match(/node/g) ?? []).length;
-    if (top.code === 0 && nodeCount >= 2) return;
+    const top = await runDocker(['top', containerName, '-eo', 'pid,ppid,comm,args']);
+    table = top.stdout;
+    if (top.code === 0 && findFixtureProcessTree(table, parentArgToken, childArgToken)) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
-  expect(nodeCount, 'docker top must observe the MCP parent and its grandchild before close').toBeGreaterThanOrEqual(2);
+  expect(
+    findFixtureProcessTree(table, parentArgToken, childArgToken),
+    `docker top must contain the exact fixture parent (${parentArgToken}) and child (${childArgToken}) node rows with child.ppid=parent.pid`,
+  ).toBeDefined();
 }
 
 async function assertNoNewContainers(before: Set<string>): Promise<void> {
@@ -225,6 +289,8 @@ async function prepareFixture(testName: string): Promise<DockerTestFixture> {
   const runtimeImage = requiredImage('OCTOPUS_TEST_RUNTIME_IMAGE');
   const proxyImage = requiredImage('OCTOPUS_TEST_PROXY_IMAGE');
   const sessionId = `mcp${crypto.randomUUID().replaceAll('-', '').slice(0, 8)}`;
+  const parentArgToken = `oct-mcp-parent-${sessionId}`;
+  const childArgToken = `oct-mcp-child-${sessionId}`;
   const runtimeContainerName = `octopus-sbx-runtime-${sessionId}`;
   const internalNetworkName = `octopus-sbx-${sessionId}-internal`;
   const egressNetworkName = `octopus-sbx-${sessionId}-egress`;
@@ -293,6 +359,8 @@ async function prepareFixture(testName: string): Promise<DockerTestFixture> {
     beforeContainerIds,
     skillDir,
     storeDir,
+    parentArgToken,
+    childArgToken,
     fallbackCleanup,
   };
 }
@@ -302,11 +370,78 @@ function makeTransport(fixture: DockerTestFixture, env?: Record<string, string>)
   // the guest receives /skill/server.js, never the live source path.
   return new SandboxMcpTransport({
     port: fixture.port,
-    command: ['node', path.join(fixture.skillDir, 'server.js')],
+    command: ['node', path.join(fixture.skillDir, 'server.js'), fixture.parentArgToken],
     env,
     timeoutMs: 30_000,
   });
 }
+
+describe('docker top process-table parser', () => {
+  const parentToken = 'oct-mcp-parent-session123';
+  const childToken = 'oct-mcp-child-session123';
+
+  it('parses PID/PPID/comm/args rows and identifies the exact fixture process tree', () => {
+    const table = [
+      'PID      PPID     COMMAND         COMMAND',
+      `41001    40990    node            node /skill/server.js ${parentToken}`,
+      `41009    41001    node            /usr/local/bin/node -e setInterval(() => {}, 60000) ${childToken}`,
+    ].join('\n');
+
+    expect(parseDockerTop(table)).toEqual([
+      { pid: 41001, ppid: 40990, comm: 'node', args: `node /skill/server.js ${parentToken}` },
+      { pid: 41009, ppid: 41001, comm: 'node', args: `/usr/local/bin/node -e setInterval(() => {}, 60000) ${childToken}` },
+    ]);
+    expect(findFixtureProcessTree(table, parentToken, childToken)).toEqual({
+      parent: expect.objectContaining({ pid: 41001, ppid: 40990, comm: 'node' }),
+      child: expect.objectContaining({ pid: 41009, ppid: 41001, comm: 'node' }),
+    });
+  });
+
+  it.each([
+    {
+      name: 'unrelated node rows without exact fixture tokens',
+      table: [
+        'PID PPID COMMAND COMMAND',
+        '41001 40990 node node /skill/server.js unrelated-parent',
+        '41009 41001 node node -e loop unrelated-child',
+      ].join('\n'),
+    },
+    {
+      name: 'token substrings rather than exact argv tokens',
+      table: [
+        'PID PPID COMMAND COMMAND',
+        `41001 40990 node node /skill/server.js prefix-${parentToken}`,
+        `41009 41001 node node -e loop ${childToken}-suffix`,
+      ].join('\n'),
+    },
+    {
+      name: 'non-node comm values',
+      table: [
+        'PID PPID COMMAND COMMAND',
+        `41001 40990 node-helper node /skill/server.js ${parentToken}`,
+        `41009 41001 node-helper node -e loop ${childToken}`,
+      ].join('\n'),
+    },
+    {
+      name: 'duplicate process IDs',
+      table: [
+        'PID PPID COMMAND COMMAND',
+        `41001 40990 node node /skill/server.js ${parentToken}`,
+        `41001 41001 node node -e loop ${childToken}`,
+      ].join('\n'),
+    },
+    {
+      name: 'child is not parented by the fixture MCP process',
+      table: [
+        'PID PPID COMMAND COMMAND',
+        `41001 40990 node node /skill/server.js ${parentToken}`,
+        `41009 1 node node -e loop ${childToken}`,
+      ].join('\n'),
+    },
+  ])('rejects $name', ({ table }) => {
+    expect(findFixtureProcessTree(table, parentToken, childToken)).toBeUndefined();
+  });
+});
 
 describe('production MCP stdio over Docker', () => {
   it('uses one runner-bound process for multiple messages and close reaps its observed process tree', async (ctx) => {
@@ -326,7 +461,7 @@ describe('production MCP stdio over Docker', () => {
       const first = await rpc.request(2, 'probe/count');
       const second = await rpc.request(3, 'probe/count');
       const report = await rpc.request(4, 'probe/report');
-      await rpc.request(5, 'probe/spawn-child');
+      const spawned = await rpc.request(5, 'probe/spawn-child');
 
       expect(first.result.count).toBe(1);
       expect(second.result.count).toBe(2);
@@ -334,12 +469,21 @@ describe('production MCP stdio over Docker', () => {
         cwd: '/skill',
         hostSecretPresent: false,
         hostCanaryReadable: false,
+        parentArgToken: fixture.parentArgToken,
+      });
+      expect(spawned.result).toEqual({
+        spawned: expect.any(Number),
+        childArgToken: fixture.childArgToken,
       });
 
       // Genuine reaping proof: observe BOTH parent + grandchild in the known
       // runtime container before close, then prove close removes that container
       // before any fallback fixture cleanup runs.
-      await waitForParentAndGrandchild(fixture.runtimeContainerName);
+      await waitForParentAndGrandchild(
+        fixture.runtimeContainerName,
+        fixture.parentArgToken,
+        fixture.childArgToken,
+      );
       await transport.close();
       await waitForRuntimeGone(fixture.runtimeContainerName);
       await assertNoNewContainers(fixture.beforeContainerIds);
