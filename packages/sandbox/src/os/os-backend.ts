@@ -8,10 +8,22 @@
  *   - Task 3 `verifyHelperArtifact`/`buildOsRunCommand` (src/os/helper-build.ts, src/os/run-spec.ts)
  *   - Task 3 `createLimitedCgroup`                (src/os/cgroup.ts)
  *   - Task 4 `setupNetns`/`authorizeProxyEndpoint`(src/os/netns.ts)
- *   - Plan 3 `DefaultProxyLauncher`/`ProxyHandle` (src/proxy/launcher.ts)
+ *
+ * The proxy lifecycle is owned EXTERNALLY by the canonical SandboxRunner +
+ * DefaultProxyLauncher: prepareTopology() returns the carrier, the runner
+ * launches the proxy and passes the resulting `proxyAddr`/`caBundlePath`
+ * into prepare(). This backend never launches, stores, or closes a
+ * `ProxyHandle`. prepare() only validates the supplied coordinates against
+ * the carrier (host/port match) and authorizes the nft allow rule.
  *
  * Lifecycle: new → probe() → prepareTopology() → prepare() → spawn()/run() →
- * cleanup(). Cleanup is idempotent and runs in reverse dependency order.
+ * cleanup(). Cleanup is idempotent. Teardown order is process → backend
+ * runtime/topology (cgroup, rootfs, netns) → externally owned proxy handle.
+ * This is NOT a pure reverse-dependency order for the netns: the proxy binds
+ * host-side over the carrier, but teardown is safe because the skill's nft
+ * rules and netns are already gone before the runner closes the external
+ * proxy handle, so no skill traffic can reach the proxy, and the launcher's
+ * child kill is idempotent (SIGTERM then bounded wait).
  *
  * Artifact sourcing (the constructor carries no config): `resolveOsArtifacts()`
  * reads `OCTOPUS_SANDBOX_OS_*` / `OCTOPUS_SANDBOX_PROXY_*` env vars with
@@ -62,7 +74,6 @@ import { verifyHelperArtifact } from './helper-build.js';
 import { buildOsRunCommand, cleanupLaunchSpec, type OsRunCommand } from './run-spec.js';
 import { createLimitedCgroup, type CgroupHandle } from './cgroup.js';
 import { setupNetns, authorizeProxyEndpoint, type NetnsHandle } from './netns.js';
-import { DefaultProxyLauncher, type ProxyHandle, type ProxyLauncher } from '../proxy/launcher.js';
 
 // ---------------------------------------------------------------------------
 // Artifact resolution
@@ -223,7 +234,6 @@ export interface OsBackendDeps {
   assembleRootfs?: typeof assembleRootfs;
   buildOsRunCommand?: typeof buildOsRunCommand;
   spawnHelper?: (cmd: OsRunCommand) => ChildProcess;
-  proxyLauncher?: ProxyLauncher;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,14 +258,13 @@ export class OsSandboxBackend implements SandboxBackend {
 
   private readonly sessionId: string;
   private readonly workDir: string;
-  private readonly deps: Required<Pick<OsBackendDeps, 'proxyLauncher'>> & OsBackendDeps;
+  private readonly deps: OsBackendDeps;
 
   private probed = false;
   private caps: OsCaps | undefined;
   private artifacts: ResolvedOsArtifacts | undefined;
   private netns: NetnsHandle | undefined;
   private carrier: Extract<ProxyCarrier, { kind: 'linux-static' }> | undefined;
-  private proxyHandle: ProxyHandle | undefined;
   private proxyCgroupPath: string | undefined;
   private opts: BackendPrepareOptions | undefined;
   private layout: RootfsLayout | undefined;
@@ -270,10 +279,7 @@ export class OsSandboxBackend implements SandboxBackend {
     }
     this.sessionId = opts.sessionId;
     this.workDir = opts.workDir ?? path.join(os.tmpdir(), `oct-os-backend-${this.sessionId}`);
-    this.deps = {
-      ...(opts.deps ?? {}),
-      proxyLauncher: opts.deps?.proxyLauncher ?? new DefaultProxyLauncher(),
-    };
+    this.deps = opts.deps ?? {};
   }
 
   get isolationLevel(): IsolationLevel {
@@ -354,10 +360,12 @@ export class OsSandboxBackend implements SandboxBackend {
       throw new Error('OsSandboxBackend.prepareTopology: artifacts were not resolved');
     }
 
-    // Backend-owned proxy cgroup path (created by the proxy launcher or by
-    // the orchestrator when the proxy runs). We only own the NAME here —
-    // the proxy cgroup is created separately so the egress proxy is not
-    // confined by the skill's memory/cpu/pids limits.
+    // Advisory proxy cgroup path (I7): the per-session egress proxy is NOT
+    // confined by the skill's memory/cpu/pids limits, so the proxy runs outside
+    // the skill cgroup. This name is surfaced on the carrier for the
+    // orchestrator/launcher; this backend does NOT create, own, or destroy it,
+    // and no test asserts its existence. The skill cgroup (created later in
+    // prepare()) is the only cgroup this backend owns.
     this.proxyCgroupPath = path.join('/sys/fs/cgroup', `oct-proxy-${this.sessionId}`);
 
     // Set up the named netns + veth pair + base nft table, and allocate
@@ -394,43 +402,22 @@ export class OsSandboxBackend implements SandboxBackend {
     }
     if (!this.artifacts) throw new Error('OsSandboxBackend.prepare: artifacts were not resolved');
 
-    // Step 3: topology and proxy launcher must have run.
+    // Step 3: topology must have run. The proxy itself is launched and owned
+    // EXTERNALLY by the canonical SandboxRunner + DefaultProxyLauncher between
+    // prepareTopology() and prepare(); this backend consumes only the supplied
+    // `proxyAddr`/`caBundlePath` and must never launch or close a proxy.
     if (!this.carrier || !this.netns) {
       throw new Error('OsSandboxBackend.prepare: prepareTopology() must run before prepare()');
     }
 
-    // Launch the proxy if it has not been launched yet. The orchestrator
-    // normally calls DefaultProxyLauncher.launch between prepareTopology()
-    // and prepare(); when invoked directly (tests), we run the launcher here
-    // so the proxy handle is available for validation. Either way the
-    // resulting handle is validated against the carrier below.
-    if (!this.proxyHandle) {
-      // The orchestrator passes the policy through opts; secrets are not
-      // needed for the smoke / deny-all case exercised here.
-      this.proxyHandle = await this.deps.proxyLauncher.launch(
-        { policy: opts, secrets: {}, workDir: this.workDir },
-        this.carrier,
-      );
-      // M3: bind the freshly launched handle to the carrier BEFORE
-      // authorizing nft. The handle's reachableAddr must equal
-      // `http://{carrier.reachableHost}:{carrier.listenPort}` — otherwise
-      // the launcher handed us a proxy listening somewhere other than the
-      // veth peer, and the nft allow rule we are about to install would
-      // authorize the WRONG endpoint. Fail closed.
-      const expectedAddr = `http://${this.carrier.reachableHost}:${this.carrier.listenPort}`;
-      if (this.proxyHandle.reachableAddr !== expectedAddr) {
-        const bad = this.proxyHandle;
-        this.proxyHandle = undefined;
-        await bad.close().catch(() => {});
-        throw new Error(
-          `OsSandboxBackend.prepare: launched proxy reachableAddr '${bad.reachableAddr}' does not match carrier '${expectedAddr}' — refusing to authorize nft`,
-        );
-      }
-    }
-
     // Step 4: parse opts.proxyAddr; require host === carrier.reachableHost
     // and port === carrier.listenPort; then install the nft allow rule for
-    // exactly that port. A mismatch is fatal.
+    // exactly that port. A mismatch is fatal and rejects BEFORE
+    // authorizeProxyEndpoint installs any nft rule — the orchestrator/launcher
+    // is trusted to supply a ready proxy (readiness is proven externally by
+    // DefaultProxyLauncher.waitForReady and the privileged lane), so this is a
+    // coordinate check, not a liveness probe. No reachability attempt is made
+    // here.
     const { host: proxyHost, port: proxyPort } = parseProxyAddr(opts.proxyAddr);
     if (proxyHost !== this.carrier.reachableHost) {
       throw new Error(
@@ -785,12 +772,12 @@ export class OsSandboxBackend implements SandboxBackend {
       await tryStep(() => l.cleanup());
     }
 
-    // 4. Proxy carrier cgroup if backend-owned + proxy close.
-    if (this.proxyHandle) {
-      const ph = this.proxyHandle;
-      this.proxyHandle = undefined;
-      await tryStep(() => ph.close());
-    }
+    // 4. The externally owned proxy handle is NOT closed here. The proxy
+    // lifecycle is owned by the canonical SandboxRunner + DefaultProxyLauncher;
+    // this backend never stores a ProxyHandle. The runner closes the proxy
+    // handle AFTER backend.cleanup() returns (teardown order: process →
+    // backend runtime/topology → external proxy handle). See the class header
+    // for the safety rationale.
 
     // 5. Netns+nft cleanup.
     if (this.netns) {
@@ -808,6 +795,7 @@ export class OsSandboxBackend implements SandboxBackend {
 
     this.carrier = undefined;
     this.opts = undefined;
+    this.proxyCgroupPath = undefined;
 
     if (errors.length > 0) {
       // Aggregate, but don't throw on idempotent cleanup() calls — the

@@ -5,8 +5,8 @@
  * ------
  * 1. Portable state-machine tests (run on macOS).
  *    - Inject fake collaborators via DI seams (probe/netns/cgroup/rootfs/
- *      proxy launcher/process-spawn). Assert call ORDER and fail-closed
- *      behavior without touching the kernel.
+ *      process-spawn). Assert call ORDER and fail-closed behavior without
+ *      touching the kernel.
  *
  * 2. The Linux-gated real smoke test lives in os-backend-linux-smoke.test.ts.
  *
@@ -20,7 +20,6 @@ import type { RootfsLayout } from '../src/os/rootfs.js';
 import type { CgroupHandle } from '../src/os/cgroup.js';
 import type { NetnsHandle } from '../src/os/netns.js';
 import type { ProxyCarrier, BackendPrepareOptions } from '../src/backend.js';
-import type { ProxyHandle, ProxyLauncher } from '../src/proxy/launcher.js';
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -102,23 +101,28 @@ function fakeLayout(root = '/tmp/oct-rootfs-test'): RootfsLayout {
   };
 }
 
-function fakeProxyHandle(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>): ProxyHandle {
-  return {
-    reachableAddr: `http://${carrier.reachableHost}:${carrier.listenPort}`,
-    caBundlePath: '/tmp/ca-bundle.pem',
-    close: vi.fn(async () => {}),
-  };
+/**
+ * Supplied-endpoint fixture: the orchestrator (SandboxRunner +
+ * DefaultProxyLauncher) has ALREADY launched the proxy and supplies its
+ * coordinates via prepareOpts.proxyAddr / caBundlePath. The backend must
+ * validate those coordinates against the carrier and authorize nft — it
+ * must NOT launch or own a proxy itself.
+ */
+function suppliedProxyAddr(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>): string {
+  return `http://${carrier.reachableHost}:${carrier.listenPort}`;
 }
 
-function validPrepareOpts(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>, proxy: ProxyHandle): BackendPrepareOptions {
+const SUPPLIED_CA_BUNDLE = '/tmp/ca-bundle.pem';
+
+function validPrepareOpts(carrier: Extract<ProxyCarrier, { kind: 'linux-static' }>): BackendPrepareOptions {
   return {
     hosts: ['example.com'],
     credentials: [],
     denied: { hosts: [], credentials: [] },
     resources: { memoryBytes: 64 * 1024 * 1024, cpus: 0.5, timeoutMs: 5000 },
     snapshotRoot: '/snap/a',
-    proxyAddr: proxy.reachableAddr,
-    caBundlePath: proxy.caBundlePath,
+    proxyAddr: suppliedProxyAddr(carrier),
+    caBundlePath: SUPPLIED_CA_BUNDLE,
     runtimeProfile: {
       id: 'linux-node22',
       bins: ['node'],
@@ -143,7 +147,6 @@ interface FakeDeps {
   assembleRootfs: ReturnType<typeof vi.fn>;
   buildOsRunCommand: ReturnType<typeof vi.fn>;
   spawnHelper: ReturnType<typeof vi.fn>;
-  proxyLauncher: ProxyLauncher;
 }
 
 function makeDeps(overrides?: Partial<{
@@ -151,7 +154,6 @@ function makeDeps(overrides?: Partial<{
   netns: NetnsHandle;
   cgroup: CgroupHandle;
   layout: RootfsLayout;
-  proxyHandle: ProxyHandle;
   artifacts: {
     runtimeArtifactPath: string;
     runtimeManifestPath: string;
@@ -172,17 +174,6 @@ function makeDeps(overrides?: Partial<{
     proxyBundlePath: '/build/egress-proxy-server.mjs',
   };
 
-  const carrier: Extract<ProxyCarrier, { kind: 'linux-static' }> = {
-    kind: 'linux-static',
-    binaryPath: artifacts.proxyBundlePath,
-    skillNamespace: { name: netns.name, path: netns.path },
-    listenHost: netns.proxyIp,
-    reachableHost: netns.proxyIp,
-    cgroupPath: cgroup.path,
-    listenPort: netns.proxyPort,
-  };
-  const proxyHandle = overrides?.proxyHandle ?? fakeProxyHandle(carrier);
-
   return {
     probeOsCaps: vi.fn(async () => caps),
     resolveOsArtifacts: vi.fn(async () => artifacts),
@@ -197,9 +188,6 @@ function makeDeps(overrides?: Partial<{
       launchSpecPath: '/tmp/spec.json',
     })),
     spawnHelper: vi.fn(),
-    proxyLauncher: {
-      launch: vi.fn(async () => proxyHandle),
-    },
   };
 }
 
@@ -332,30 +320,29 @@ describe('OsSandboxBackend.prepare ordering', () => {
       cgroupPath: '/sys/fs/cgroup/oct-test',
       listenPort: netns.proxyPort,
     };
-    const proxy = fakeProxyHandle(carrier);
-    await expect(b.prepare(validPrepareOpts(carrier, proxy))).rejects.toThrow(/prepareTopology|topology/i);
+    await expect(b.prepare(validPrepareOpts(carrier))).rejects.toThrow(/prepareTopology|topology/i);
   });
 
-  it('rejects when proxyAddr host does not match the carrier reachableHost', async () => {
+  it('rejects when proxyAddr host does not match the carrier reachableHost before nft authorization', async () => {
     const deps = makeDeps();
     const b = new OsSandboxBackend({ sessionId: 'ord-3', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    const opts = validPrepareOpts(carrier, proxy);
+    const opts = validPrepareOpts(carrier);
     opts.proxyAddr = 'http://127.0.0.1:43210'; // host mismatch — loopback is invalid
     await expect(b.prepare(opts)).rejects.toThrow(/proxyAddr|reachableHost|host/i);
+    expect(deps.authorizeProxyEndpoint).not.toHaveBeenCalled();
   });
 
-  it('rejects when proxyAddr port does not match the carrier listenPort', async () => {
+  it('rejects when proxyAddr port does not match the carrier listenPort before nft authorization', async () => {
     const deps = makeDeps();
     const b = new OsSandboxBackend({ sessionId: 'ord-4', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    const opts = validPrepareOpts(carrier, proxy);
+    const opts = validPrepareOpts(carrier);
     opts.proxyAddr = `http://${carrier.reachableHost}:9999`;
     await expect(b.prepare(opts)).rejects.toThrow(/port|listenPort/i);
+    expect(deps.authorizeProxyEndpoint).not.toHaveBeenCalled();
   });
 
   it('rejects when guestSkillRoot is not /skill', async () => {
@@ -363,8 +350,7 @@ describe('OsSandboxBackend.prepare ordering', () => {
     const b = new OsSandboxBackend({ sessionId: 'ord-5', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    const opts = validPrepareOpts(carrier, proxy);
+    const opts = validPrepareOpts(carrier);
     (opts as any).guestSkillRoot = '/evil';
     await expect(b.prepare(opts)).rejects.toThrow(/guestSkillRoot|\/skill/);
   });
@@ -374,8 +360,7 @@ describe('OsSandboxBackend.prepare ordering', () => {
     const b = new OsSandboxBackend({ sessionId: 'ord-6', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    const opts = validPrepareOpts(carrier, proxy);
+    const opts = validPrepareOpts(carrier);
     (opts as any).guestCaBundlePath = '/etc/evil.pem';
     await expect(b.prepare(opts)).rejects.toThrow(/guestCaBundlePath|ca\.pem/);
   });
@@ -385,8 +370,7 @@ describe('OsSandboxBackend.prepare ordering', () => {
     const b = new OsSandboxBackend({ sessionId: 'ord-7', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    const opts = validPrepareOpts(carrier, proxy);
+    const opts = validPrepareOpts(carrier);
     opts.resources = { memoryBytes: 0, cpus: 0.5, timeoutMs: 5000 };
     await expect(b.prepare(opts)).rejects.toThrow(/memory|resource/i);
 
@@ -397,7 +381,7 @@ describe('OsSandboxBackend.prepare ordering', () => {
     await expect(b.prepare(opts)).rejects.toThrow(/timeout|resource/i);
   });
 
-  it('calls collaborators in the mandatory order', async () => {
+  it('calls backend collaborators in the mandatory order after receiving supplied proxy coordinates', async () => {
     const deps = makeDeps();
     const callOrder: string[] = [];
     deps.probeOsCaps.mockImplementation(async () => { callOrder.push('probe'); return fullCaps(); });
@@ -409,20 +393,11 @@ describe('OsSandboxBackend.prepare ordering', () => {
     const b = new OsSandboxBackend({ sessionId: 'ord-8', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    // Launcher is invoked by the backend during prepare(); the mock records
-    // the call and returns a handle that matches the just-returned carrier.
-    const proxy = fakeProxyHandle(carrier);
-    (deps.proxyLauncher.launch as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      callOrder.push('proxyLauncher.launch');
-      return proxy;
-    });
-    const opts = validPrepareOpts(carrier, proxy);
-    await b.prepare(opts);
+    await b.prepare(validPrepareOpts(carrier));
 
     expect(callOrder).toEqual([
       'probe',
       'setupNetns',
-      'proxyLauncher.launch',
       'authorizeProxyEndpoint',
       'assembleRootfs',
       'createLimitedCgroup',
@@ -435,8 +410,7 @@ describe('OsSandboxBackend.prepare ordering', () => {
     const b = new OsSandboxBackend({ sessionId: 'ord-9', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    const opts = validPrepareOpts(carrier, proxy);
+    const opts = validPrepareOpts(carrier);
     await expect(b.prepare(opts)).rejects.toThrow(/bad rootfs/);
     // netns cleanup was called.
     const netns = await deps.setupNetns.mock.results[0]!.value as NetnsHandle;
@@ -473,8 +447,7 @@ describe('OsSandboxBackend.spawn', () => {
     const b = new OsSandboxBackend({ sessionId: 'spawn-1', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    const opts = validPrepareOpts(carrier, proxy);
+    const opts = validPrepareOpts(carrier);
     await b.prepare(opts);
 
     const proc = await b.spawn({ command: ['/usr/bin/node', '--version'] });
@@ -504,8 +477,7 @@ describe('OsSandboxBackend.spawn', () => {
     const b = new OsSandboxBackend({ sessionId: 'spawn-2', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
     await expect(b.spawn({ command: ['/usr/bin/node'] })).rejects.toThrow(/attach/);
   });
 });
@@ -533,8 +505,7 @@ describe('OsSandboxBackend.run', () => {
     const b = new OsSandboxBackend({ sessionId: 'run-1', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const result = await b.run({ command: ['/usr/bin/node', '--version'], stdin: 'hello' });
     expect(result.exitCode).toBe(0);
@@ -618,15 +589,14 @@ describe('OsSandboxBackend.cleanup', () => {
     const b = new OsSandboxBackend({ sessionId: 'clean-1', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
     await b.cleanup();
     await b.cleanup();
   });
 });
 
 // ---------------------------------------------------------------------------
-// Review-fix regression tests (C1, I2, M3)
+// Review-fix regression tests (C1, I2, external proxy ownership)
 // ---------------------------------------------------------------------------
 
 describe('OsSandboxBackend review-fix regressions', () => {
@@ -642,8 +612,7 @@ describe('OsSandboxBackend review-fix regressions', () => {
     const b = new OsSandboxBackend({ sessionId: 'c1-timeout', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const result = await b.run({ command: ['/usr/bin/node'], timeoutMs: 30 });
     expect(result.timedOut).toBe(true);
@@ -665,8 +634,7 @@ describe('OsSandboxBackend review-fix regressions', () => {
     const b = new OsSandboxBackend({ sessionId: 'c1-ovf', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const proc = await b.spawn({
       command: ['/usr/bin/node'],
@@ -690,8 +658,7 @@ describe('OsSandboxBackend review-fix regressions', () => {
     const b = new OsSandboxBackend({ sessionId: 'c1-ok', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const result = await b.run({ command: ['/usr/bin/node'], timeoutMs: 30 });
     expect(result.timedOut).toBe(true);
@@ -725,8 +692,7 @@ describe('OsSandboxBackend review-fix regressions', () => {
     const b = new OsSandboxBackend({ sessionId: 'i2-drain', deps: deps as unknown as OsBackendDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    const proxy = fakeProxyHandle(carrier);
-    await b.prepare(validPrepareOpts(carrier, proxy));
+    await b.prepare(validPrepareOpts(carrier));
 
     const exitedPromise = b.run({ command: ['/usr/bin/node'], timeoutMs: 20 });
     // Track when exited actually resolves.
@@ -744,21 +710,29 @@ describe('OsSandboxBackend review-fix regressions', () => {
     expect(exitIdx).toBeGreaterThan(waitEndIdx);
   });
 
-  it('M3: lazy-launched proxy handle reachableAddr mismatch is fatal and closes the handle', async () => {
+  it('does not launch or close the externally owned proxy', async () => {
     const deps = makeDeps();
-    const b = new OsSandboxBackend({ sessionId: 'm3-mismatch', deps: deps as unknown as OsBackendDeps });
+    const externalClose = vi.fn(async () => {});
+    const legacyLaunch = vi.fn(async () => ({
+      reachableAddr: 'http://169.254.7.1:43210',
+      caBundlePath: SUPPLIED_CA_BUNDLE,
+      close: externalClose,
+    }));
+    const legacyDeps = {
+      ...deps,
+      // Deliberately pass the removed legacy seam at runtime. Type-erasing this
+      // object proves the concrete backend ignores old launcher injection rather
+      // than merely hiding it from OsBackendDeps' static shape.
+      proxyLauncher: { launch: legacyLaunch },
+    } as unknown as OsBackendDeps;
+
+    const b = new OsSandboxBackend({ sessionId: 'external-owner', deps: legacyDeps });
     await b.probe();
     const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
-    // Build a handle whose reachableAddr does NOT match the carrier.
-    const badHandle: ProxyHandle = {
-      reachableAddr: 'http://169.254.99.99:1',
-      caBundlePath: '/tmp/ca.pem',
-      close: vi.fn(async () => {}),
-    };
-    (deps.proxyLauncher.launch as ReturnType<typeof vi.fn>).mockResolvedValue(badHandle);
-    const opts = validPrepareOpts(carrier, fakeProxyHandle(carrier));
-    await expect(b.prepare(opts)).rejects.toThrow(/reachableAddr|refusing to authorize/);
-    // The bad handle was closed before the throw.
-    expect(badHandle.close).toHaveBeenCalled();
+    await b.prepare(validPrepareOpts(carrier));
+    await b.cleanup();
+
+    expect(legacyLaunch).not.toHaveBeenCalled();
+    expect(externalClose).not.toHaveBeenCalled();
   });
 });

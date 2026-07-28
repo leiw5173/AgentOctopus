@@ -5,11 +5,18 @@
  *   + carrier own that); the runner forwards handle.reachableAddr into
  *   backend.prepare.
  * - A per-session CA bundle path is forwarded.
- * - Env hygiene: minimal allowlist + non-reserved caller keys + fixed guest
+ * - Env hygiene: minimal allowlist + non-resolved caller keys + fixed guest
  *   HOME / TMPDIR / runtime-profile PATH. process.env never spreads.
  * - Payload is serialized exactly once to OCTOPUS_INPUT; stdin passes through.
+ *
+ * I/O-seam coverage (NOT production proof): the orchestration-order block
+ * below uses a poisoned legacy launcher and a recording backend to verify the
+ * runner — the SOLE orchestration boundary — launches the proxy exactly once
+ * and tears down in the documented order (backend before proxy handle). These
+ * tests do NOT spin up real Docker/OS backends; they assert sequencing against
+ * I/O seams. Real privileged lane assertions live in packages/sandbox/tests/security.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { SandboxConfig } from '@agentoctopus/sandbox';
 import { SandboxRunner } from '../src/sandbox-runner.js';
 import {
@@ -91,6 +98,117 @@ describe('SandboxRunner — proxy integration', () => {
     const names = log.map((e) => e.name);
     expect(names).toContain('backend.cleanup:docker');
     expect(names).toContain('proxy.close');
+  });
+});
+
+/**
+ * I/O-seam orchestration-order coverage (NOT production proof).
+ *
+ * These tests do NOT exercise a real OS/Docker backend. They use a recording
+ * backend + a poisoned launcher to prove the SandboxRunner — the canonical
+ * orchestration boundary — drives exactly one proxy launch and tears down in
+ * the documented order: backend.cleanup() runs BEFORE the externally owned
+ * proxy handle is closed. The poisoned legacy launcher asserts the runner does
+ * not invoke a backend-supplied launcher: the proxy lifecycle is owned solely
+ * by the runner's DefaultProxyLauncher seam.
+ */
+describe('SandboxRunner — orchestration order (I/O-seam, not production proof)', () => {
+  let storeDir: string;
+  let config: SandboxConfig;
+
+  beforeEach(() => {
+    storeDir = makeSnapshotStore();
+    config = makeTrustedConfig();
+  });
+
+  it('launches the proxy exactly once and tears down backend before proxy handle (run path)', async () => {
+    const { log, record } = makeEventLog();
+    const backend = new RecordingBackend('docker', 'full', record);
+    const proxy = new RecordingProxyLauncher(record);
+    const runner = new SandboxRunner({
+      config,
+      snapshotStoreDir: storeDir,
+      backends: [backend],
+      proxyLauncher: proxy,
+      secretProvider: new RecordingSecretProvider(),
+      installationIdFor: () => 'inst-1',
+      onEvent: record,
+    });
+    const { skill } = makeSkillFixture();
+    await runner.run({ skill, command: ['node', '/skill/scripts/invoke.js'] });
+
+    const names = log.map((e) => e.name);
+    const launches = names.filter((n) => n === 'proxy.launch');
+    expect(launches).toHaveLength(1);
+    // backend.cleanup precedes proxy.close in the run-path teardown.
+    const backendCleanupIdx = names.indexOf('backend.cleanup:docker');
+    const proxyCloseIdx = names.indexOf('proxy.close');
+    expect(backendCleanupIdx).toBeGreaterThanOrEqual(0);
+    expect(proxyCloseIdx).toBeGreaterThanOrEqual(0);
+    expect(backendCleanupIdx).toBeLessThan(proxyCloseIdx);
+  });
+
+  it('launches the proxy exactly once and tears down backend before proxy handle (spawn path)', async () => {
+    const { log, record } = makeEventLog();
+    const backend = new RecordingBackend('docker', 'full', record);
+    const proxy = new RecordingProxyLauncher(record);
+    const runner = new SandboxRunner({
+      config,
+      snapshotStoreDir: storeDir,
+      backends: [backend],
+      proxyLauncher: proxy,
+      secretProvider: new RecordingSecretProvider(),
+      installationIdFor: () => 'inst-1',
+      onEvent: record,
+    });
+    const { skill } = makeSkillFixture();
+    const session = await runner.spawn({ skill, command: ['node', '/skill/scripts/invoke.js'] });
+    await session.close();
+
+    const names = log.map((e) => e.name);
+    const launches = names.filter((n) => n === 'proxy.launch');
+    expect(launches).toHaveLength(1);
+    // spawn-path teardown order: process.close → backend.cleanup → proxy.close.
+    const procCloseIdx = names.indexOf('process.close:docker');
+    const backendCleanupIdx = names.indexOf('backend.cleanup:docker');
+    const proxyCloseIdx = names.indexOf('proxy.close');
+    expect(procCloseIdx).toBeGreaterThanOrEqual(0);
+    expect(backendCleanupIdx).toBeGreaterThanOrEqual(0);
+    expect(proxyCloseIdx).toBeGreaterThanOrEqual(0);
+    expect(procCloseIdx).toBeLessThan(backendCleanupIdx);
+    expect(backendCleanupIdx).toBeLessThan(proxyCloseIdx);
+  });
+
+  it('does not consult a poisoned legacy launcher on the backend; the runner owns the single launch', async () => {
+    const { log, record } = makeEventLog();
+    const backend = new RecordingBackend('os', 'full', record);
+    // Poisoned legacy seam: if any code path hands the backend a launcher and
+    // invokes it, this throws and the run must still surface a clean failure
+    // (or success) — never a second launch. The runner's own launcher is the
+    // recording one below; the poisoned launcher is attached to the backend
+    // fixture only to prove the runner never delegates to it.
+    const poisonedLegacyLaunch = vi.fn(async () => {
+      throw new Error('poison: legacy backend launcher must never be invoked');
+    });
+    (backend as unknown as { proxyLauncher?: { launch: typeof poisonedLegacyLaunch } }).proxyLauncher = {
+      launch: poisonedLegacyLaunch,
+    };
+    const proxy = new RecordingProxyLauncher(record);
+    const runner = new SandboxRunner({
+      config,
+      snapshotStoreDir: storeDir,
+      backends: [backend],
+      proxyLauncher: proxy,
+      secretProvider: new RecordingSecretProvider(),
+      installationIdFor: () => 'inst-1',
+      onEvent: record,
+    });
+    const { skill } = makeSkillFixture();
+    await runner.run({ skill, command: ['node', '/skill/scripts/invoke.js'] });
+
+    expect(poisonedLegacyLaunch).not.toHaveBeenCalled();
+    const launches = log.map((e) => e.name).filter((n) => n === 'proxy.launch');
+    expect(launches).toHaveLength(1);
   });
 });
 
