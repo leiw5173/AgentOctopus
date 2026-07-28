@@ -113,9 +113,11 @@ async function sha256File(p: string): Promise<string> {
  * expected permission bits (typically 0644 — the bundle needs to be
  * readable, not executable). We enforce the digest + size and forbid
  * group/world-writability; the manifest's `helperSha256` field is the
- * bundle's SHA-256.
+ * bundle's SHA-256 (bare 64 lowercase hex, no `sha256:` prefix).
+ *
+ * Exported so the portable manifest-shape test exercises the REAL verifier.
  */
-async function verifyProxyBundle(
+export async function verifyProxyBundle(
   bundlePath: string,
   manifestPath: string,
 ): Promise<void> {

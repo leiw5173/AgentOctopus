@@ -118,15 +118,26 @@ const LEVEL_RANK: Record<IsolationLevel, number> = {
  * Fail-closed backend selection (spec §7): in `auto` mode, choose a backend
  * whose isolationLevel meets `minIsolationLevel` AND whose probe passes. Never
  * silently degrade to a weaker backend — refuse instead.
+ *
+ * Probing happens BEFORE the isolationLevel rank check: a backend may start
+ * at `restricted` and only reach `full` after a live capability probe (e.g.
+ * the OS backend). Ranking before probing would drop such a backend and never
+ * observe its promoted level, so the probe runs first and the post-probe
+ * `isolationLevel` is what's ranked. Fail-closed is preserved: a backend whose
+ * probe fails OR whose post-probe level still falls short is excluded.
  */
 export async function selectBackend(config: SandboxConfig, available: SandboxBackend[]): Promise<SandboxBackend> {
   const required = LEVEL_RANK[config.minIsolationLevel];
 
   const candidates: SandboxBackend[] = [];
   for (const b of available) {
-    if (LEVEL_RANK[b.isolationLevel] < required) continue; // too weak — excluded
     if (config.defaultBackend !== 'auto' && b.kind !== config.defaultBackend) continue;
-    if (await b.probe()) candidates.push(b);
+    // Probe FIRST: a backend may promote its isolationLevel from restricted to
+    // full only after a live capability check. Ranking before probing would
+    // drop it and never observe the promoted level.
+    if (!(await b.probe())) continue; // probe failed — excluded
+    if (LEVEL_RANK[b.isolationLevel] < required) continue; // still too weak post-probe
+    candidates.push(b);
   }
 
   // Prefer the strongest available (full > restricted > ...).

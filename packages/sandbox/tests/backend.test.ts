@@ -9,6 +9,7 @@ import {
   type BackendPrepareOptions,
 } from '../src/backend.js';
 import { SandboxConfigSchema } from '../src/schema.js';
+import type { BackendKind, IsolationLevel } from '../src/types.js';
 
 const fake = (kind: any, level: any, ok: boolean): SandboxBackend => ({
   kind, isolationLevel: level,
@@ -53,6 +54,72 @@ describe('selectBackend (fail-closed)', () => {
   it('does not auto-select a restricted backend even if available', async () => {
     await expect(selectBackend(cfg, [fake('subprocess', 'restricted', true), fake('ssh', 'remote-unverified', true)]))
       .rejects.toBeInstanceOf(NoFullBackendError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 7 Task 1 — probe-before-rank regression.
+// A backend that starts at `restricted` but probes to `full` must be selected
+// for `auto/full`. The old code ranked BEFORE probing, dropping such a backend.
+// ---------------------------------------------------------------------------
+
+/**
+ * A backend whose `isolationLevel` mutates on probe: it starts `restricted`
+ * but reaches `full` once `probe()` succeeds (mirrors the real OS backend,
+ * which starts `restricted` and promotes to `full` only after a live capability
+ * probe). If `probeOk` is false the level stays `restricted`.
+ */
+class ProbeGatedBackend implements SandboxBackend {
+  kind: BackendKind;
+  isolationLevel: IsolationLevel;
+  private readonly probeOk: boolean;
+  probed = false;
+
+  constructor(kind: BackendKind, probeOk: boolean) {
+    this.kind = kind;
+    this.isolationLevel = 'restricted';
+    this.probeOk = probeOk;
+  }
+
+  async probe(): Promise<boolean> {
+    this.probed = true;
+    if (this.probeOk) this.isolationLevel = 'full';
+    return this.probeOk;
+  }
+  prepareTopology = async () => ({ kind: 'in-process', listenHost: '127.0.0.1', reachableHost: '127.0.0.1' }) as ProxyCarrier;
+  prepare = async () => {};
+  spawn = async () => {
+    const { PassThrough } = await import('node:stream');
+    return {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exited: Promise.resolve({ exitCode: 0, stdout: '', stderr: '', timedOut: false,
+        meta: { isolationLevel: this.isolationLevel, backend: this.kind, degraded: false, degradationReasons: [] } }),
+      kill: async () => {},
+      close: async () => {},
+    };
+  };
+  run = async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false,
+    meta: { isolationLevel: this.isolationLevel, backend: this.kind, degraded: false, degradationReasons: [] } });
+  cleanup = async () => {};
+}
+
+describe('selectBackend (probe-before-rank)', () => {
+  const cfg = SandboxConfigSchema.parse({ defaultBackend: 'auto', minIsolationLevel: 'full' });
+
+  it('probes a restricted-start backend and selects it once it reaches full', async () => {
+    const b = new ProbeGatedBackend('os', true);
+    const chosen = await selectBackend(cfg, [b]);
+    expect(b.probed).toBe(true);
+    expect(chosen).toBe(b);
+    expect(chosen.isolationLevel).toBe('full');
+  });
+
+  it('fails closed when the probe does not promote to full', async () => {
+    const b = new ProbeGatedBackend('os', false);
+    await expect(selectBackend(cfg, [b])).rejects.toBeInstanceOf(NoFullBackendError);
+    expect(b.probed).toBe(true);
   });
 });
 

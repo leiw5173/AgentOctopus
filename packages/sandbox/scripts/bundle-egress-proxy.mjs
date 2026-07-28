@@ -70,13 +70,15 @@ async function main() {
   }
 
   // 2. Digest manifest (consumed by Plan 4 resolveOsArtifacts / linux-static).
+  //    Shape MUST match verifyProxyBundle() in src/os/os-backend.ts:
+  //    { schemaVersion:1, helperSha256:<bare 64 hex>, mode, size }. The digest
+  //    is bare hex (no `sha256:` prefix) and there is no `path` key.
   const bytes = await fs.readFile(OUTFILE);
   await fs.chmod(OUTFILE, 0o644).catch(() => {});
-  const sha256 = 'sha256:' + createHash('sha256').update(bytes).digest('hex');
+  const helperSha256 = createHash('sha256').update(bytes).digest('hex');
   const manifest = {
     schemaVersion: 1,
-    path: 'egress-proxy-server.mjs',
-    sha256,
+    helperSha256,
     mode: 0o644,
     size: bytes.length,
   };
@@ -157,7 +159,7 @@ async function main() {
     console.log('bundle-egress-proxy: OK');
     console.log(`  bundle:    ${OUTFILE}`);
     console.log(`  manifest:  ${MANIFEST_PATH}`);
-    console.log(`  sha256:    ${sha256}`);
+    console.log(`  helperSha256: ${helperSha256}`);
     console.log(`  size:      ${bytes.length} bytes`);
     console.log(`  smoke:     ready frame received (boundPort=${ready.boundPort}) from clean cwd`);
   } finally {
