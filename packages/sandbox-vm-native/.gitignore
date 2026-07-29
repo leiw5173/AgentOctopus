@@ -1,0 +1,11 @@
+# Build artifacts — produced by scripts/build-vm-helper.mjs
+prebuilds/**/sandbox-vm-helper
+prebuilds/**/*.o
+prebuilds/**/.tmp-*
+# Manifests and compile-ok markers are small JSON; commit them so the TCB
+# chain is auditable. Uncomment the following lines if they grow large:
+# prebuilds/**/sandbox-vm-helper.manifest.json
+# prebuilds/**/sandbox-vm-helper.compile-ok
+
+# Dist
+dist/

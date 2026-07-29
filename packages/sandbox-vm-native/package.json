@@ -8,6 +8,7 @@
   "files": ["README.md", "dist", "prebuilds"],
   "scripts": {
     "build": "tsc",
+    "build:helper": "node scripts/build-vm-helper.mjs",
     "dev": "tsc --watch",
     "test": "vitest run",
     "clean": "rm -rf dist"
