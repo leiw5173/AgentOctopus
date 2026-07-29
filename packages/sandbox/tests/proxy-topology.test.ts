@@ -204,6 +204,7 @@ async function orchestrate(input: {
   const prepare: BackendPrepareOptions = {
     ...policy,
     snapshotRoot,
+    expectedSnapshotDigest: expectedDigest,
     proxyAddr: proxyHandle.reachableAddr,
     caBundlePath: proxyHandle.caBundlePath,
     runtimeProfile: { id: 'rt', bins: ['node'], path: '/usr/bin', dockerImage: undefined },

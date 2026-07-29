@@ -72,6 +72,16 @@ export const ImmutableImageRefSchema = z.string().regex(
 );
 
 /**
+ * Content-addressed snapshot digest. The snapshot store produces
+ * `sha256:<64 lowercase hex>` (see snapshot.ts `canonicalDigest`), and this
+ * regex is the single source of truth for validating a digest handed to a
+ * backend as `BackendPrepareOptions.expectedSnapshotDigest`. Lowercase only —
+ * no `i` flag — so an uppercase digest the producer never emits is also
+ * rejected at the consumer.
+ */
+export const SNAPSHOT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/**
  * Trusted `octopus.json` `sandbox` section. `.strict()` rejects unknown fields
  * so legacy/malformed config is rejected rather than silently dropped.
  */
@@ -92,6 +102,16 @@ export const SandboxConfigSchema = z
               manifestPath: z.string(),
               nodePath: z.enum(['/usr/bin/node', '/bin/node', '/usr/local/bin/node']),
             })
+            .optional(),
+          /**
+           * Trusted Darwin restricted-runtime identity. `manifestPath` is the
+           * host path of the verified macOS Node runtime closure manifest
+           * (T5 audits the closure; T7/T10 consume it). `.strict()` rejects
+           * unknown nested fields so a typo cannot silently weaken the gate.
+           */
+          darwinRuntime: z
+            .object({ manifestPath: z.string() })
+            .strict()
             .optional(),
         }),
       )

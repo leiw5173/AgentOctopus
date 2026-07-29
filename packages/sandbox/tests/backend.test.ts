@@ -288,6 +288,13 @@ describe('SandboxBackend type-level contract', () => {
     expectTypeOf<BackendPrepareOptions['proxyAddr']>().toBeString();
     expectTypeOf<BackendPrepareOptions['caBundlePath']>().toBeString();
   });
+
+  it('BackendPrepareOptions requires expectedSnapshotDigest and ResolvedRuntimeProfile allows darwinRuntime', () => {
+    expectTypeOf<BackendPrepareOptions['expectedSnapshotDigest']>().toBeString();
+    expectTypeOf<BackendPrepareOptions['runtimeProfile']['darwinRuntime']>().toEqualTypeOf<
+      { manifestPath: string } | undefined
+    >();
+  });
 });
 
 describe('prepareTopology returns a ProxyCarrier (canonical union)', () => {

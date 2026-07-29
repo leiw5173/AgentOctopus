@@ -58,6 +58,7 @@ import type {
   BackendRunResult,
   ProxyCarrier,
 } from '../backend.js';
+import { SNAPSHOT_DIGEST_RE } from '../schema.js';
 import type { IsolationLevel } from '../types.js';
 import {
   probeOsCaps,
@@ -886,6 +887,14 @@ function validatePrepareOptions(opts: BackendPrepareOptions): void {
   }
   if (typeof opts.snapshotRoot !== 'string' || opts.snapshotRoot.length === 0) {
     throw new Error('OsSandboxBackend.prepare: snapshotRoot is required');
+  }
+  // Assert the expected snapshot digest FORMAT. The runner owns the full
+  // byte-for-byte re-verify (verifySnapshot runs immediately before
+  // backend.prepare); the backend only gates on the canonical
+  // `sha256:<64 lowercase hex>` shape so a malformed/missing digest can
+  // never reach a mount.
+  if (!SNAPSHOT_DIGEST_RE.test(opts.expectedSnapshotDigest)) {
+    throw new Error('OsSandboxBackend.prepare: expectedSnapshotDigest must match sha256:<64 lowercase hex>');
   }
   if (!opts.runtimeProfile.osRuntime) {
     throw new Error('OsSandboxBackend.prepare: runtimeProfile.osRuntime is required for the os backend');

@@ -119,4 +119,75 @@ describe('sandbox schemas', () => {
       /auto.*docker.*os.*subprocess.*ssh.*none/s,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // T4 — darwinRuntime on trusted runtime profiles.
+  // -------------------------------------------------------------------------
+
+  function cfgWith(profileExtra: Record<string, unknown>) {
+    return {
+      runtimeProfiles: {
+        rt: { bins: ['node'], path: '/usr/bin', ...profileExtra },
+      },
+    };
+  }
+
+  it('accepts darwinRuntime and rejects unknown nested fields', () => {
+    expect(() =>
+      SandboxConfigSchema.parse(cfgWith({ darwinRuntime: { manifestPath: '/m.json' } })),
+    ).not.toThrow();
+    expect(() =>
+      SandboxConfigSchema.parse(cfgWith({ darwinRuntime: { manifestPath: '/m.json', oops: 1 } })),
+    ).toThrow();
+  });
+
+  it('parses Docker-only, Linux-only, Darwin-only, and mixed runtime profiles', () => {
+    const digest = 'a'.repeat(64);
+    const parsed = SandboxConfigSchema.parse({
+      runtimeProfiles: {
+        dockerOnly: {
+          bins: ['node'],
+          path: '/usr/local/bin',
+          dockerImage: `node@sha256:${digest}`,
+        },
+        linuxOnly: {
+          bins: ['node'],
+          path: '/usr/bin',
+          osRuntime: {
+            artifactPath: '/runtime/linux-node22.rootfs.tar.zst',
+            manifestPath: '/runtime/linux-node22.manifest.json',
+            nodePath: '/usr/bin/node',
+          },
+        },
+        darwinOnly: {
+          bins: ['node'],
+          path: '/usr/local/bin',
+          darwinRuntime: { manifestPath: '/runtime/darwin-node22.manifest.json' },
+        },
+        mixed: {
+          bins: ['node'],
+          path: '/usr/bin',
+          dockerImage: `node@sha256:${digest}`,
+          osRuntime: {
+            artifactPath: '/runtime/linux-node22.rootfs.tar.zst',
+            manifestPath: '/runtime/linux-node22.manifest.json',
+            nodePath: '/usr/bin/node',
+          },
+          darwinRuntime: { manifestPath: '/runtime/darwin-node22.manifest.json' },
+        },
+      },
+    });
+    expect(parsed.runtimeProfiles.dockerOnly?.dockerImage).toBe(`node@sha256:${digest}`);
+    expect(parsed.runtimeProfiles.linuxOnly?.osRuntime?.nodePath).toBe('/usr/bin/node');
+    expect(parsed.runtimeProfiles.darwinOnly?.darwinRuntime?.manifestPath).toBe(
+      '/runtime/darwin-node22.manifest.json',
+    );
+    expect(parsed.runtimeProfiles.mixed?.darwinRuntime?.manifestPath).toBe(
+      '/runtime/darwin-node22.manifest.json',
+    );
+    expect(parsed.runtimeProfiles.mixed?.dockerImage).toBe(`node@sha256:${digest}`);
+    expect(parsed.runtimeProfiles.mixed?.osRuntime?.artifactPath).toBe(
+      '/runtime/linux-node22.rootfs.tar.zst',
+    );
+  });
 });

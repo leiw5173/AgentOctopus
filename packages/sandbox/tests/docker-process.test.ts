@@ -52,6 +52,7 @@ function makePrepareOpts(): BackendPrepareOptions {
     denied: { hosts: [], credentials: [] },
     resources: { memoryBytes: 64 * 1024 * 1024, cpus: 0.5, timeoutMs: 5000 },
     snapshotRoot: '/snap/a',
+    expectedSnapshotDigest: `sha256:${'a'.repeat(64)}`,
     proxyAddr: 'http://egress-proxy:8080',
     caBundlePath: '/host/session-ca.pem',
     runtimeProfile: { id: 'unit', bins: ['node'], path: '/usr/local/bin', dockerImage: DUMMY_IMAGE },

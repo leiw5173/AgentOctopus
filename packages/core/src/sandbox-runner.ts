@@ -139,6 +139,7 @@ export const SANDBOX_ERROR = {
   INSTALLATION_METADATA_MISSING: 'INSTALLATION_METADATA_MISSING',
   COMMAND_PATH_REJECTED: 'COMMAND_PATH_REJECTED',
   RESERVED_ENV_REJECTED: 'RESERVED_ENV_REJECTED',
+  RUNTIME_BACKEND_MISMATCH: 'RUNTIME_BACKEND_MISMATCH',
 } as const;
 
 export type SandboxErrorCode = (typeof SANDBOX_ERROR)[keyof typeof SANDBOX_ERROR];
@@ -332,12 +333,26 @@ function resolveRuntimeProfile(
       );
     }
     const p = profiles[firstKey]!;
-    return { id: firstKey, bins: p.bins, path: p.path, dockerImage: p.dockerImage, osRuntime: p.osRuntime };
+    return {
+      id: firstKey,
+      bins: p.bins,
+      path: p.path,
+      dockerImage: p.dockerImage,
+      osRuntime: p.osRuntime,
+      darwinRuntime: p.darwinRuntime,
+    };
   }
 
   for (const [id, p] of Object.entries(profiles)) {
     if (requestedBins.every((b) => p.bins.includes(b))) {
-      return { id, bins: p.bins, path: p.path, dockerImage: p.dockerImage, osRuntime: p.osRuntime };
+      return {
+        id,
+        bins: p.bins,
+        path: p.path,
+        dockerImage: p.dockerImage,
+        osRuntime: p.osRuntime,
+        darwinRuntime: p.darwinRuntime,
+      };
     }
   }
 
@@ -345,6 +360,54 @@ function resolveRuntimeProfile(
     SANDBOX_ERROR.UNSUPPORTED_RUNTIME_REQUIREMENTS,
     `no single trusted runtime profile covers requested bins: ${requestedBins.join(', ')}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime profile ↔ backend cross-check (T4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fail-fast guard: reject a trusted runtime profile that cannot satisfy the
+ * selected backend BEFORE any topology creation or proxy launch.
+ *
+ *   - docker           → requires dockerImage; rejects darwinRuntime-only
+ *   - os / Linux full  → requires osRuntime; rejects darwinRuntime-only
+ *   - os / Darwin restricted → requires darwinRuntime; rejects dockerImage-only
+ *     and osRuntime-only
+ *
+ * A mixed profile (carrying several identity blocks) satisfies each backend
+ * via the field relevant to that backend, so the same trusted profile can
+ * serve a Linux host and a macOS host without duplication. This check never
+ * weakens a valid config: a profile that already satisfied its backend
+ * before T4 still satisfies it after.
+ */
+function assertRuntimeProfileMatchesBackend(
+  runtimeProfile: ResolvedRuntimeProfile,
+  backend: SandboxBackend,
+): void {
+  const mismatch = (need: string): SandboxRunnerError =>
+    new SandboxRunnerError(
+      SANDBOX_ERROR.RUNTIME_BACKEND_MISMATCH,
+      `trusted runtime profile '${runtimeProfile.id}' cannot satisfy backend ` +
+        `'${backend.kind}' (isolationLevel '${backend.isolationLevel}'): requires ${need}`,
+    );
+
+  if (backend.kind === 'docker') {
+    if (!runtimeProfile.dockerImage) throw mismatch('dockerImage');
+    return;
+  }
+  if (backend.kind === 'os') {
+    if (backend.isolationLevel === 'restricted') {
+      // Darwin restricted lane: the verified macOS runtime closure is the
+      // ONLY acceptable identity; dockerImage/osRuntime do not apply.
+      if (!runtimeProfile.darwinRuntime) throw mismatch('darwinRuntime');
+      return;
+    }
+    // Linux full lane.
+    if (!runtimeProfile.osRuntime) throw mismatch('osRuntime');
+    return;
+  }
+  // subprocess / ssh / none: no runtime-identity gate (unchanged behavior).
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +613,12 @@ export class SandboxRunner {
         throw err;
       }
 
+      // 6b. fail-fast: the trusted runtime profile MUST satisfy the selected
+      // backend. Checked AFTER selection (so backend.kind/isolationLevel are
+      // known) and BEFORE prepareTopology()/proxy launch so a mismatched
+      // config never creates topology or starts a proxy.
+      assertRuntimeProfileMatchesBackend(runtimeProfile, backend);
+
       // 7. prepare topology (creates carrier before proxy)
       const carrier = await backend.prepareTopology();
 
@@ -583,10 +652,14 @@ export class SandboxRunner {
         );
       }
 
-      // 11. prepare backend
+      // 11. prepare backend. Hand the backend the exact identity.digest the
+      // runner built and verified: the backend asserts its FORMAT (see
+      // SNAPSHOT_DIGEST_RE); the full re-verify stays here in the runner as
+      // the last-filesystem-op before prepare (step 10).
       const prepareOpts: BackendPrepareOptions = {
         ...policy,
         snapshotRoot,
+        expectedSnapshotDigest: identity.digest,
         proxyAddr: handle.reachableAddr,
         caBundlePath: handle.caBundlePath,
         runtimeProfile,

@@ -113,6 +113,7 @@ function validPrepareOpts(carrier: Extract<ProxyCarrier, { kind: 'linux-static' 
     denied: { hosts: [], credentials: [] },
     resources: { memoryBytes: 64 * 1024 * 1024, cpus: 0.5, timeoutMs: 5000 },
     snapshotRoot: '/snap/a',
+    expectedSnapshotDigest: `sha256:${'a'.repeat(64)}`,
     proxyAddr: suppliedProxyAddr(carrier),
     caBundlePath: SUPPLIED_CA_BUNDLE,
     runtimeProfile: {

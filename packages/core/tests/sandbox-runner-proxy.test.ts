@@ -194,8 +194,23 @@ describe('SandboxRunner — orchestration order (I/O-seam, not production proof)
       launch: poisonedLegacyLaunch,
     };
     const proxy = new RecordingProxyLauncher(record);
+    // The default makeTrustedConfig profiles are docker-only; an os/full
+    // backend requires osRuntime (T4 runtime/backend fail-fast). Extend the
+    // node profile with a Linux osRuntime block so this test stays focused on
+    // the poisoned-launcher invariant, not the identity gate.
+    const mixedConfig = makeTrustedConfig();
+    mixedConfig.runtimeProfiles = {
+      node: {
+        ...mixedConfig.runtimeProfiles.node!,
+        osRuntime: {
+          artifactPath: '/runtime/linux-node22.rootfs.tar.zst',
+          manifestPath: '/runtime/linux-node22.manifest.json',
+          nodePath: '/usr/bin/node',
+        },
+      },
+    };
     const runner = new SandboxRunner({
-      config,
+      config: mixedConfig,
       snapshotStoreDir: storeDir,
       backends: [backend],
       proxyLauncher: proxy,

@@ -54,6 +54,7 @@ function prepareOpts(config = unitConfig): BackendPrepareOptions {
   return {
     ...resolvePolicy(descriptor, config),
     snapshotRoot: descriptor.snapshotRoot,
+    expectedSnapshotDigest: descriptor.identity.digest,
     proxyAddr: 'http://egress-proxy:8080',
     caBundlePath: '/host/session-ca.pem',
     runtimeProfile: { id: 'unit', bins: ['node'], path: '/usr/local/bin', dockerImage: DUMMY_IMAGE },

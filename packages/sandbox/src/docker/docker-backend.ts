@@ -11,7 +11,7 @@ import type {
   ProxyCarrier,
 } from '../backend.js';
 import type { SandboxConfig } from '../schema.js';
-import { ImmutableImageRefSchema } from '../schema.js';
+import { ImmutableImageRefSchema, SNAPSHOT_DIGEST_RE } from '../schema.js';
 import { parseByteSize, parseCpuCount, parseTimeoutMs } from '../policy.js';
 import { runDocker, dockerAvailable } from './cli.js';
 import { createInternalNetwork, createEgressNetwork, removeNetwork } from './network.js';
@@ -104,6 +104,14 @@ export class DockerBackend implements SandboxBackend {
       throw new Error('invalid canonical guest mount paths');
     }
     if (new URL(opts.proxyAddr).hostname !== carrier.reachableHost) throw new Error('proxy carrier mismatch');
+    // Assert the expected snapshot digest FORMAT. The runner owns the full
+    // byte-for-byte re-verify (verifySnapshot runs immediately before
+    // backend.prepare); the backend only gates on the canonical
+    // `sha256:<64 lowercase hex>` shape so a malformed/missing digest can
+    // never reach a mount.
+    if (!SNAPSHOT_DIGEST_RE.test(opts.expectedSnapshotDigest)) {
+      throw new Error('DockerBackend.prepare: expectedSnapshotDigest must match sha256:<64 lowercase hex>');
+    }
     ImmutableImageRefSchema.parse(opts.runtimeProfile.dockerImage);
     parseTimeoutMs(opts.resources.timeoutMs);
     if (!Number.isSafeInteger(opts.resources.memoryBytes) || opts.resources.memoryBytes <= 0) throw new Error('invalid memory');

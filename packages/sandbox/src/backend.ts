@@ -6,6 +6,7 @@ import type { SandboxConfig } from './schema.js';
 export interface ResolvedRuntimeProfile {
   readonly id: string;
   readonly bins: string[];
+  /** Linux/Docker guest PATH. Darwin restricted runtime ignores this field. */
   readonly path: string;
   readonly dockerImage?: string;
   readonly osRuntime?: {
@@ -13,6 +14,12 @@ export interface ResolvedRuntimeProfile {
     manifestPath: string;
     nodePath: '/usr/bin/node' | '/bin/node' | '/usr/local/bin/node';
   };
+  /**
+   * Trusted Darwin restricted-runtime identity. `manifestPath` is the host
+   * path of the verified macOS Node runtime closure manifest. Present only on
+   * profiles intended for the Darwin restricted OS backend.
+   */
+  readonly darwinRuntime?: { manifestPath: string };
 }
 
 /**
@@ -79,9 +86,17 @@ export interface SandboxProcess {
  * policy remains the source of truth. Proxy and CA values are mandatory because
  * DefaultProxyLauncher always creates a per-session handle, including deny-all
  * sessions. Guest mount paths are literal contracts shared by every backend.
+ *
+ * `expectedSnapshotDigest` is REQUIRED: the runner hands the backend the exact
+ * `identity.digest` it built and verified so the backend can assert the digest
+ * FORMAT (`sha256:` + 64 lowercase hex, see `SNAPSHOT_DIGEST_RE`) before any
+ * mount. The full byte-for-byte re-verify against the snapshot tree remains
+ * the runner's last-filesystem-op duty (verifySnapshot runs immediately
+ * before backend.prepare) — the backend never re-walks the tree.
  */
 export interface BackendPrepareOptions extends SandboxPolicy {
   snapshotRoot: string;
+  expectedSnapshotDigest: string;
   proxyAddr: string;
   caBundlePath: string;
   runtimeProfile: ResolvedRuntimeProfile;
