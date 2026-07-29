@@ -146,6 +146,7 @@ class RecordingPort implements BoundSandboxExecutionPort {
     rawText: 'generic-output',
     isolationLevel: 'full',
     backend: 'docker',
+    meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
   };
   async run(): Promise<SandboxRunOutput> {
     this.runCalls++;

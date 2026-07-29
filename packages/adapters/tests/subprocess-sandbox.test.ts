@@ -30,6 +30,7 @@ class RecordingPort implements BoundSandboxExecutionPort {
     rawText: '{"ok":true}',
     isolationLevel: 'full',
     backend: 'docker',
+    meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
   };
 
   async run(input: SandboxCommandRequest): Promise<SandboxRunOutput> {
@@ -92,7 +93,13 @@ describe('SubprocessAdapter (sandbox convergence)', () => {
   it('parses JSON stdout into data', async () => {
     const skill = makeSkill();
     const port = new RecordingPort();
-    port.runResult = { success: true, rawText: '{"a":1}', isolationLevel: 'full', backend: 'docker' };
+    port.runResult = {
+      success: true,
+      rawText: '{"a":1}',
+      isolationLevel: 'full',
+      backend: 'docker',
+      meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
+    };
     const adapter = new SubprocessAdapter();
 
     const result = await adapter.invoke({ skill, input: {} }, makeContext(port, {}));
@@ -108,6 +115,7 @@ describe('SubprocessAdapter (sandbox convergence)', () => {
       error: 'NO_SATISFYING_BACKEND: no sandbox backend meets isolationLevel >= full',
       isolationLevel: 'none',
       backend: 'none',
+      meta: { isolationLevel: 'none', backend: 'none', degraded: false, degradationReasons: [] },
     };
     const adapter = new SubprocessAdapter();
 

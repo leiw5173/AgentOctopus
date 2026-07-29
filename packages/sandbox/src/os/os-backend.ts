@@ -58,6 +58,7 @@ import type {
   BackendRunResult,
   ProxyCarrier,
 } from '../backend.js';
+import { ContainmentCleanupError } from '../backend.js';
 import { SNAPSHOT_DIGEST_RE } from '../schema.js';
 import type { IsolationLevel } from '../types.js';
 import {
@@ -288,6 +289,13 @@ export class OsSandboxBackend implements SandboxBackend {
   private activeChild: ActiveChild | undefined;
   private specDir: string | undefined;
   private cleaned = false;
+  /**
+   * Memoized FIRST cleanup outcome (T3 contract). Once set, repeat cleanup()
+   * calls rethrow the same ContainmentCleanupError or resolve identically.
+   * Stored AFTER cleanupPartial completes so concurrent callers serialize on
+   * `cleaned` + this memo.
+   */
+  private cleanupOutcome: { error?: ContainmentCleanupError } | undefined;
 
   constructor(opts: OsSandboxBackendOptions) {
     if (!opts.sessionId || typeof opts.sessionId !== 'string') {
@@ -516,7 +524,10 @@ export class OsSandboxBackend implements SandboxBackend {
     } catch (err) {
       // Clean partial state and rethrow. NEVER convert a setup failure into
       // a restricted run — prepare() throws and the selector fails closed.
-      await this.cleanupPartial();
+      // The partial-cleanup reasons are LOCAL: this call is NOT the memoized
+      // cleanup() outcome (a subsequent cleanup() runs its own pass).
+      const partialReasons: string[] = [];
+      await this.cleanupPartial(partialReasons);
       throw err;
     }
   }
@@ -778,19 +789,52 @@ export class OsSandboxBackend implements SandboxBackend {
   // -------------------------------------------------------------------------
 
   async cleanup(): Promise<void> {
+    // Memoized first outcome (T3): repeat calls rethrow the SAME
+    // ContainmentCleanupError instance (or resolve identically if the first
+    // call resolved). Never logs-and-swallows a containment failure.
+    if (this.cleanupOutcome) {
+      if (this.cleanupOutcome.error) throw this.cleanupOutcome.error;
+      return;
+    }
     if (this.cleaned) return;
     this.cleaned = true;
-    await this.cleanupPartial();
+    const containmentReasons: string[] = [];
+    try {
+      await this.cleanupPartial(containmentReasons);
+    } finally {
+      const error =
+        containmentReasons.length > 0
+          ? new ContainmentCleanupError(containmentReasons)
+          : undefined;
+      this.cleanupOutcome = { error };
+    }
+    if (this.cleanupOutcome.error) throw this.cleanupOutcome.error;
   }
 
-  /** Reverse-dependency-order cleanup. Aggregates errors without skipping later cleanup. */
-  private async cleanupPartial(): Promise<void> {
-    const errors: unknown[] = [];
-    const tryStep = async (fn: () => Promise<void>): Promise<void> => {
-      try { await fn(); } catch (err) { errors.push(err); }
+  /**
+   * Reverse-dependency-order cleanup. Aggregates errors without skipping
+   * later cleanup. CONTAINMENT steps (process kill via cgroup.kill /
+   * waitEmpty, NETWORK teardown via netns.cleanup) push their reason strings
+   * into `containmentReasons` — these become the ContainmentCleanupError's
+   * reasons. Host-filesystem hygiene steps (rootfs cleanup, launch-spec
+   * removal, spec-dir removal) are best-effort soft failures: their reasons
+   * are NOT appended to containmentReasons, never become a
+   * ContainmentCleanupError, and never carry credential material.
+   */
+  private async cleanupPartial(containmentReasons: string[]): Promise<void> {
+    const softErrors: unknown[] = [];
+    const tryContainment = async (fn: () => Promise<void>): Promise<void> => {
+      try { await fn(); } catch (err) {
+        // Reason strings are the trusted teardown error's .message only — no
+        // credential/grant material is ever interpolated here.
+        containmentReasons.push((err as Error).message ?? String(err));
+      }
+    };
+    const trySoft = async (fn: () => Promise<void>): Promise<void> => {
+      try { await fn(); } catch (err) { softErrors.push(err); }
     };
 
-    // 1. Active helper: cgroup kill/waitEmpty.
+    // 1. Active helper: cgroup kill/waitEmpty (CONTAINMENT — process teardown).
     // I1 note: cleanup-time kills here and below are kernel-idempotent
     // follow-ups AFTER the per-spawn containment kill (which is structurally
     // once-per-spawn via the inFlightKill guard inside spawn()). cleanup()
@@ -801,28 +845,31 @@ export class OsSandboxBackend implements SandboxBackend {
       const { child, launchSpecPath } = this.activeChild;
       this.activeChild = undefined;
       if (this.cgroup) {
-        await tryStep(async () => { await this.cgroup!.kill(); });
-        await tryStep(async () => { await this.cgroup!.waitEmpty(2000); });
+        await tryContainment(async () => { await this.cgroup!.kill(); });
+        await tryContainment(async () => { await this.cgroup!.waitEmpty(2000); });
       }
       try { child.kill('SIGKILL'); } catch { /* best-effort */ }
-      await tryStep(() => cleanupLaunchSpec(launchSpecPath));
+      await trySoft(() => cleanupLaunchSpec(launchSpecPath));
     }
 
-    // 2. Cgroup kill/wait-empty/remove. Same kernel-idempotence note as (1):
-    // this is cleanup of the session cgroup, not a containment event.
+    // 2. Cgroup kill/wait-empty (CONTAINMENT). Same kernel-idempotence note
+    // as (1): this is cleanup of the session cgroup, not a containment event.
+    // The directory-removal step (cg.cleanup()) is host hygiene — by the
+    // time it runs, kill+waitEmpty have already drained the cgroup, so a
+    // removal failure can only leak an EMPTY cgroup dir, never a live skill.
     if (this.cgroup) {
       const cg = this.cgroup;
       this.cgroup = undefined;
-      await tryStep(() => cg.kill());
-      await tryStep(() => cg.waitEmpty(2000));
-      await tryStep(() => cg.cleanup());
+      await tryContainment(() => cg.kill());
+      await tryContainment(() => cg.waitEmpty(2000));
+      await trySoft(() => cg.cleanup());
     }
 
-    // 3. Helper/mount/rootfs cleanup.
+    // 3. Helper/mount/rootfs cleanup (host fs hygiene — soft).
     if (this.layout) {
       const l = this.layout;
       this.layout = undefined;
-      await tryStep(() => l.cleanup());
+      await trySoft(() => l.cleanup());
     }
 
     // 4. The externally owned proxy handle is NOT closed here. The proxy
@@ -832,31 +879,29 @@ export class OsSandboxBackend implements SandboxBackend {
     // backend runtime/topology → external proxy handle). See the class header
     // for the safety rationale.
 
-    // 5. Netns+nft cleanup.
+    // 5. Netns+nft cleanup (CONTAINMENT — network teardown).
     if (this.netns) {
       const n = this.netns;
       this.netns = undefined;
-      await tryStep(() => n.cleanup());
+      await tryContainment(() => n.cleanup());
     }
 
-    // 6. Launch-spec dir removal.
+    // 6. Launch-spec dir removal (host fs hygiene — soft).
     if (this.specDir) {
       const d = this.specDir;
       this.specDir = undefined;
-      await tryStep(() => rm(d, { recursive: true, force: true }));
+      await trySoft(() => rm(d, { recursive: true, force: true }));
     }
 
     this.carrier = undefined;
     this.opts = undefined;
     this.proxyCgroupPath = undefined;
 
-    if (errors.length > 0) {
-      // Aggregate, but don't throw on idempotent cleanup() calls — the
-      // caller may legitimately call cleanup() after partial failure.
-      // We surface errors via console diagnostics rather than breaking the
-      // idempotence contract.
+    if (softErrors.length > 0) {
+      // Soft failures are diagnostic-only — they must never surface as a
+      // ContainmentCleanupError and never break the idempotence contract.
       // eslint-disable-next-line no-console
-      console.warn('OsSandboxBackend.cleanup: aggregated errors', errors);
+      console.warn('OsSandboxBackend.cleanup: aggregated soft errors', softErrors);
     }
   }
 }

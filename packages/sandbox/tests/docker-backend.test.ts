@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DockerBackend, buildDockerArgs } from '../src/docker/docker-backend.js';
+import { ContainmentCleanupError } from '../src/backend.js';
 import { buildSnapshot } from '../src/snapshot.js';
 import { resolvePolicy } from '../src/policy.js';
 import { ImmutableImageRefSchema, SandboxConfigSchema } from '../src/schema.js';
@@ -183,6 +184,67 @@ describe('DockerBackend fail-closed', () => {
     const invalidConfig = { ...unitConfig, proxy: { artifact: 'example/proxy:latest' } } as typeof unitConfig;
     const be = new DockerBackend({ config: invalidConfig, sessionId: `mutproxy-${process.pid}` });
     await expect(be.prepareTopology()).rejects.toThrow(/immutable|sha256/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cleanup() containment semantics (T3): runtime-container removal failure is a
+// ContainmentCleanupError; network teardown races stay best-effort soft
+// reasons. cleanup() memoizes the FIRST outcome — repeat calls rethrow the
+// same error or resolve identically.
+// ---------------------------------------------------------------------------
+
+describe('DockerBackend cleanup containment taxonomy (T3)', () => {
+  function makeBackendWithRunDocker(
+    runDocker: (args: string[]) => Promise<unknown>,
+  ): DockerBackend {
+    return new DockerBackend({
+      config: unitConfig,
+      sessionId: `t3-${Math.random().toString(36).slice(2, 8)}`,
+      deps: { runDocker: runDocker as never },
+    });
+  }
+
+  it('runtime container removal failure → ContainmentCleanupError (memoized)', async () => {
+    // The `rm -f <runtimeContainer>` step rejects — that may leave the
+    // runtime container alive → containment teardown failed.
+    const runDocker = vi.fn(async (args: string[]) => {
+      if (args[0] === 'rm' && args[1] === '-f') throw new Error('docker daemon unreachable');
+      return { stdout: '', stderr: '' };
+    });
+    const be = makeBackendWithRunDocker(runDocker);
+
+    const first = await be.cleanup().catch((e) => e);
+    expect(first).toBeInstanceOf(ContainmentCleanupError);
+    expect((first as ContainmentCleanupError).reasons.join(' ')).toMatch(/docker daemon unreachable/);
+
+    // Memoized: second call rethrows the SAME first outcome.
+    const second = await be.cleanup().catch((e) => e);
+    expect(second).toBe(first);
+  });
+
+  it('network teardown failure is best-effort (soft), NOT containment', async () => {
+    // `rm -f` succeeds (container is gone) but network removal fails. That is
+    // host hygiene — the runtime container is destroyed, so the skill cannot
+    // still be running. Resolves without ContainmentCleanupError.
+    const runDocker = vi.fn(async (args: string[]) => {
+      if (args[0] === 'network') throw new Error('network has active endpoints');
+      return { stdout: '', stderr: '' };
+    });
+    const be = makeBackendWithRunDocker(runDocker);
+    await expect(be.cleanup()).resolves.toBeUndefined();
+    // Idempotent resolve on second call too.
+    await expect(be.cleanup()).resolves.toBeUndefined();
+  });
+
+  it('cleanup() is memoized: first resolve, repeat resolve (no extra calls)', async () => {
+    const runDocker = vi.fn(async () => ({ stdout: '', stderr: '' }));
+    const be = makeBackendWithRunDocker(runDocker);
+    await be.cleanup();
+    const callsAfterFirst = runDocker.mock.calls.length;
+    await be.cleanup();
+    await be.cleanup();
+    expect(runDocker.mock.calls.length).toBe(callsAfterFirst);
   });
 });
 

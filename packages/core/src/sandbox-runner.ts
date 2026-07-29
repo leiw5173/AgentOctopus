@@ -52,6 +52,7 @@ import {
   resolvePolicy,
   selectBackend,
   NoFullBackendError,
+  ContainmentCleanupError,
   SandboxConfigSchema,
   DefaultProxyLauncher,
   type BackendPrepareOptions,
@@ -64,6 +65,7 @@ import {
   type SandboxBackend,
   type SandboxConfig,
   type SandboxProcess,
+  type SandboxResultMeta,
   type SandboxSkillDescriptor,
   type SecretProvider,
   type SpawnSpec,
@@ -104,12 +106,36 @@ export interface SandboxRunOutput {
   error?: string;
   isolationLevel: IsolationLevel;
   backend: BackendKind | 'none';
+  /**
+   * Machine-readable isolation outcome propagated verbatim from the backend's
+   * `BackendRunResult.meta` on the success path. When `backend.cleanup()`
+   * throws a `ContainmentCleanupError` AFTER the run completed, the runner
+   * DOWNGRADES this meta to `isolationLevel:'none'`, marks `degraded:true`,
+   * and appends the containment reasons plus any soft teardown reasons —
+   * because the isolation boundary may not have been fully torn down even
+   * though the child exited cleanly. Soft teardown failures (proxy close,
+   * session-dir removal) surface as `degradationReasons` entries WITHOUT
+   * downgrading the level.
+   */
+  meta: SandboxResultMeta;
 }
 
 export interface SandboxSession {
   readonly process: SandboxProcess;
   readonly isolationLevel: IsolationLevel;
   readonly backend: BackendKind;
+  /**
+   * Memoized promise resolving to the definitive post-close SandboxResultMeta.
+   * Resolves ONLY after `process.exited` settles AND `close()` completes
+   * (process close → backend cleanup → proxy close → session-dir removal).
+   * Reading it BEFORE `close()` resolves yields a PENDING promise BY DESIGN —
+   * the meta is not definitive until teardown has run and the runner has
+   * applied the same downgrade taxonomy as `run()`. If `close()` threw a
+   * `ContainmentCleanupError`, the resolved meta has `isolationLevel:'none'`
+   * and the containment reasons appended; the error itself rethrows from
+   * `close()` so callers may catch it explicitly.
+   */
+  readonly resultMeta: Promise<SandboxResultMeta>;
   close(): Promise<void>;
 }
 
@@ -182,6 +208,13 @@ export interface SandboxRunnerDeps {
    * SNAPSHOT_MISMATCH. NOT for production use.
    */
   afterBuildSnapshot?: (ctx: { snapshotRoot: string; identity: InstallationIdentity }) => void;
+  /**
+   * Test-only hook: session-dir removal primitive. Defaults to `fs/promises
+   * .rm(dir, { recursive: true, force: true })`. Tests inject a failure here
+   * to assert the soft-failure taxonomy (session-dir removal failure is a
+   * degradation reason, NEVER a containment error). NOT for production use.
+   */
+  rmSessionDir?: (sessionDir: string) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,12 +463,11 @@ async function provisionSecrets(
 /**
  * Best-effort removal of the per-session working directory. Session-dir
  * removal failure is trusted host filesystem hygiene, NOT skill containment —
- * it is never a ContainmentCleanupError and never throws from cleanup. (T3
- * appends a diagnostic degradation reason; T2 only guarantees best-effort,
- * never-throwing removal.)
+ * it is never a ContainmentCleanupError and never throws from cleanup. T3
+ * surfaces the failure as a soft degradation reason via the caller.
  */
-async function removeSessionDir(sessionDir: string): Promise<void> {
-  await rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+async function defaultRmSessionDir(sessionDir: string): Promise<void> {
+  await rm(sessionDir, { recursive: true, force: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +485,7 @@ export class SandboxRunner {
   private readonly afterBuildSnapshot:
     | ((ctx: { snapshotRoot: string; identity: InstallationIdentity }) => void)
     | undefined;
+  private readonly rmSessionDir: (sessionDir: string) => Promise<void>;
 
   constructor(opts: SandboxRunnerDeps) {
     // Parse trusted config with the canonical schema (Task 0 re-export).
@@ -469,6 +502,7 @@ export class SandboxRunner {
     this.installationIdFor = opts.installationIdFor ?? lookupInstallationId;
     this.onEvent = opts.onEvent;
     this.afterBuildSnapshot = opts.afterBuildSnapshot;
+    this.rmSessionDir = opts.rmSessionDir ?? defaultRmSessionDir;
   }
 
   // -----------------------------------------------------------------------
@@ -481,6 +515,14 @@ export class SandboxRunner {
       return session.output;
     }
     const { backend, proxyHandle, sessionDir } = session;
+    // Pinned control flow (T3 NEW-2):
+    //   (1) capture run result/error FIRST;
+    //   (2) cleanup AFTER capture, BEFORE any return;
+    //   (3) construct output LAST, applying the downgrade taxonomy.
+    let result: BackendRunResult | undefined;
+    let runError: unknown;
+    let containment: ContainmentCleanupError | undefined;
+    const soft: string[] = []; // non-containment degradation
     try {
       const env = buildGuestEnv({
         callerEnv: input.invocation?.env,
@@ -495,15 +537,36 @@ export class SandboxRunner {
         stdin: input.invocation?.stdin,
         timeoutMs: input.timeoutMs,
       };
-      const result = await backend.run(spec);
-      return this.toRunOutput(result, backend);
+      result = await backend.run(spec);
     } catch (err) {
-      return this.toErrorOutput(err, backend);
-    } finally {
-      await backend.cleanup().catch(() => {});
-      await proxyHandle.close().catch(() => {});
-      await removeSessionDir(sessionDir);
+      runError = err;
     }
+    // (2) Cleanup AFTER capture. A ContainmentCleanupError downgrades the
+    // reported isolationLevel to 'none'; soft failures (proxy close,
+    // session-dir removal) surface as degradationReasons WITHOUT downgrading.
+    // Reason strings carry only the trusted teardown error's .message plus
+    // fixed literal prefixes — never credential/grant material.
+    try {
+      await backend.cleanup();
+    } catch (e) {
+      containment =
+        e instanceof ContainmentCleanupError
+          ? e
+          : new ContainmentCleanupError([(e as Error).message ?? String(e)]);
+    }
+    try {
+      await proxyHandle.close();
+    } catch (e) {
+      soft.push(`proxy close failed: ${(e as Error).message ?? String(e)}`);
+    }
+    await this.rmSessionDir(sessionDir).catch((e) => {
+      soft.push(`session dir removal failed: ${(e as Error).message ?? String(e)}`);
+    });
+    // (3) Output LAST.
+    if (runError !== undefined) {
+      return this.toErrorOutput(runError, backend, containment, soft);
+    }
+    return this.toRunOutput(result!, backend, containment, soft);
   }
 
   async spawn(input: SandboxSpawnInput): Promise<SandboxSession> {
@@ -528,22 +591,110 @@ export class SandboxRunner {
       };
       process = await backend.spawn(spec);
       const proc = process;
+
+      // Memoized close state (T3): the FIRST close() runs the teardown chain
+      // (process close → backend cleanup → proxy close → session-dir removal),
+      // resolves resultMeta with the downgraded-or-verbatim meta, and memoizes
+      // the first ContainmentCleanupError. Repeat close() calls rethrow the
+      // SAME first error instance; they never re-run teardown.
+      let closeRan = false;
+      let firstContainment: ContainmentCleanupError | undefined;
+      let resolveResultMeta!: (m: SandboxResultMeta) => void;
+      const resultMeta = new Promise<SandboxResultMeta>((res) => {
+        resolveResultMeta = res;
+      });
+
+      const doClose = async (): Promise<void> => {
+        if (closeRan) {
+          if (firstContainment) throw firstContainment;
+          return;
+        }
+        closeRan = true;
+        const soft: string[] = [];
+        let containment: ContainmentCleanupError | undefined;
+        // 1. process close (soft — a failure to close a drained child pipe
+        //    is not a skill-containment event).
+        try {
+          await proc.close();
+        } catch (e) {
+          soft.push(`process close failed: ${(e as Error).message ?? String(e)}`);
+        }
+        // 2. backend cleanup (CONTAINMENT — may downgrade level to 'none').
+        try {
+          await backend.cleanup();
+        } catch (e) {
+          containment =
+            e instanceof ContainmentCleanupError
+              ? e
+              : new ContainmentCleanupError([(e as Error).message ?? String(e)]);
+        }
+        // 3. proxy close (soft — trusted teardown).
+        try {
+          await proxyHandle.close();
+        } catch (e) {
+          soft.push(`proxy close failed: ${(e as Error).message ?? String(e)}`);
+        }
+        // 4. session-dir removal (soft — host fs hygiene).
+        await this.rmSessionDir(sessionDir).catch((e) => {
+          soft.push(`session dir removal failed: ${(e as Error).message ?? String(e)}`);
+        });
+
+        // Definitive meta: await the child's exited result (already drained
+        // by proc.close() in every real backend; awaiting a settled promise
+        // is free). Fall back to backend-level meta if exited rejected.
+        let exitMeta: SandboxResultMeta = {
+          isolationLevel: backend.isolationLevel,
+          backend: backend.kind,
+          degraded: false,
+          degradationReasons: [],
+        };
+        try {
+          exitMeta = (await proc.exited).meta;
+        } catch {
+          /* fall back to backend-level meta above */
+        }
+        const finalMeta: SandboxResultMeta = containment
+          ? {
+              isolationLevel: 'none',
+              backend: exitMeta.backend,
+              degraded: true,
+              degradationReasons: [
+                ...exitMeta.degradationReasons,
+                ...containment.reasons,
+                ...soft,
+              ],
+            }
+          : soft.length > 0
+            ? {
+                isolationLevel: exitMeta.isolationLevel,
+                backend: exitMeta.backend,
+                degraded: true,
+                degradationReasons: [...exitMeta.degradationReasons, ...soft],
+              }
+            : exitMeta;
+        firstContainment = containment;
+        resolveResultMeta(finalMeta);
+        if (containment) throw containment;
+      };
+
       return {
         process: proc,
         isolationLevel: backend.isolationLevel,
         backend: backend.kind,
-        close: async () => {
-          await proc.close().catch(() => {});
-          await backend.cleanup().catch(() => {});
-          await proxyHandle.close().catch(() => {});
-          await removeSessionDir(sessionDir);
-        },
+        resultMeta,
+        close: doClose,
       };
     } catch (err) {
+      // prepare/spawn failure — teardown best-effort and rethrow. The
+      // taxonomy here matches run()/close(): containment is still surfaced
+      // via a thrown ContainmentCleanupError, but this path only runs when
+      // we never returned a session to the caller, so we fold every
+      // teardown failure into best-effort `.catch(() => {})` and propagate
+      // the ORIGINAL prepare/spawn error.
       if (process) await process.close().catch(() => {});
       await backend.cleanup().catch(() => {});
       await proxyHandle.close().catch(() => {});
-      await removeSessionDir(sessionDir);
+      await this.rmSessionDir(sessionDir).catch(() => {});
       throw err;
     }
   }
@@ -673,7 +824,7 @@ export class SandboxRunner {
       // Cleanup in reverse order on failure
       if (backend) await backend.cleanup().catch(() => {});
       if (proxyHandle) await proxyHandle.close().catch(() => {});
-      if (sessionDir) await removeSessionDir(sessionDir);
+      if (sessionDir) await this.rmSessionDir(sessionDir).catch(() => {});
       if (err instanceof SandboxRunnerError) {
         return {
           ok: false,
@@ -697,23 +848,100 @@ export class SandboxRunner {
   // Output helpers
   // -----------------------------------------------------------------------
 
-  private toRunOutput(result: BackendRunResult, backend: SandboxBackend): SandboxRunOutput {
+  private toRunOutput(
+    result: BackendRunResult,
+    backend: SandboxBackend,
+    containment?: ContainmentCleanupError,
+    soft: string[] = [],
+  ): SandboxRunOutput {
+    // Downgrade rule (T3 NEW-2): a containment teardown failure DOWNGRADES
+    // the reported isolationLevel to 'none' and forces success=false, even
+    // though the child exited cleanly — the isolation boundary may not have
+    // been fully torn down. Soft failures preserve the level but mark
+    // degraded and append their reasons.
+    if (containment) {
+      const meta: SandboxResultMeta = {
+        isolationLevel: 'none',
+        backend: result.meta.backend,
+        degraded: true,
+        degradationReasons: [
+          ...result.meta.degradationReasons,
+          ...containment.reasons,
+          ...soft,
+        ],
+      };
+      return {
+        success: false,
+        rawText: result.stdout,
+        stderr: result.stderr,
+        isolationLevel: 'none',
+        backend: backend.kind,
+        meta,
+      };
+    }
+    const meta: SandboxResultMeta =
+      soft.length > 0
+        ? {
+            isolationLevel: result.meta.isolationLevel,
+            backend: result.meta.backend,
+            degraded: true,
+            degradationReasons: [...result.meta.degradationReasons, ...soft],
+          }
+        : result.meta;
     return {
       success: result.exitCode === 0 && !result.timedOut,
       rawText: result.stdout,
       stderr: result.stderr,
       isolationLevel: backend.isolationLevel,
       backend: backend.kind,
+      meta,
     };
   }
 
-  private toErrorOutput(err: unknown, backend: SandboxBackend | undefined): SandboxRunOutput {
+  private toErrorOutput(
+    err: unknown,
+    backend: SandboxBackend | undefined,
+    containment?: ContainmentCleanupError,
+    soft: string[] = [],
+  ): SandboxRunOutput {
     const message = err instanceof Error ? err.message : String(err);
+    // When containment teardown also failed on the error path, downgrade the
+    // reported level to 'none' and surface the containment+soft reasons.
+    if (containment) {
+      return {
+        success: false,
+        error: message,
+        isolationLevel: 'none',
+        backend: backend?.kind ?? 'none',
+        meta: {
+          isolationLevel: 'none',
+          backend: backend?.kind ?? 'none',
+          degraded: true,
+          degradationReasons: [...containment.reasons, ...soft],
+        },
+      };
+    }
+    const level = backend?.isolationLevel ?? 'none';
+    const kind = backend?.kind ?? 'none';
     return {
       success: false,
       error: message,
-      isolationLevel: backend?.isolationLevel ?? 'none',
-      backend: backend?.kind ?? 'none',
+      isolationLevel: level,
+      backend: kind,
+      meta:
+        soft.length > 0
+          ? {
+              isolationLevel: level,
+              backend: kind,
+              degraded: true,
+              degradationReasons: [...soft],
+            }
+          : {
+              isolationLevel: level,
+              backend: kind,
+              degraded: false,
+              degradationReasons: [],
+            },
     };
   }
 }

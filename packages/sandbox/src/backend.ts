@@ -117,12 +117,48 @@ export interface SandboxBackend {
   spawn(spec: SpawnSpec): Promise<SandboxProcess>;
   /** Implement as spawn/write-or-end/await exited/close. */
   run(spec: ExecSpec): Promise<BackendRunResult>;
-  /** Idempotent; owns topology attachments/networks plus backend runtime state. */
+  /**
+   * Idempotent; owns topology attachments/networks plus backend runtime
+   * state. Throws `ContainmentCleanupError` when PROCESS or NETWORK teardown
+   * fails (see the error class for the full contract). Memoizes the FIRST
+   * outcome: repeat calls rethrow the same first error or resolve identically.
+   * Never logs-and-swallows a containment failure.
+   */
   cleanup(): Promise<void>;
 }
 
 export class NoFullBackendError extends Error {
   constructor(msg = 'no backend meets the required isolation level') { super(msg); }
+}
+
+/**
+ * Thrown by `SandboxBackend.cleanup()` when backend PROCESS or NETWORK
+ * teardown fails — i.e. when the skill's runtime isolation boundary may not
+ * have been fully torn down (e.g. cgroup.kill write refused, netns delete
+ * failed, runtime container removal errored). Carries the per-step reasons
+ * verbatim so the runner can propagate them into `SandboxResultMeta
+ * .degradationReasons`.
+ *
+ * Host-filesystem hygiene failures (rootfs cleanup, launch-spec removal,
+ * session-dir removal) are NOT containment — they must NOT throw this error;
+ * they are best-effort and surface only as soft degradation reasons.
+ *
+ * `cleanup()` contract (binding on every SandboxBackend implementation):
+ *   - Throws `ContainmentCleanupError` when process/network teardown fails.
+ *   - IDEMPOTENT VIA MEMOIZED FIRST OUTCOME: repeat calls rethrow the SAME
+ *     first error instance (or resolve identically if the first call
+ *     resolved). The runner relies on this to call cleanup exactly once per
+ *     logical teardown and trust that any repeat invocation is consistent.
+ *   - NEVER logs-and-swallows a containment failure: a teardown step that
+ *     may leave the sandbox's isolation boundary intact must surface as a
+ *     `ContainmentCleanupError`, never as a `console.warn` and a silent
+ *     resolve.
+ */
+export class ContainmentCleanupError extends Error {
+  constructor(public readonly reasons: string[]) {
+    super(`containment cleanup failed: ${reasons.join('; ')}`);
+    this.name = 'ContainmentCleanupError';
+  }
 }
 
 const LEVEL_RANK: Record<IsolationLevel, number> = {

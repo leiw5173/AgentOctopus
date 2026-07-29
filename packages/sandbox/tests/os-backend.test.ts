@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { OsSandboxBackend, type OsBackendDeps } from '../src/os/os-backend.js';
+import { ContainmentCleanupError } from '../src/backend.js';
 import type { OsCaps } from '../src/os/probe.js';
 import type { RootfsLayout } from '../src/os/rootfs.js';
 import type { CgroupHandle } from '../src/os/cgroup.js';
@@ -597,6 +598,41 @@ describe('OsSandboxBackend.cleanup', () => {
     await b.prepare(validPrepareOpts(carrier));
     await b.cleanup();
     await b.cleanup();
+  });
+
+  it('memoizes and rethrows ContainmentCleanupError when cgroup kill fails', async () => {
+    const deps = makeDeps();
+    const cgroup = fakeCgroup();
+    (cgroup.kill as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('group kill failed'));
+    deps.createLimitedCgroup.mockResolvedValue(cgroup);
+    const b = new OsSandboxBackend({ sessionId: 'cleanup-throw', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    await b.prepare(validPrepareOpts(carrier));
+
+    await expect(b.cleanup()).rejects.toBeInstanceOf(ContainmentCleanupError);
+    // Second call must rethrow the SAME memoized first outcome — never a
+    // different error and never a silent resolve.
+    await expect(b.cleanup()).rejects.toBeInstanceOf(ContainmentCleanupError);
+    const first = await b.cleanup().catch((e) => e);
+    const second = await b.cleanup().catch((e) => e);
+    expect(first).toBe(second);
+    expect((first as ContainmentCleanupError).reasons.join(' ')).toMatch(/group kill failed/);
+  });
+
+  it('netns teardown failure is a ContainmentCleanupError (network teardown)', async () => {
+    const deps = makeDeps();
+    const netns = fakeNetns();
+    (netns.cleanup as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('nft delete failed'));
+    deps.setupNetns.mockResolvedValue(netns);
+    const b = new OsSandboxBackend({ sessionId: 'cleanup-netns', deps: deps as unknown as OsBackendDeps });
+    await b.probe();
+    const carrier = await b.prepareTopology() as Extract<ProxyCarrier, { kind: 'linux-static' }>;
+    await b.prepare(validPrepareOpts(carrier));
+
+    const err = await b.cleanup().catch((e) => e);
+    expect(err).toBeInstanceOf(ContainmentCleanupError);
+    expect((err as ContainmentCleanupError).reasons.join(' ')).toMatch(/nft delete failed/);
   });
 });
 

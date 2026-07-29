@@ -50,6 +50,7 @@ class RecordingPort implements BoundSandboxExecutionPort {
     rawText: '{"result":"sandbox output"}',
     isolationLevel: 'full',
     backend: 'docker',
+    meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
   };
 
   async run(input: SandboxCommandRequest): Promise<SandboxRunOutput> {
@@ -151,7 +152,13 @@ describe('Executor → SandboxRunner convergence', () => {
 
   it('LLM-generated subprocess command runs via bash -c INSIDE the sandbox', async () => {
     const port = new RecordingPort();
-    port.runResult = { success: true, rawText: 'llm-cmd-output', isolationLevel: 'full', backend: 'docker' };
+    port.runResult = {
+      success: true,
+      rawText: 'llm-cmd-output',
+      isolationLevel: 'full',
+      backend: 'docker',
+      meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
+    };
     const chatClient = { chat: vi.fn().mockResolvedValue('python3 scripts/run.py --fast') } as any;
     const executor = new Executor(makeRegistry('run python3 scripts/run.py'), chatClient, undefined, makeRunner(port));
     const skill = subprocessSkillNoEntry();
@@ -169,7 +176,13 @@ describe('Executor → SandboxRunner convergence', () => {
 
   it('LLM-generated HTTP/curl command runs INSIDE the sandbox (egress via proxy)', async () => {
     const port = new RecordingPort();
-    port.runResult = { success: true, rawText: '{"temp":72}', isolationLevel: 'full', backend: 'docker' };
+    port.runResult = {
+      success: true,
+      rawText: '{"temp":72}',
+      isolationLevel: 'full',
+      backend: 'docker',
+      meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
+    };
     const chatClient = { chat: vi.fn().mockResolvedValue("curl -s https://api.example.com/weather?q=tokyo") } as any;
     const instructions = 'GET https://api.example.com/weather?q=<city>';
     const executor = new Executor(makeRegistry(instructions), chatClient, undefined, makeRunner(port));
@@ -192,6 +205,7 @@ describe('Executor → SandboxRunner convergence', () => {
       error: 'NO_SATISFYING_BACKEND: no sandbox backend meets isolationLevel >= full (fail-closed)',
       isolationLevel: 'none',
       backend: 'none',
+      meta: { isolationLevel: 'none', backend: 'none', degraded: false, degradationReasons: [] },
     };
     const executor = new Executor(makeRegistry(), undefined, undefined, makeRunner(port));
     const skill = subprocessSkillWithInvokeJs();

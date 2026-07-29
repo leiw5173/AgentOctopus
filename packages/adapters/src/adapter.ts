@@ -1,5 +1,5 @@
 import type { LoadedSkill } from '@agentoctopus/registry';
-import type { BackendKind, IsolationLevel, SandboxProcess } from '@agentoctopus/sandbox';
+import type { BackendKind, IsolationLevel, SandboxProcess, SandboxResultMeta } from '@agentoctopus/sandbox';
 
 export interface AdapterResult {
   success: boolean;
@@ -36,12 +36,28 @@ export interface SandboxRunOutput {
   error?: string;
   isolationLevel: IsolationLevel;
   backend: BackendKind | 'none';
+  /**
+   * Machine-readable isolation outcome (T3). Propagated verbatim from the
+   * backend's `BackendRunResult.meta` by core's SandboxRunner; downgraded to
+   * `isolationLevel:'none'` with `degraded:true` if backend cleanup threw a
+   * `ContainmentCleanupError` after the run completed. Soft teardown
+   * failures (proxy close, session-dir removal) appear as additional
+   * `degradationReasons` entries WITHOUT downgrading the level.
+   */
+  meta: SandboxResultMeta;
 }
 
 export interface SandboxSessionHandle {
   readonly process: SandboxProcess;
   readonly isolationLevel: IsolationLevel;
   readonly backend: BackendKind;
+  /**
+   * OPTIONAL mirror of core's `SandboxSession.resultMeta` (T3). Resolves
+   * only after `close()` completes — definitive only post-close. Adapters
+   * that do not surface session-level meta may omit this field; consumers
+   * must handle `undefined`.
+   */
+  readonly resultMeta?: Promise<SandboxResultMeta>;
   close(): Promise<void>;
 }
 

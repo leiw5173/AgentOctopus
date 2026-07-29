@@ -33,7 +33,13 @@ class StubPort implements BoundSandboxExecutionPort {
   runCalls: SandboxCommandRequest[] = [];
   async run(input: SandboxCommandRequest): Promise<SandboxRunOutput> {
     this.runCalls.push(input);
-    return { success: true, rawText: 'ok-output', isolationLevel: 'full', backend: 'docker' };
+    return {
+      success: true,
+      rawText: 'ok-output',
+      isolationLevel: 'full',
+      backend: 'docker',
+      meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
+    };
   }
   async spawn(): Promise<never> {
     throw new Error('spawn not used');

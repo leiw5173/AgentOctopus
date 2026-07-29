@@ -46,3 +46,38 @@ A trusted `runtimeProfiles` entry may declare `darwinRuntime.manifestPath` — t
 ## Env hygiene
 
 The guest environment is a minimal allowlist (`LANG`, `LC_ALL`, `TZ`) plus non-reserved caller keys and fixed guest values (`HOME=/tmp/home`, `TMPDIR=/tmp`, runtime-profile `PATH`). Host `process.env` is never spread into the sandbox, and credentials never enter child env, argv, or logs — only the trusted egress proxy receives grant-scoped credential values.
+
+## Result metadata and cleanup-uncertainty propagation
+
+Every `SandboxRunOutput` and persistent `SandboxSession` carries the full machine-readable `SandboxResultMeta` describing the isolation actually achieved:
+
+```ts
+interface SandboxResultMeta {
+  isolationLevel: IsolationLevel;          // 'full' | 'restricted' | 'remote-unverified' | 'none'
+  backend: BackendKind;                    // 'docker' | 'os' | 'subprocess' | 'ssh' | 'none'
+  degraded: boolean;
+  degradationReasons: string[];            // never contains credential/grant material
+}
+
+interface SandboxRunOutput {
+  success: boolean;
+  rawText?: string;
+  stderr?: string;
+  error?: string;
+  isolationLevel: IsolationLevel;          // pass-through mirror of meta.isolationLevel
+  backend: BackendKind | 'none';           // pass-through mirror of meta.backend
+  meta: SandboxResultMeta;                 // REQUIRED — verbatim from the backend on success
+}
+```
+
+The runner pins the one-shot `run()` control flow:
+
+1. Capture the backend's `BackendRunResult` (or run error).
+2. Run cleanup AFTER capture, BEFORE any return — `backend.cleanup()` → `proxyHandle.close()` → `rm(sessionDir)`.
+3. Build the output LAST, applying the downgrade taxonomy below.
+
+**Downgrade taxonomy.** When `backend.cleanup()` throws a `ContainmentCleanupError` (backend process/network teardown failed — e.g. cgroup kill refused, runtime container removal errored), the runner DOWNGRADES the reported `meta.isolationLevel` to `'none'`, marks `degraded: true`, appends the containment reasons, and forces `success: false` — even if the child exited cleanly, because the isolation boundary may not have been fully torn down. Soft teardown failures (proxy close, session-dir removal) are appended to `degradationReasons` WITHOUT downgrading the level and without forcing `success: false`.
+
+**Persistent sessions.** `SandboxSession.resultMeta` is a memoized promise that resolves ONLY after `process.exited` settles AND `close()` completes (process close → backend cleanup → proxy close → session-dir removal). It is definitive only post-close; reading it before `close()` resolves yields a pending promise by design. `close()` applies the same downgrade taxonomy, memoizes the first outcome, and rethrows the first `ContainmentCleanupError` — repeat `close()` calls rethrow the same first error instance; they never re-run teardown.
+
+**Backend cleanup contract.** Every `SandboxBackend.cleanup()` implementation throws `ContainmentCleanupError` when its process or network teardown step fails; the call is idempotent via memoized first outcome (repeat calls rethrow the same error or resolve identically); and a containment failure is never logged-and-swallowed. Host-filesystem hygiene failures (rootfs cleanup, launch-spec removal, session-dir removal) are NOT containment — they remain best-effort and surface only as soft degradation reasons.

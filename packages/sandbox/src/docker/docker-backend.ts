@@ -10,6 +10,7 @@ import type {
   BackendRunResult,
   ProxyCarrier,
 } from '../backend.js';
+import { ContainmentCleanupError } from '../backend.js';
 import type { SandboxConfig } from '../schema.js';
 import { ImmutableImageRefSchema, SNAPSHOT_DIGEST_RE } from '../schema.js';
 import { parseByteSize, parseCpuCount, parseTimeoutMs } from '../policy.js';
@@ -65,13 +66,36 @@ export class DockerBackend implements SandboxBackend {
   private carrier?: Extract<ProxyCarrier, { kind: 'docker-sidecar' }>;
   private opts?: BackendPrepareOptions;
   private cleaned = false;
+  /**
+   * Memoized FIRST cleanup outcome (T3 contract). Once set, repeat cleanup()
+   * calls rethrow the same ContainmentCleanupError or resolve identically.
+   */
+  private cleanupOutcome: { error?: ContainmentCleanupError } | undefined;
+  private readonly runDockerImpl: typeof runDocker;
+  private readonly removeNetworkImpl: typeof removeNetwork;
 
-  constructor(private readonly input: { config: SandboxConfig; sessionId?: string }) {
+  constructor(
+    private readonly input: {
+      config: SandboxConfig;
+      sessionId?: string;
+      /**
+       * Test-only DI seam (T3). Production callers omit this. The seam lets
+       * unit tests drive cleanup semantics (containment vs soft) without a
+       * real Docker daemon.
+       */
+      deps?: {
+        runDocker?: typeof runDocker;
+        removeNetwork?: typeof removeNetwork;
+      };
+    },
+  ) {
     this.sessionId = input.sessionId ?? randomUUID().slice(0, 8);
     this.internalNetwork = `octopus-sbx-${this.sessionId}-internal`;
     this.egressNetwork = `octopus-sbx-${this.sessionId}-egress`;
     this.runtimeContainer = `octopus-sbx-runtime-${this.sessionId}`;
     this.proxyContainer = `octopus-sbx-proxy-${this.sessionId}`;
+    this.runDockerImpl = input.deps?.runDocker ?? runDocker;
+    this.removeNetworkImpl = input.deps?.removeNetwork ?? removeNetwork;
   }
 
   async probe(): Promise<boolean> { return dockerAvailable(); }
@@ -160,13 +184,70 @@ export class DockerBackend implements SandboxBackend {
   }
 
   async cleanup(): Promise<void> {
+    // Memoized first outcome (T3): repeat calls rethrow the SAME
+    // ContainmentCleanupError instance (or resolve identically). Never
+    // logs-and-swallows a containment failure.
+    if (this.cleanupOutcome) {
+      if (this.cleanupOutcome.error) throw this.cleanupOutcome.error;
+      return;
+    }
     if (this.cleaned) return;
     this.cleaned = true;
-    await runDocker(['rm', '-f', this.runtimeContainer]).catch(() => {});
-    await runDocker(['network', 'disconnect', '-f', this.egressNetwork, this.proxyContainer]).catch(() => {});
-    await runDocker(['network', 'disconnect', '-f', this.internalNetwork, this.proxyContainer]).catch(() => {});
-    await removeNetwork(this.internalNetwork).catch(() => {});
-    await removeNetwork(this.egressNetwork).catch(() => {});
+
+    const containmentReasons: string[] = [];
+    const softReasons: string[] = [];
+
+    // CONTAINMENT: runtime-container removal. A failure here may leave the
+    // runtime container alive — the skill's process may still be running
+    // outside the teardown boundary.
+    try {
+      await this.runDockerImpl(['rm', '-f', this.runtimeContainer]);
+    } catch (err) {
+      // Reason strings are the trusted teardown error's .message only — no
+      // credential/grant material is ever interpolated here.
+      containmentReasons.push((err as Error).message ?? String(err));
+    }
+
+    // SOFT (best-effort): proxy-side network disconnects. The proxy
+    // container's lifecycle is owned externally; failing to disconnect it
+    // from a network is host hygiene once the runtime container is gone.
+    try {
+      await this.runDockerImpl(['network', 'disconnect', '-f', this.egressNetwork, this.proxyContainer]);
+    } catch (err) {
+      softReasons.push((err as Error).message ?? String(err));
+    }
+    try {
+      await this.runDockerImpl(['network', 'disconnect', '-f', this.internalNetwork, this.proxyContainer]);
+    } catch (err) {
+      softReasons.push((err as Error).message ?? String(err));
+    }
+    // SOFT (best-effort): network removal races. The runtime container is
+    // already destroyed at this point, so a stale network can never carry
+    // skill traffic.
+    try {
+      await this.removeNetworkImpl(this.internalNetwork);
+    } catch (err) {
+      softReasons.push((err as Error).message ?? String(err));
+    }
+    try {
+      await this.removeNetworkImpl(this.egressNetwork);
+    } catch (err) {
+      softReasons.push((err as Error).message ?? String(err));
+    }
+
+    if (softReasons.length > 0) {
+      // Diagnostic-only — never promoted to containment.
+      // eslint-disable-next-line no-console
+      console.warn('DockerBackend.cleanup: soft network teardown errors', softReasons);
+    }
+
+    this.cleanupOutcome = {
+      error:
+        containmentReasons.length > 0
+          ? new ContainmentCleanupError(containmentReasons)
+          : undefined,
+    };
+    if (this.cleanupOutcome.error) throw this.cleanupOutcome.error;
   }
 }
 

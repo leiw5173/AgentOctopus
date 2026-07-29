@@ -29,6 +29,7 @@ class RecordingPort implements BoundSandboxExecutionPort {
     rawText: JSON.stringify({ ok: true, status: 200, body: '{"result":"ok"}' }),
     isolationLevel: 'full',
     backend: 'docker',
+    meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
   };
 
   async run(input: SandboxCommandRequest): Promise<SandboxRunOutput> {
@@ -135,6 +136,7 @@ describe('HttpAdapter (sandbox convergence)', () => {
         rawText: JSON.stringify({ ok: false, status: 0, body: 'egress denied by policy' }),
         isolationLevel: 'full',
         backend: 'docker',
+        meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] },
       };
       const adapter = new HttpAdapter();
 
