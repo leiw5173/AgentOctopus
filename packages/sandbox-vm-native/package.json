@@ -1,0 +1,25 @@
+{
+  "name": "@agentoctopus/sandbox-vm-native",
+  "version": "0.1.0",
+  "description": "Native VM sandbox backend: libkrun helper, ext4 image-builder, guest bootstrap",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["README.md", "dist", "prebuilds"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@agentoctopus/sandbox": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1",
+    "typescript": "^6.0.3",
+    "vitest": "^1.5.0"
+  },
+  "publishConfig": { "access": "public" },
+  "license": "Apache-2.0"
+}

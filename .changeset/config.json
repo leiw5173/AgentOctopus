@@ -11,6 +11,7 @@
       "@agentoctopus/gateway",
       "@agentoctopus/cli",
       "@agentoctopus/sandbox",
+      "@agentoctopus/sandbox-vm-native",
       "agentoctopus"
     ]
   ],
