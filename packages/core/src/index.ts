@@ -17,7 +17,17 @@ export {
   type SandboxSession,
   type BoundSandboxExecutionPort,
 } from './sandbox-runner.js';
-export { createDefaultSandboxRunner, defaultSnapshotStoreDir } from './sandbox-runner-factory.js';
+export {
+  createDefaultSandboxRunner,
+  createDefaultSandboxRunnerAsync,
+  defaultSnapshotStoreDir,
+} from './sandbox-runner-factory.js';
+export {
+  createVmBackend,
+  type CreateVmBackendDeps,
+  type NativeVmModule,
+  type VmBackendUnavailable,
+} from './sandbox-vm-assembly.js';
 export { buildSecretProviderFromConfig } from './secret-provider.js';
 
 export {

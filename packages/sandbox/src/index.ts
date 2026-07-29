@@ -8,6 +8,7 @@ export * from './backend.js';
 export * from './vm/types.js';
 export { ExecutablesUnqualifiedError, LaunchSpecTooLargeError, RunSpecError as VmRunSpecError } from './vm/errors.js';
 export * from './vm/ports.js';
+export { VmSandboxBackend } from './vm/vm-backend.js';
 export * from './docker/cli.js';
 export * from './docker/network.js';
 export * from './docker/docker-backend.js';
