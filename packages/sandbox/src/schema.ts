@@ -87,7 +87,7 @@ export const SNAPSHOT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
  */
 export const SandboxConfigSchema = z
   .object({
-    defaultBackend: z.enum(['auto', 'docker', 'os', 'subprocess', 'ssh', 'none']).default('auto'),
+    defaultBackend: z.enum(['auto', 'docker', 'os', 'vm', 'subprocess', 'ssh', 'none']).default('auto'),
     minIsolationLevel: z.enum(['full', 'restricted', 'remote-unverified', 'none']).default('full'),
     runtimeProfiles: z
       .record(
@@ -113,6 +113,16 @@ export const SandboxConfigSchema = z
             .object({ manifestPath: z.string() })
             .strict()
             .optional(),
+          vmRuntime: z
+            .object({
+              rootfs: ImmutableImageRefSchema,
+              memMib: z.number().int().positive().max(4096).default(512),
+              cpus: z.number().int().positive().max(4).default(1),
+              kernelCmdline: z.string().optional(),
+              executables: z.record(z.string(), z.string()),
+            })
+            .strict()
+            .optional(),
         }),
       )
       .default({}),
@@ -128,6 +138,15 @@ export const SandboxConfigSchema = z
             fsize: z.string().default('32m'),
           })
           .prefault({}), // Zod v4: input-typed default; `.default({})` rejects missing output fields
+      })
+      .optional(),
+    vm: z
+      .object({
+        rootfs: ImmutableImageRefSchema,
+        memMib: z.number().int().positive().max(4096).default(512),
+        cpus: z.number().int().positive().max(4).default(1),
+        kernelCmdline: z.string().optional(),
+        libkrunAbi: z.literal('v1.19.4').default('v1.19.4'),
       })
       .optional(),
     proxy: z

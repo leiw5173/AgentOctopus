@@ -20,6 +20,13 @@ export interface ResolvedRuntimeProfile {
    * profiles intended for the Darwin restricted OS backend.
    */
   readonly darwinRuntime?: { manifestPath: string };
+  readonly vmRuntime?: {
+    rootfs: string;
+    memMib: number;
+    cpus: number;
+    kernelCmdline?: string;
+    executables: Record<string, string>;
+  };
 }
 
 /**

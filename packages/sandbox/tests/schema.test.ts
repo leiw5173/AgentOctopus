@@ -191,3 +191,65 @@ describe('sandbox schemas', () => {
     );
   });
 });
+
+describe('sandbox schema — VM backend', () => {
+  const base = {
+    defaultBackend: 'auto',
+    minIsolationLevel: 'full',
+    runtimeProfiles: {
+      'node-default': { bins: ['node'], path: '/usr/local/bin:/usr/bin:/bin' },
+    },
+  };
+
+  it('accepts the vm block with rootfs + libkrunAbi', () => {
+    const cfg = SandboxConfigSchema.parse({
+      ...base,
+      vm: { rootfs: 'sha256:' + 'a'.repeat(64), memMib: 512, cpus: 1, libkrunAbi: 'v1.19.4' },
+    });
+    expect(cfg.vm?.libkrunAbi).toBe('v1.19.4');
+    expect(cfg.vm?.memMib).toBe(512);
+  });
+
+  it('accepts vmRuntime with executables map on a profile', () => {
+    const cfg = SandboxConfigSchema.parse({
+      ...base,
+      runtimeProfiles: {
+        'node-default': {
+          bins: ['node'],
+          path: '/usr/local/bin:/usr/bin:/bin',
+          vmRuntime: {
+            rootfs: 'sha256:' + 'b'.repeat(64),
+            memMib: 512,
+            cpus: 1,
+            executables: { node: '/usr/bin/node' },
+          },
+        },
+      },
+    });
+    expect(cfg.runtimeProfiles['node-default'].vmRuntime?.executables).toEqual({ node: '/usr/bin/node' });
+  });
+
+  it('rejects vmRuntime without executables (required for vm branch)', () => {
+    expect(() => SandboxConfigSchema.parse({
+      ...base,
+      runtimeProfiles: {
+        'node-default': {
+          bins: ['node'], path: '/usr/bin',
+          vmRuntime: { rootfs: 'sha256:' + 'b'.repeat(64), memMib: 512, cpus: 1 },
+        },
+      },
+    })).toThrow();
+  });
+
+  it('accepts defaultBackend: vm', () => {
+    const cfg = SandboxConfigSchema.parse({ ...base, defaultBackend: 'vm' });
+    expect(cfg.defaultBackend).toBe('vm');
+  });
+
+  it('rejects libkrunAbi other than v1.19.4', () => {
+    expect(() => SandboxConfigSchema.parse({
+      ...base,
+      vm: { rootfs: 'sha256:' + 'a'.repeat(64), libkrunAbi: 'v2.0.0' },
+    })).toThrow();
+  });
+});

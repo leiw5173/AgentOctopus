@@ -6,7 +6,7 @@
 
 export type IsolationLevel = 'full' | 'restricted' | 'remote-unverified' | 'none';
 
-export type BackendKind = 'docker' | 'os' | 'subprocess' | 'ssh' | 'none';
+export type BackendKind = 'docker' | 'os' | 'vm' | 'subprocess' | 'ssh' | 'none';
 
 /** Stable, host-owned identity for one installed skill (spec §4). */
 export interface InstallationIdentity {
