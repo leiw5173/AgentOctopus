@@ -9,6 +9,8 @@
   "scripts": {
     "build": "tsc",
     "build:helper": "node scripts/build-vm-helper.mjs",
+    "security:build-vm": "node scripts/build-vm-helper.mjs && node scripts/build-vm-rootfs.mjs && node scripts/vendor-libkrun.mjs",
+    "security:probe-vm": "node scripts/run-vm-gates.mjs --step gate",
     "dev": "tsc --watch",
     "test": "vitest run",
     "clean": "rm -rf dist"
