@@ -17,6 +17,7 @@
     "security:images": "node scripts/build-security-images.mjs",
     "security:probe-linux": "node scripts/security-probe-linux.mjs",
     "security:cleanup-linux": "node scripts/security-cleanup-linux.mjs",
+    "security:probe-darwin": "node scripts/darwin-sbpl-feasibility.mjs",
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
