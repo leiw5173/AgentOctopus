@@ -83,7 +83,7 @@ When adding a new skill or changing how an existing skill routes:
 ```bash
 pnpm install          # install all workspace dependencies
 pnpm build            # build all packages (order: skills → registry → adapters → core → gateway → apps)
-pnpm test             # run all 313+ tests across all workspaces
+pnpm test             # run all tests across all workspaces (883 declared; 111 in the sandbox security suite)
 pnpm dev              # watch mode for all packages in parallel
 
 # Scoped commands
@@ -141,11 +141,40 @@ User query
                pre-filters with shouldIncludeSkill() from @agentoctopus/skills,
                LLM re-ranks, returns [] if no skill fits (→ direct LLM answer)
   → Executor — applies env overrides via @agentoctopus/skills,
-               picks adapter (inferred from directory contents),
+               delegates ALL skill execution to SandboxRunner:
+                 snapshot build → selectBackend (fail-closed)
+                 → prepareTopology → egress-proxy launch → verifySnapshot
+                 → prepare → run/spawn → cleanup
                on failure: tries next candidate (up to maxRetries, default 3)
                all failed → falls back to direct LLM answer
   → Result   — formatted, returned to caller; feedback updates ratings.json
 ```
+
+### Sandbox execution (critical to understand)
+
+Every skill runs in a sandbox backend selected at runtime via `selectBackend` (`packages/sandbox/src/backend.ts`). Selection is **fail-closed**: each backend probes its own privileges before ranking, and a backend is admitted only when its post-probe `isolationLevel` meets `minIsolationLevel`. Under the default `auto` + `minIsolationLevel:'full'`, when no `full` backend is available the run throws `NoFullBackendError` — never a host fallback. Restricted OS execution is opt-in only, selectable solely with exactly `defaultBackend:'os'` + `minIsolationLevel:'restricted'`; `auto` never picks a restricted backend implicitly.
+
+Key config sections in `octopus.json` → `sandbox`:
+
+| Field | Role |
+|---|---|
+| `sandbox.grants` | Per-execution requested capability set; the backend grants only `requested ∩ enforceable`. |
+| `sandbox.defaultBackend` | `'auto'` (default) \| `'docker'` \| `'os'`. Restricted OS requires `'os'` plus a restricted floor. |
+| `sandbox.minIsolationLevel` | `'full'` (default) \| `'restricted'` \| `'remote-unverified'` \| `'none'`. The fail-closed floor. |
+| `sandbox.docker.image` | Runtime image ref — must be an immutable digest (`repo@sha256:<64hex>` or `sha256:<64hex>`); mutable tags are rejected by the image-contract tests. |
+| `sandbox.proxy.artifact` | Egress-proxy image ref — same immutable-digest rule; the proxy is the skill's sole network egress. |
+
+**Immutable digest validation.** `identity = installationId + digest` (`sha256:` + 64 lowercase hex, validated against `SNAPSHOT_DIGEST_RE`). The runner re-verifies the digest immediately before `backend.prepare()`; any mutation between build and verify aborts with `SNAPSHOT_MISMATCH`. Backends assert the digest FORMAT before any mount; the byte-for-byte re-verify against the snapshot tree is the runner's last filesystem operation before `prepare`.
+
+**Three CI runner classes** (security matrix, `packages/sandbox/tests/security/`):
+
+| Runner class | CI label | Claims it owns | Skip behavior |
+|---|---|---|---|
+| Hosted Docker + proxy | `hosted-docker-proxy` (`ubuntu-latest`) | Harness + immutable-image contract, real Docker isolation + sidecar topology, egress proxy adversarial matrix, identity/snapshot integrity, MCP stdio over Docker. | Does NOT claim Linux netns/nftables/cgroup. |
+| Privileged Linux | `privileged-linux` (`[self-hosted,linux,x64,sandbox-privileged]`) | Real Linux OS backend, named-netns proxy topology, nftables, cgroup-v2 enforcement. `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1` makes unavailable capabilities fatal; the Vitest JSON report must contain zero skipped/pending/todo/failed/timed-out tests. | Fork PRs skip (trust boundary); same-repo PRs and `workflow_call` (release) run it. Never claimed from macOS. |
+| macOS restricted | `macos-restricted` (`macos-15`) | The real `sandbox-exec` behavioral branch when enforcement is available, or the explicit unavailable/full-rejected branch otherwise. | Never claims full isolation on Darwin. |
+
+**Release prerequisite.** Release Preflight invokes the `sandbox-security.yml` reusable workflow for the exact preflight commit, records both immutable image IDs + the API-resolved security-gate job conclusion, and Release Publish re-verifies that gate against the live GitHub API before any `npm publish` — failing closed if `master` has moved since preflight. Local verification can run fixture/unit tests, Docker lanes, and the macOS lane, but cannot verify the privileged job, the API-returned reusable-workflow job naming, or release dispatch behavior.
 
 ### Package responsibilities
 
@@ -154,8 +183,9 @@ User query
 | `packages/agentoctopus` | `index.ts` | Umbrella re-export of all sub-packages |
 | `packages/skills` | `types.ts`, `schema.ts`, `frontmatter.ts`, `config.ts`, `local-loader.ts`, `workspace.ts`, `snapshot.ts`, `install.ts`, `clawhub-install.ts`, `command-specs.ts`, `env-overrides.ts`, `evolution/` | SKILL.md loading/parsing, eligibility pipeline, install system, env overrides, prompt snapshot building, skill self-improvement system |
 | `packages/registry` | `registry.ts`, `rating.ts`, `rating-dimensions.ts` | Delegates SKILL.md loading to `@agentoctopus/skills`, persists ratings/invocations to `registry/ratings.json` |
-| `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution — uses `@agentoctopus/skills` for eligibility and env overrides |
+| `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts`, `sandbox-runner.ts`, `sandbox-runner-factory.ts`, `sandbox-vm-assembly.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution — uses `@agentoctopus/skills` for eligibility and env overrides. `SandboxRunner` is the single orchestration point for all skill execution: snapshot build → `selectBackend` (fail-closed) → `prepareTopology` → egress-proxy launch → `verifySnapshot` → `prepare` → `run`/`spawn` → `cleanup`. Persistent sessions use `SandboxProcess` (subprocess) / `SandboxMcpTransport` (MCP stdio) bound via `SandboxRunner.bind()`. |
 | `packages/adapters` | `http-adapter.ts`, `mcp-adapter.ts`, `subprocess-adapter.ts` | Three execution strategies — HTTP POST, MCP stdio, Node subprocess |
+| `packages/sandbox` | `backend.ts`, `docker/`, `os/`, `vm/`, `proxy/`, `snapshot.ts`, `policy.ts`, `secrets.ts`, `schema.ts` | Leaf isolation package (imports nothing from `@agentoctopus/*` or native). `selectBackend` + `NoFullBackendError`, `DockerBackend`, `OsSandboxBackend`, `VmSandboxBackend`, egress proxy (`egress-proxy.ts`, CA, policy engine, DNS, headers, secret channel), immutable snapshot + digest identity, requested∩granted policy. Native VM helpers live in `packages/sandbox-vm-native` (dynamic-imported only from `core`). |
 | `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts`, `control-plane/`, `channels/`, `security/` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API, event bus, Webhook/WebChat channels, DM pairing |
 | `apps/web` | `src/app/api/ask/route.ts`, `src/app/page.tsx` | Next.js REST API + chat demo UI |
 | `apps/cli` | `src/index.ts`, `src/update.ts`, `src/sync-skills.ts`, `src/clawhub.ts`, `src/evolve.ts`, `src/connect.ts` | Commander CLI (`list`, `ask`, `update`, `sync`, `onboard`, `skill`, `evolve`, `connect`, `agent`) — ClawHub re-exports from `@agentoctopus/skills` |

@@ -425,6 +425,21 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] REST API `binary_installable` response — returns missing binaries and install specs.
 - [x] Chat channel two-phase install — IM bots prompt for confirmation before installing.
 
+### Phase S — Sandbox Security Matrix ✅ Complete (Tasks 1–7 + 5b)
+
+Fail-closed skill execution: every skill runs in a sandbox backend selected at runtime via `selectBackend`. Backends probe their own privileges before ranking; a backend is admitted only when its post-probe `isolationLevel` meets `minIsolationLevel`. Default `auto` + `full` throws `NoFullBackendError` when no full backend is available — never a host fallback.
+
+- [x] **Task 1** — Security harness (`packages/sandbox/tests/security/harness.ts`): `runArgv` (execFile, never shell), real capability probes (`probeDocker`, `probePrivilegedLinux`, `probeMacSandbox`), `HostCanary`, immutable-image ref verification (`requirePinnedImageRef`).
+- [x] **Task 2** — Docker lane + sidecar topology: host-canary, direct-internet/metadata denial, env/caps hygiene, timeout/tree-kill, cgroup; sidecar internal network + read-only CA mount.
+- [x] **Task 3** — Privileged Linux lane (CI-owned, `skipIf`-gated, `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1` zero-skip).
+- [x] **Task 4 / 4b** — Egress proxy adversarial matrix (non-granted HTTP/CONNECT, redirect method+credential, response cap/framing/max-conn, raw-header smuggling, DNS private/rebinding, TLS MITM + IP SAN type 7) + MCP stdio e2e over the Plan 5 port contract.
+- [x] **Task 5 / 5b** — Identity + snapshot integrity (grants, hardlink/special rejection, byte/path/mode/symlink tamper → `SNAPSHOT_MISMATCH`) + macOS restricted + fail-closed lane (`macos-restricted-lane.test.ts`, commit `15d6dc4`).
+- [x] **Task 6** — Reproducible runtime + proxy images (local build, immutable digests, direct-argv runtime, self-contained proxy bundle).
+- [x] **Task 7** — Security CI + release preflight/publish gate (`sandbox-security.yml`, reusable-workflow identity verification, immutable image IDs recorded and re-verified before npm publish).
+- [x] **macOS restricted production backend** — NO-GO by the T5 feasibility gate (dyld shared cache → unfilterable `file-read-data` breakout on macOS 26.x). `spawnDarwinProcess`/`darwin-process.ts` never implemented. VM sandbox backend (separate plan) supersedes for full isolation. macOS is never `full`; restricted is explicit opt-in only.
+
+**Sandbox security suite count:** 111 tests (`packages/sandbox/tests/security/`): image-contract 6, docker-lane 8 (expand), docker-topology 2, harness 10, identity-lane 14 (expand), linux-lane 12, linux-topology 6, macos-restricted-lane 4, proxy-lane 30 (expand), publish-gate 14 (expand). 101 pass on a macOS host; 10 Docker-lane cases fail locally only because the immutable runtime image cannot be pulled locally (pre-existing Docker provisioning delta, zero on CI).
+
 ### Phase 7 — Payment & Billing (Planned)
 
 ---
@@ -437,16 +452,26 @@ OLLAMA_BASE_URL=http://localhost:11434
 # Run all tests across all workspaces
 pnpm test
 
-# Results (all green):
-# packages/skills     — 123 tests ✅  (schema, evolution, search, install)
-# packages/registry   — 47 tests  ✅
-# packages/adapters   — 3 tests   ✅  (incl. mcp-adapter)
-# packages/core       — 65 tests  ✅  (router, executor, planner, integration)
-# apps/cli            — 57 tests  ✅  (commands, evolve, connect, onboard)
-# apps/web            — 6 tests   ✅  (POST /api/ask + /api/feedback)
-# packages/gateway    — 11 tests  ✅  (session, agent-protocol, engine, security)
-# Total: 313+ tests
+# Sandbox security suite (scoped — 111 tests):
+pnpm --filter @agentoctopus/sandbox exec vitest run tests/security
 ```
+
+Per-package declared test counts (workspace, not CI-expanded):
+
+| Package | Test files | Declared `it/test` |
+|---|---|---|
+| `packages/skills` | 20 | 140 |
+| `packages/registry` | 7 | 49 |
+| `packages/adapters` | 8 | 31 |
+| `packages/core` | 23 | 176 |
+| `packages/sandbox` | 51 | 404 (111 in the security suite) |
+| `packages/sandbox-vm-native` | 1 | 9 |
+| `packages/gateway` | 1 | 11 |
+| `apps/cli` | 6 | 57 |
+| `apps/web` | 1 | 6 |
+| **Total** | **118** | **883 declared** |
+
+Counts are `it/test` declarations; `it.each` expands to more at runtime (the sandbox security suite expands to 111). The privileged Linux lane is CI-owned (zero-skip on the provisioned runner, skipped on macOS dev hosts).
 
 ### Manual CLI Verification (Phase 1 ✅)
 

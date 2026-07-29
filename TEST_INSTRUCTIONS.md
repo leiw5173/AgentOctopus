@@ -1472,3 +1472,55 @@ curl -s -X POST http://localhost:3000/api/ask \
 > **Phase 13 tests:** WebhookChannel (13.3) verified — returns JSON with skillUsed. WebchatChannel timeout during testing, code path exists. Multi-agent, sandbox, planner, DM pairing features not fully integrated.
 
 > **Phase 14 fix:** Install specs were not being extracted from ClawHub skill format (`metadata.openclaw.install`). Fixed in `local-loader.ts` to extract install from raw YAML while keeping Zod validation for requires. Phase 14.1-14.5 verified working.
+
+---
+
+## Phase S — Sandbox Security Matrix
+
+The sandbox security suite lives in `packages/sandbox/tests/security/` (111 tests total). Run scoped:
+
+```bash
+pnpm --filter @agentoctopus/sandbox exec vitest run tests/security
+```
+
+Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lanes run on any host with Docker (and, on Darwin, `sandbox-exec`). The **privileged Linux** lane is CI-owned — it requires a provisioned self-hosted runner with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` and `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`; on a macOS dev host it skips and that skip is NOT coverage.
+
+### Rows
+
+| # | Group | Vitest file | Runner prerequisite | Expected |
+|---|---|---|---|---|
+| S1 | Image contract: no runtime entrypoint/shell/network clients; proxy self-contained; immutable refs | `tests/security/image-contract.test.ts` | hosted Docker | 6 cases pass — `/bin/sh`,`/bin/bash`,`/usr/bin/curl`,`/usr/bin/wget`,`/usr/bin/npm`,`/usr/bin/npx` absent from runtime image; proxy image is a self-contained esbuild bundle; refs are immutable digests. |
+| S2 | Docker host-canary, direct internet, metadata, env, caps, timeout/tree-kill, cgroup | `tests/security/docker-lane.test.ts` | hosted Docker (immutable image must be pulled) | Host canary unreadable+unwritable; `direct-internet` + `metadata` unreachable without proxy; no host/credential env leak; dropped capabilities; timeout reaps the process tree; cgroup settings enforced. (10 cases fail locally when the immutable runtime image cannot be pulled — pre-existing Docker provisioning delta, zero on CI.) |
+| S3 | Docker sidecar / internal-network alias + CA mount | `tests/security/docker-topology.test.ts` | hosted Docker | Runtime container reaches proxy only at `http://egress-proxy:8080` on the internal network; CA bundle mounted read-only at `/etc/skill-ca/ca.pem`. |
+| S4 | Privileged Linux mirrored host/network/env/output/timeout | `tests/security/linux-lane.test.ts` | privileged Linux (`OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`) | CI-owned, zero-skip. Mirrors the Docker host-canary, network-denial, env-hygiene, output-capture, and timeout/tree-kill cases under real Linux namespace isolation. |
+| S5 | Linux named-netns `/32` route, proxy-only port, CA mount, nft, cgroup | `tests/security/linux-topology.test.ts` | privileged Linux (`OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`) | CI-owned. Skill netns has only a `/32` route + proxy port reachable; no NAT/default route; nftables + cgroup-v2 enforcement proven. |
+| S6 | Proxy non-granted HTTP/CONNECT; method/path/port/scheme injection | `tests/security/proxy-lane.test.ts` | hosted Docker | Non-granted HTTP and CONNECT denied; injected method/path/port/scheme cannot bypass the allowlist. |
+| S7 | Redirect same-origin/cross-origin method+credential behavior | `tests/security/proxy-lane.test.ts` | hosted Docker | Same-origin redirect follows method+credential rules; cross-origin redirect strips credentials. |
+| S8 | Response cap / framing and max-connection accounting | `tests/security/proxy-lane.test.ts` | hosted Docker | Response body capped at the configured limit; framing enforced; max-connection accounting refuses over-budget connections. |
+| S9 | Raw-header smuggling matrix | `tests/security/proxy-lane.test.ts` | hosted Docker | CRLF injection, header folding, and smuggling vectors are rejected before reaching the upstream. |
+| S10 | DNS private resolution / rebinding | `tests/security/proxy-lane.test.ts` | hosted Docker | Private/loopback DNS resolution denied; rebinding to an internal address does not grant access. |
+| S11 | TLS MITM with upstream test CA and IP SAN type 7 | `tests/security/proxy-lane.test.ts` | hosted Docker | Upstream TLS uses system trust only; the test-only injected CA MITMs the session; IP SAN type 7 is handled correctly. |
+| S12 | Persistent MCP multi-message, malformed response, close/reaping (Docker + Linux) | `packages/core/tests/mcp-stdio-docker-e2e.test.ts` (+ Linux variant on privileged runner) | hosted Docker (Docker variant); privileged Linux (Linux variant) | Multi-message MCP stdio transport over the real launcher works; malformed responses are handled; close reaps the transport on both Docker and Linux. The Docker variant is hosted-Docker-owned; a future Linux variant must parameterize the real launcher before ownership changes. |
+| S13 | Identity grants, hardlink/special files, byte/path/mode/symlink tamper | `tests/security/identity-lane.test.ts` | hosted Docker | Granted capabilities honored; hardlinks and special files rejected at build time; byte/path/mode/symlink tamper aborts with `SNAPSHOT_MISMATCH`. |
+| S14 | macOS restricted behavioral-or-unavailable / full-rejected branch | `tests/security/macos-restricted-lane.test.ts` | macOS (`sandbox-exec`) | Fail-closed selection on every Darwin host (OS backend never `full`; default `full` rejected without Docker; restricted requires explicit `os`+`restricted` opt-in). When `probeMacSandbox()` is available, real `sandbox-exec` enforcement denies host-canary read/write, public+loopback TCP, and host-secret env forwarding. macOS is never described as full isolation. |
+| S15 | Release preflight / publish security prerequisite validation | `tests/security/publish-gate.test.mjs` | hosted (fixture-driven) | Release Preflight records both immutable image IDs + the API-resolved security-gate conclusion; Release Publish re-verifies the gate against the live GitHub API and fails closed if `master` moved since preflight. Foreign-path/branch/event, missing-security-job, mutable-digest, SHA/attempt/run-id mismatch, and uppercase-SHA fixtures all reject. |
+
+### Pass / Fail Checklist (Phase S)
+
+| # | Test | Pass |
+|---|---|---|
+| S1 | Image contract — no shell/curl/npm in runtime; proxy self-contained; immutable refs | ✅ (CI) |
+| S2 | Docker lane — canary/internet/metadata/env/caps/timeout/cgroup | ✅ (CI; 10 fail locally without the immutable image) |
+| S3 | Docker topology — sidecar internal network + CA mount | ✅ (CI) |
+| S4 | Privileged Linux mirrored isolation | ✅ (CI-owned, zero-skip) |
+| S5 | Linux named-netns /32 route + nft + cgroup | ✅ (CI-owned, zero-skip) |
+| S6 | Proxy non-granted HTTP/CONNECT + injection | ✅ (CI) |
+| S7 | Redirect same/cross-origin method+credential | ✅ (CI) |
+| S8 | Response cap / framing / max-conn | ✅ (CI) |
+| S9 | Raw-header smuggling | ✅ (CI) |
+| S10 | DNS private / rebinding | ✅ (CI) |
+| S11 | TLS MITM upstream CA + IP SAN type 7 | ✅ (CI) |
+| S12 | Persistent MCP multi-message/malformed/close | ✅ (CI, Docker variant) |
+| S13 | Identity grants / hardlink / special / tamper | ✅ (CI) |
+| S14 | macOS restricted behavioral-or-unavailable / full-rejected | ✅ (Darwin host) |
+| S15 | Release preflight / publish gate | ✅ (fixture-driven) |

@@ -81,3 +81,114 @@ The runner pins the one-shot `run()` control flow:
 **Persistent sessions.** `SandboxSession.resultMeta` is a memoized promise that resolves ONLY after `process.exited` settles AND `close()` completes (process close → backend cleanup → proxy close → session-dir removal). It is definitive only post-close; reading it before `close()` resolves yields a pending promise by design. `close()` applies the same downgrade taxonomy, memoizes the first outcome, and rethrows the first `ContainmentCleanupError` — repeat `close()` calls rethrow the same first error instance; they never re-run teardown.
 
 **Backend cleanup contract.** Every `SandboxBackend.cleanup()` implementation throws `ContainmentCleanupError` when its process or network teardown step fails; the call is idempotent via memoized first outcome (repeat calls rethrow the same error or resolve identically); and a containment failure is never logged-and-swallowed. Host-filesystem hygiene failures (rootfs cleanup, launch-spec removal, session-dir removal) are NOT containment — they remain best-effort and surface only as soft degradation reasons.
+
+## Topology diagrams
+
+### Docker runtime + proxy sidecar (internal network)
+
+```
+┌──────────────────────── host ─────────────────────────┐
+│                                                         │
+│   ┌─ internal network (octopus-sbx-*) ──────────────┐ │
+│   │                                                   │ │
+│   │   ┌─────────────────────┐    ┌─────────────────┐  │ │
+│   │   │  runtime container   │    │  egress-proxy    │  │ │
+│   │   │  (immutable digest)  │    │  (immutable dig) │  │ │
+│   │   │                     │    │                  │  │ │
+│   │   │  skill argv direct  │───►│  :8080           │  │ │
+│   │   │  (no shell/curl)    │    │  requested∩granted│ │ │
+│   │   │                     │    │  allowlist       │  │ │
+│   │   │  /etc/skill-ca/     │    │                  │  │ │
+│   │   │   ca.pem (ro bind)  │    │  ── upstream ───►│──┼─┼──► allowed egress only
+│   │   └─────────────────────┘    └─────────────────┘  │ │
+│   │          ▲                        ▲               │ │
+│   └──────────┼────────────────────────┼───────────────┘ │
+│              │                        │                 │
+│        host canary (NOT mounted)  CA bundle (ro)        │
+│        → unreadable + unwritable   written to sessionDir│
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+The runtime container's only network peer is the proxy at `http://egress-proxy:8080` on the internal network. Direct internet, cloud metadata (`169.254.169.254`), and loopback services are unreachable. The CA bundle is bind-mounted read-only at `/etc/skill-ca/ca.pem`.
+
+### Linux skill netns + proxy netns (privileged runner, CI-owned)
+
+```
+┌─────── privileged Linux host (CAP_SYS_ADMIN + CAP_NET_ADMIN) ───────┐
+│                                                                       │
+│   ┌─ skill netns ──────────┐         ┌─ proxy netns ────────────────┐ │
+│   │                        │         │                               │ │
+│   │  skill process         │  veth   │  egress-proxy :8080           │ │
+│   │  (direct argv)         │◄───────►│  requested∩granted allowlist │ │
+│   │                        │ /32 only│                               │ │
+│   │  route: proxy /32 ONLY │  route  │  ── upstream ──────────────► │─┼─► allowed egress
+│   │  NO default route      │         │                               │ │
+│   │  NO NAT                │         │  CA bundle (ro bind)          │ │
+│   │                        │         │  nft + cgroup-v2 enforced     │ │
+│   └────────────────────────┘         └───────────────────────────────┘ │
+│                                                                       │
+│   cgroup: oct-* under delegated parent (kill + remove on cleanup)    │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+The skill namespace has only a `/32` route to the proxy namespace over a veth pair — no NAT, no default route, no other reachable port. nftables enforces the allowlist and cgroup-v2 enforces resource limits and process-tree reaping. This lane is CI-owned and zero-skip; it is never claimed from macOS.
+
+### macOS restricted / unavailable + fail-closed default
+
+```
+┌──────────────────── Darwin host ────────────────────┐
+│                                                      │
+│   selectBackend(auto, minIsolationLevel:'full')      │
+│          │                                           │
+│          ▼                                           │
+│   OsSandboxBackend.probe() → false (platform gate)  │
+│   post-probe isolationLevel = 'restricted' (≠ full) │
+│          │                                           │
+│          ▼                                           │
+│   No backend meets 'full' floor                     │
+│          │                                           │
+│          ▼                                           │
+│   ✗ NoFullBackendError  (NEVER a host fallback)     │
+│                                                      │
+│   ── restricted opt-in (explicit, trusted only) ──  │
+│   defaultBackend:'os' + minIsolationLevel:'restricted'│
+│          │                                           │
+│          ▼                                           │
+│   probeMacSandbox() available?                      │
+│     yes → sandbox-exec ENFORCES deny rules           │
+│            (canary rw denied, TCP denied, env sanitized)│
+│     no  → restricted unavailable, release-gate asserts│
+│                                                      │
+│   macOS is NEVER 'full'. Restricted is opt-in only.  │
+└──────────────────────────────────────────────────────┘
+```
+
+The dyld shared-cache feasibility gate proved `file-read-data` containment cannot be established on macOS 26.x, so the restricted production backend was abandoned and a VM backend supersedes it for full isolation. Restricted use on macOS is an explicit, trusted opt-in; `auto` never picks it and the default `full` floor fails closed without Docker.
+
+## Response-cap failure semantics
+
+When a skill response exceeds the configured body cap, the proxy truncates and the run is reported as degraded (the cap is a hard limit, not advisory). Framing errors and protocol violations from the upstream are rejected before reaching the skill; the skill never observes a partially-framed response. Max-connection accounting refuses connections over the configured budget rather than queueing them indefinitely.
+
+## Upstream TLS trust
+
+Upstream TLS uses the **system trust store only** — a skill cannot install a custom root CA to MITM its own upstream. The session MITM CA (`SessionCa`) is test/development-only: it is injected by the launcher so the egress proxy can inspect and enforce the allowlist on TLS traffic, and its private key lives only in launcher memory for the duration of one execution. It is never written to disk, never mounted, and never included in the bundle the skill sees. A persisted CA key on disk, in the snapshot, in env vars, or in logs is a defect.
+
+## Persistent MCP transport
+
+A persistent MCP session uses `SandboxMcpTransport` bound via `SandboxRunner.bind()` over a real backend launcher (Docker or Linux). Multi-message exchanges are framed correctly; a malformed upstream response is rejected rather than crashing the transport; and closing the session reaps the underlying process and its network topology on both Docker and Linux. The Docker variant is hosted-Docker-owned; a future Linux variant must parameterize the real Linux launcher and prove the Linux path before ownership changes.
+
+## Resource / timeout cleanup
+
+Every run applies cleanup AFTER capturing the backend result and BEFORE returning: `backend.cleanup()` → `proxyHandle.close()` → `rm(sessionDir)`. A containment teardown failure (`ContainmentCleanupError`) downgrades `meta.isolationLevel` to `'none'`, marks `degraded: true`, and forces `success: false` — even if the child exited cleanly, because the isolation boundary may not have been fully torn down. Soft teardown failures (proxy close, session-dir removal) append to `degradationReasons` without downgrading the level. Timeout reaps the entire process tree, not just the leaf child.
+
+## Immutable image update procedure
+
+Runtime and proxy images are referenced only by immutable digest (`repo@sha256:<64hex>` or `sha256:<64hex>`). To update an image:
+
+1. Build the new image and compute its `sha256:<64hex>` digest (the build is reproducible; the same inputs yield the same digest).
+2. Update the trusted config (`sandbox.docker.image` / `sandbox.proxy.artifact`) to the new digest.
+3. The image-contract tests re-verify the new ref: no shell/curl/npm in the runtime, proxy self-contained, immutable ref format.
+4. Release Preflight records the new immutable ID; Release Publish re-verifies it against the live GitHub API before publish.
+
+Mutable tags (`:latest`, `:v1`) are rejected by the image-contract tests and never appear in trusted config.
