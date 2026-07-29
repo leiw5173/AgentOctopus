@@ -51,6 +51,10 @@ Full documentation is available at the [GitBook docs site](https://agentoctopus.
 - [Deployment](docs/deployment/docker.md)
 - [Contributing](docs/contributing/adding-skills.md)
 
+## Sandbox backend selection
+
+Backend selection is fail-closed: candidates are probed before ranking, and a backend is admitted only when its post-probe `isolationLevel` meets `minIsolationLevel`. Under the default `auto` + `minIsolationLevel:'full'` configuration, AgentOctopus never silently degrades to a weaker backend — when no `full` backend is available, it refuses rather than runs untrusted code unprotected. Restricted OS execution is opt-in only and is selectable solely with exactly `defaultBackend:'os'` + `minIsolationLevel:'restricted'`; `auto` never picks a restricted backend implicitly.
+
 ## Development
 
 ```bash

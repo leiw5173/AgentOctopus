@@ -1,4 +1,4 @@
-import { describe, it, expect, expectTypeOf } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi } from 'vitest';
 import {
   selectBackend,
   NoFullBackendError,
@@ -10,6 +10,8 @@ import {
 } from '../src/backend.js';
 import { SandboxConfigSchema } from '../src/schema.js';
 import type { BackendKind, IsolationLevel } from '../src/types.js';
+import { OsSandboxBackend, type OsBackendDeps } from '../src/os/os-backend.js';
+import type { OsCaps } from '../src/os/probe.js';
 
 const fake = (kind: any, level: any, ok: boolean): SandboxBackend => ({
   kind, isolationLevel: level,
@@ -120,6 +122,140 @@ describe('selectBackend (probe-before-rank)', () => {
     const b = new ProbeGatedBackend('os', false);
     await expect(selectBackend(cfg, [b])).rejects.toBeInstanceOf(NoFullBackendError);
     expect(b.probed).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T1 — selection semantics: probe-before-rank against the REAL OS backend +
+// exact restricted-OS opt-in guard.
+//
+// The Linux full case exercises the production OsSandboxBackend via DI seams
+// (probeOsCaps + resolveOsArtifacts) so the full promotion path
+// (restricted → full on Linux caps) is covered without touching a kernel.
+//
+// The Darwin-restricted opt-in cases use a minimal `SandboxBackend` stub that
+// models the post-T10 Darwin behavior: probe() === true with a stable
+// `restricted` isolationLevel. The current OsSandboxBackend's probe returns
+// false on non-Linux (the platform dispatch seam lands in T10, and the
+// behavioral Darwin probe lands in T7), so the real class cannot yet reach
+// the selectable-restricted state T1 guards. Using a stub here keeps T1
+// scoped to selection semantics, which is the only behavior T1 changes.
+// ---------------------------------------------------------------------------
+
+function fullLinuxCaps(): OsCaps {
+  return {
+    platform: 'linux',
+    userMountPidIpcUtsNs: true,
+    namedNetns: true,
+    nftRuleCreate: true,
+    cgroupV2Writable: true,
+    runtimeArtifact: true,
+    helperArtifact: true,
+    sandboxExec: false,
+    probeErrors: [],
+  };
+}
+
+const ARTIFACT_FIXTURE = {
+  runtimeArtifactPath: '/runtime/linux-node22.rootfs.tar.zst',
+  runtimeManifestPath: '/runtime/linux-node22.manifest.json',
+  helperManifestPath: '/runtime/os-helper.manifest.json',
+  helperBinaryPath: '/runtime/os-helper',
+  proxyBundlePath: '/build/egress-proxy-server.mjs',
+  proxyBundleManifestPath: '/build/egress-proxy-server.mjs.manifest.json',
+};
+
+function fullLinuxDeps(): OsBackendDeps {
+  return {
+    probeOsCaps: vi.fn(async () => fullLinuxCaps()),
+    resolveOsArtifacts: vi.fn(async () => ARTIFACT_FIXTURE),
+  };
+}
+
+/**
+ * Stub that models the post-T10 Darwin OS backend: probe succeeds, level is
+ * pinned to `restricted`. Lets the T1 selection guard be exercised without
+ * waiting for the platform dispatch + behavioral probe (T7/T10).
+ */
+class RestrictedOsBackend implements SandboxBackend {
+  readonly kind = 'os' as const;
+  readonly isolationLevel: IsolationLevel = 'restricted';
+  async probe(): Promise<boolean> { return true; }
+  prepareTopology = async () => ({ kind: 'in-process', listenHost: '127.0.0.1', reachableHost: '127.0.0.1' }) as ProxyCarrier;
+  prepare = async () => {};
+  spawn = async () => {
+    const { PassThrough } = await import('node:stream');
+    return {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      exited: Promise.resolve({ exitCode: 0, stdout: '', stderr: '', timedOut: false,
+        meta: { isolationLevel: this.isolationLevel, backend: this.kind, degraded: false, degradationReasons: [] } }),
+      kill: async () => {}, close: async () => {},
+    };
+  };
+  run = async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false,
+    meta: { isolationLevel: this.isolationLevel, backend: this.kind, degraded: false, degradationReasons: [] } });
+  cleanup = async () => {};
+}
+
+function darwinBackend(): SandboxBackend {
+  return new RestrictedOsBackend();
+}
+
+describe('selectBackend (T1 — restricted-OS opt-in + probe resilience)', () => {
+  it('auto/full selects the real OS backend after it probes to full (Linux caps)', async () => {
+    const b = new OsSandboxBackend({ sessionId: 'sel-full', deps: fullLinuxDeps() });
+    expect(b.isolationLevel).toBe('restricted'); // pre-probe state
+    const cfg = SandboxConfigSchema.parse({ defaultBackend: 'auto', minIsolationLevel: 'full' });
+    expect(await selectBackend(cfg, [b])).toBe(b);
+  });
+
+  it('auto/full rejects a Darwin OS backend that stays restricted', async () => {
+    const cfg = SandboxConfigSchema.parse({ defaultBackend: 'auto', minIsolationLevel: 'full' });
+    await expect(selectBackend(cfg, [darwinBackend()])).rejects.toBeInstanceOf(NoFullBackendError);
+  });
+
+  it('auto/restricted never implicitly selects restricted OS', async () => {
+    const cfg = SandboxConfigSchema.parse({ defaultBackend: 'auto', minIsolationLevel: 'restricted' });
+    await expect(selectBackend(cfg, [darwinBackend()])).rejects.toBeInstanceOf(NoFullBackendError);
+  });
+
+  it('os/full and os/none both reject restricted OS', async () => {
+    for (const min of ['full', 'none'] as const) {
+      const cfg = SandboxConfigSchema.parse({ defaultBackend: 'os', minIsolationLevel: min });
+      await expect(selectBackend(cfg, [darwinBackend()])).rejects.toBeInstanceOf(NoFullBackendError);
+    }
+  });
+
+  it('exact os/restricted selects the restricted OS backend', async () => {
+    const cfg = SandboxConfigSchema.parse({ defaultBackend: 'os', minIsolationLevel: 'restricted' });
+    expect((await selectBackend(cfg, [darwinBackend()])).isolationLevel).toBe('restricted');
+  });
+
+  it('probe throw excludes the candidate; strongest post-probe level wins', async () => {
+    const throwing: SandboxBackend = {
+      kind: 'docker',
+      isolationLevel: 'full',
+      probe: async () => { throw new Error('probe blew up'); },
+      prepareTopology: async () => ({ kind: 'in-process', listenHost: '127.0.0.1', reachableHost: '127.0.0.1' }),
+      prepare: async () => {},
+      spawn: async () => {
+        const { PassThrough } = await import('node:stream');
+        return {
+          stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+          exited: Promise.resolve({ exitCode: 0, stdout: '', stderr: '', timedOut: false,
+            meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] } }),
+          kill: async () => {}, close: async () => {},
+        };
+      },
+      run: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false,
+        meta: { isolationLevel: 'full', backend: 'docker', degraded: false, degradationReasons: [] } }),
+      cleanup: async () => {},
+    };
+    const full = new ProbeGatedBackend('os', true); // probes to 'full'
+    const cfg = SandboxConfigSchema.parse({ defaultBackend: 'auto', minIsolationLevel: 'full' });
+    const chosen = await selectBackend(cfg, [throwing, full]);
+    expect(chosen).toBe(full);
+    expect(chosen.isolationLevel).toBe('full');
   });
 });
 

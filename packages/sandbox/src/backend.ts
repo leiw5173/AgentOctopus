@@ -128,15 +128,26 @@ const LEVEL_RANK: Record<IsolationLevel, number> = {
  */
 export async function selectBackend(config: SandboxConfig, available: SandboxBackend[]): Promise<SandboxBackend> {
   const required = LEVEL_RANK[config.minIsolationLevel];
+  // Restricted OS execution is opt-in only: a restricted `kind:'os'` backend is
+  // selectable ONLY when the operator explicitly requests `defaultBackend:'os'`
+  // AND lowers the floor to `minIsolationLevel:'restricted'`. Under any other
+  // combination (auto/*, os/full, os/none) a restricted OS candidate is
+  // excluded even when its probe succeeds.
+  const explicitRestrictedOs =
+    config.defaultBackend === 'os' && config.minIsolationLevel === 'restricted';
 
   const candidates: SandboxBackend[] = [];
   for (const b of available) {
     if (config.defaultBackend !== 'auto' && b.kind !== config.defaultBackend) continue;
     // Probe FIRST: a backend may promote its isolationLevel from restricted to
     // full only after a live capability check. Ranking before probing would
-    // drop it and never observe the promoted level.
-    if (!(await b.probe())) continue; // probe failed — excluded
+    // drop it and never observe the promoted level. A throwing probe is an
+    // availability failure — exclude the candidate, never propagate.
+    let ok = false;
+    try { ok = await b.probe(); } catch { ok = false; }
+    if (!ok) continue; // probe failed or threw — excluded
     if (LEVEL_RANK[b.isolationLevel] < required) continue; // still too weak post-probe
+    if (b.kind === 'os' && b.isolationLevel === 'restricted' && !explicitRestrictedOs) continue;
     candidates.push(b);
   }
 
