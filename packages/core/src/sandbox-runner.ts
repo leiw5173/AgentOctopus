@@ -12,6 +12,7 @@
  *   → selectBackend(config, available)              [direct return]
  *   → backend.prepareTopology()                     [creates carrier before proxy]
  *   → provisionSecrets                              [ResolvedSecrets]
+ *   → mkdtemp private session workDir (0700)        [<store>/sessions/oct-session-*]
  *   → proxyLauncher.launch({ policy, secrets, workDir }, carrier)
  *   → verifySnapshot(snapshotRoot, identity.digest) [immediately before prepare]
  *   → backend.prepare({ ...policy, snapshotRoot, proxyAddr, caBundlePath,
@@ -22,10 +23,11 @@
  *   → deterministic reverse cleanup
  *
  * Cleanup is reverse and idempotent:
- *   spawn() path: process.close() → backend.cleanup() → proxyHandle.close()
- *   run()   path: backend.cleanup() → proxyHandle.close()
+ *   spawn() path: process.close() → backend.cleanup() → proxyHandle.close() → rm sessionDir
+ *   run()   path: backend.cleanup() → proxyHandle.close() → rm sessionDir
  *   (backend.run() owns its own spawn→write→exited→close lifecycle internally;
- *    the one-shot path has no process handle.)
+ *    the one-shot path has no process handle. Session-dir removal is
+ *    best-effort host hygiene, never a containment error.)
  *
  * Env hygiene:
  *   minimal allowlist (LANG, LC_ALL, TZ) + non-reserved caller keys + fixed
@@ -41,6 +43,7 @@
  *   may appear in ExecSpec.
  */
 import path from 'node:path';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import type { LoadedSkill } from '@agentoctopus/registry';
 import { lookupInstallationId } from '@agentoctopus/skills';
 import {
@@ -361,6 +364,17 @@ async function provisionSecrets(
   return out;
 }
 
+/**
+ * Best-effort removal of the per-session working directory. Session-dir
+ * removal failure is trusted host filesystem hygiene, NOT skill containment —
+ * it is never a ContainmentCleanupError and never throws from cleanup. (T3
+ * appends a diagnostic degradation reason; T2 only guarantees best-effort,
+ * never-throwing removal.)
+ */
+async function removeSessionDir(sessionDir: string): Promise<void> {
+  await rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+}
+
 // ---------------------------------------------------------------------------
 // SandboxRunner
 // ---------------------------------------------------------------------------
@@ -403,7 +417,7 @@ export class SandboxRunner {
     if (!session.ok) {
       return session.output;
     }
-    const { backend, proxyHandle } = session;
+    const { backend, proxyHandle, sessionDir } = session;
     try {
       const env = buildGuestEnv({
         callerEnv: input.invocation?.env,
@@ -425,6 +439,7 @@ export class SandboxRunner {
     } finally {
       await backend.cleanup().catch(() => {});
       await proxyHandle.close().catch(() => {});
+      await removeSessionDir(sessionDir);
     }
   }
 
@@ -433,7 +448,7 @@ export class SandboxRunner {
     if (!session.ok) {
       throw new SandboxRunnerError(session.error.code, session.error.message);
     }
-    const { backend, proxyHandle } = session;
+    const { backend, proxyHandle, sessionDir } = session;
     let process: SandboxProcess | undefined;
     try {
       const env = buildGuestEnv({
@@ -458,12 +473,14 @@ export class SandboxRunner {
           await proc.close().catch(() => {});
           await backend.cleanup().catch(() => {});
           await proxyHandle.close().catch(() => {});
+          await removeSessionDir(sessionDir);
         },
       };
     } catch (err) {
       if (process) await process.close().catch(() => {});
       await backend.cleanup().catch(() => {});
       await proxyHandle.close().catch(() => {});
+      await removeSessionDir(sessionDir);
       throw err;
     }
   }
@@ -484,6 +501,7 @@ export class SandboxRunner {
   ): Promise<PrepareSessionResult> {
     let backend: SandboxBackend | undefined;
     let proxyHandle: { close(): Promise<void> } | undefined;
+    let sessionDir: string | undefined;
     try {
       // 1. installation identity (strict read)
       let installationId: string;
@@ -538,9 +556,19 @@ export class SandboxRunner {
       // 8. provision secrets
       const secrets = await provisionSecrets(policy, identity, this.secretProvider);
 
+      // 8b. unique PRIVATE per-session working directory. Concurrent sessions
+      // MUST NOT share a workDir: the egress-proxy CA bundle is written
+      // EXCLUSIVELY inside it (<sessionDir>/ca.pem, 0444) and a shared dir
+      // would make concurrent sessions overwrite each other's CA. The session
+      // root lives under the trusted snapshot store and is 0700; each leaf is
+      // an mkdtemp dir (0700) removed in every exit path after proxy close.
+      const sessionRoot = path.join(this.snapshotStoreDir, 'sessions');
+      await mkdir(sessionRoot, { recursive: true, mode: 0o700 });
+      sessionDir = await mkdtemp(path.join(sessionRoot, 'oct-session-'));
+
       // 9. launch proxy
       const handle = await this.proxyLauncher.launch(
-        { policy, secrets, workDir: path.dirname(snapshotRoot) },
+        { policy, secrets, workDir: sessionDir },
         carrier,
       );
       proxyHandle = handle;
@@ -567,11 +595,12 @@ export class SandboxRunner {
       };
       await backend.prepare(prepareOpts);
 
-      return { ok: true, backend, proxyHandle: handle, runtimeProfile };
+      return { ok: true, backend, proxyHandle: handle, runtimeProfile, sessionDir };
     } catch (err) {
       // Cleanup in reverse order on failure
       if (backend) await backend.cleanup().catch(() => {});
       if (proxyHandle) await proxyHandle.close().catch(() => {});
+      if (sessionDir) await removeSessionDir(sessionDir);
       if (err instanceof SandboxRunnerError) {
         return {
           ok: false,
@@ -626,5 +655,7 @@ type PrepareSessionResult =
       backend: SandboxBackend;
       proxyHandle: { close(): Promise<void> };
       runtimeProfile: ResolvedRuntimeProfile;
+      /** Unique private 0700 mkdtemp dir; removed in every exit path. */
+      sessionDir: string;
     }
   | { ok: false; output: SandboxRunOutput; error: SandboxRunnerError };

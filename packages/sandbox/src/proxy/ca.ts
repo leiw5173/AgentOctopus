@@ -93,10 +93,33 @@ export class SessionCa {
   }
 }
 
-/** Write ca.pem into dir; return the file path (mounted read-only into the sandbox). */
-export async function writeCaBundle(dir: string, ca: SessionCa): Promise<string> {
-  await fs.mkdir(dir, { recursive: true });
+/**
+ * Write ca.pem into dir; return the file path (mounted read-only into the sandbox).
+ *
+ * The directory is created (if absent) with mode 0700 — the bundle is private
+ * to the owning session. The file is written with mode 0444 (readable, never
+ * writable, by the sandboxed child).
+ *
+ * By default the write is EXCLUSIVE (flag 'wx'): a second call for the same
+ * dir rejects with EEXIST instead of silently overwriting a live session's CA.
+ * Pass `{ exclusive: false }` only for callers that genuinely own the dir and
+ * need to rotate the bundle in place.
+ */
+export async function writeCaBundle(
+  dir: string,
+  ca: SessionCa,
+  opts?: { exclusive?: boolean },
+): Promise<string> {
+  const exclusive = opts?.exclusive ?? true;
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const p = path.join(dir, 'ca.pem');
-  await fs.writeFile(p, ca.certPem, { mode: 0o444 });
+  if (!exclusive) {
+    // A prior bundle is 0444; restore write permission so flag 'w' can replace it.
+    await fs.chmod(p, 0o644).catch(() => {});
+  }
+  await fs.writeFile(p, ca.certPem, { flag: exclusive ? 'wx' : 'w', mode: 0o444 });
+  // writeFile's mode only applies at creation; on non-exclusive overwrite the
+  // pre-existing file keeps its chmod'd 0644. Re-assert 0444 unconditionally.
+  await fs.chmod(p, 0o444);
   return p;
 }
