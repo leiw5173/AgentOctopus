@@ -191,6 +191,7 @@ export async function setupDockerSandbox(opts: DockerSandboxOptions = {}): Promi
     await selected.prepare({
       ...policy,
       snapshotRoot: snapshot.snapshotRoot,
+      expectedSnapshotDigest: snapshot.identity.digest,
       proxyAddr: proxy.reachableAddr,
       caBundlePath: proxy.caBundlePath,
       runtimeProfile,

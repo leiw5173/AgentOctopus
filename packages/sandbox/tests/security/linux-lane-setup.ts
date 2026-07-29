@@ -343,6 +343,7 @@ export async function setupLinuxSandbox(opts: LinuxSandboxOptions = {}): Promise
     await selected.prepare({
       ...policy,
       snapshotRoot: snapshot.snapshotRoot,
+      expectedSnapshotDigest: snapshot.identity.digest,
       proxyAddr: proxy.reachableAddr,
       caBundlePath: proxy.caBundlePath,
       runtimeProfile,
