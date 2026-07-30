@@ -264,6 +264,68 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     await inst.close();
   });
 
+  it('passes a minimal allowlisted env to the helper (HI-1)', async () => {
+    const controlReadStream = new PassThrough();
+    let recordedEnv: NodeJS.ProcessEnv | undefined;
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, env, _f, _s, _p, crs) => {
+        recordedEnv = env;
+        return makeFakeChild(['{"ready":true}\n'], crs);
+      },
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
+
+    const originalPath = process.env.PATH;
+    const originalDyld = process.env.DYLD_LIBRARY_PATH;
+    const originalLd = process.env.LD_LIBRARY_PATH;
+    const originalToken = process.env.GITHUB_TOKEN;
+    const originalHome = process.env.HOME;
+    try {
+      process.env.PATH = '/test/bin';
+      process.env.DYLD_LIBRARY_PATH = '/test/libkrun';
+      delete process.env.LD_LIBRARY_PATH;
+      process.env.GITHUB_TOKEN = 'secret-token';
+      process.env.HOME = '/test/home';
+
+      const inst = await engine.start(baseConfig() as any);
+      await inst.close();
+    } finally {
+      process.env.PATH = originalPath;
+      if (originalDyld === undefined) delete process.env.DYLD_LIBRARY_PATH;
+      else process.env.DYLD_LIBRARY_PATH = originalDyld;
+      if (originalLd === undefined) delete process.env.LD_LIBRARY_PATH;
+      else process.env.LD_LIBRARY_PATH = originalLd;
+      if (originalToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = originalToken;
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+
+    expect(recordedEnv).toBeDefined();
+    expect(recordedEnv!.GITHUB_TOKEN).toBeUndefined();
+    expect(recordedEnv!.HOME).toBeUndefined();
+    expect(recordedEnv!.LD_LIBRARY_PATH).toBeUndefined();
+    expect(Object.keys(recordedEnv!).sort()).toEqual(
+      [
+        'DYLD_LIBRARY_PATH',
+        'OCTOPUS_VSOCK_PORT',
+        'OCTOPUS_VSOCK_HOST_SOCKET',
+        'OCTOPUS_VM_CPUS',
+        'OCTOPUS_VM_MEM_MIB',
+        'PATH',
+      ].sort(),
+    );
+    expect(recordedEnv!.PATH).toBe('/test/bin');
+    expect(recordedEnv!.OCTOPUS_VSOCK_PORT).toBe('1234');
+    expect(recordedEnv!.OCTOPUS_VSOCK_HOST_SOCKET).toBe('/tmp/vsock.sock');
+    expect(recordedEnv!.OCTOPUS_VM_MEM_MIB).toBe('512');
+    expect(recordedEnv!.OCTOPUS_VM_CPUS).toBe('2');
+    expect(recordedEnv!.DYLD_LIBRARY_PATH).toBe('/test/libkrun');
+  });
+
   it('rejects bootstrapArgv that violates the [path, blob] length===2 contract', async () => {
     const controlReadStream = new PassThrough();
     const binding: FakeBinding = {

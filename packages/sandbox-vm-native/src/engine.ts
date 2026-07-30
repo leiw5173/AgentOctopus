@@ -470,13 +470,19 @@ export class VmEngineImpl implements VmEnginePort {
     // h2gWrite (send commands). ---
     const parentCloseFds = [h2gRead, g2hWrite, tempH2gRead, tempG2hWrite];
 
+    const libPathVar =
+      this.deps.platform === 'darwin-arm64' ? 'DYLD_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
+
     const env: NodeJS.ProcessEnv = {
-      ...process.env,
+      PATH: process.env.PATH ?? '',
       OCTOPUS_VSOCK_PORT: String(config.vsockPort),
       OCTOPUS_VSOCK_HOST_SOCKET: config.vsockHostSocket,
       OCTOPUS_VM_MEM_MIB: String(config.memMib),
       OCTOPUS_VM_CPUS: String(config.cpus),
     };
+    if (process.env[libPathVar]) {
+      env[libPathVar] = process.env[libPathVar];
+    }
 
     const raw = await this.deps.spawn(
       this.opts.helperPath,
