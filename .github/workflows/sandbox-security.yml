@@ -227,10 +227,65 @@ jobs:
       - name: Run macOS restricted or fail-closed unavailable branch
         run: pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/macos-restricted-lane.test.ts --reporter=verbose
 
+  vm-lane:
+    name: vm-lane
+    runs-on: macos-15
+    env:
+      OCTOPUS_VM_LANE: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require VM lane files
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in \
+            packages/sandbox/tests/security/vm-lane-setup.ts \
+            packages/sandbox/tests/security/vm-lane.test.ts \
+            packages/sandbox/tests/security/vm-escape-matrix.test.ts \
+            packages/sandbox-vm-native/scripts/run-vm-gates.mjs \
+            packages/sandbox-vm-native/scripts/sign-release-manifest.mjs; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: VM lane file missing: $f" >&2
+              exit 1
+            fi
+          done
+      - uses: ./.github/actions/setup-node-env
+      - name: Build sandbox + sandbox-vm-native packages
+        run: |
+          pnpm --filter @agentoctopus/sandbox build
+          pnpm --filter @agentoctopus/sandbox-vm-native build
+      # The VM lane requires the full TCB (libkrun + libkrunfw + rootfs + helper)
+      # to be vendored/produced via security:build-vm. On a fresh runner without
+      # those artifacts, probe() returns false and the L3/L4 tests skip — this is
+      # the expected state until the release lane provisions the artifacts. The
+      # lane file-existence gate above is the hard requirement; the tests are
+      # skipIf-gated on probe() so a missing TCB does not fail CI.
+      - name: Run VM L3 + L4 (skipIf-gated on probe)
+        run: |
+          pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/vm-lane.test.ts --reporter=verbose
+          pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/vm-escape-matrix.test.ts --reporter=verbose
+      # When the full TCB is present, produce/refresh the gate manifest + sign
+      # the outer release manifest. These are no-ops (exit 0) if probe() fails.
+      - name: Run G1/G2 gates + sign release manifest (if TCB present)
+        run: |
+          set +e
+          pnpm --filter @agentoctopus/sandbox-vm-native security:probe-vm
+          probe_rc=$?
+          if [ "$probe_rc" -eq 2 ]; then
+            echo "VM gates NO-GO — lane not qualified. The gate manifest records the failure."
+            exit 1
+          fi
+          # probe_rc=0 → qualified; sign the manifest (needs OCTOPUS_VM_RELEASE_PRIVATE_KEY).
+          if [ "$probe_rc" -eq 0 ] && [ -n "${OCTOPUS_VM_RELEASE_PRIVATE_KEY:-}" ]; then
+            pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/sign-release-manifest.mjs
+          fi
+        env:
+          OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
+
   security-gate:
     name: security-gate
     if: always()
-    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted]
+    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted, vm-lane]
     runs-on: ubuntu-latest
     steps:
       - name: Require every security lane
@@ -239,6 +294,7 @@ jobs:
           PRODUCER_RESULT: ${{ needs.produce-linux-artifacts.result }}
           LINUX_RESULT: ${{ needs.privileged-linux.result }}
           MACOS_RESULT: ${{ needs.macos-restricted.result }}
+          VM_RESULT: ${{ needs.vm-lane.result }}
         run: |
           test "$HOSTED_RESULT" = success
           # The producer may be skipped only when the privileged lane itself
@@ -255,3 +311,8 @@ jobs:
             exit 1
           fi
           test "$MACOS_RESULT" = success
+          # vm-lane must succeed (the L3/L4 tests skipIf-gated on probe(), so
+          # a missing TCB does not fail CI — but the lane file-existence gate
+          # + build must pass).
+          test "$VM_RESULT" = success
+

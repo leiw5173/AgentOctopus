@@ -72,8 +72,9 @@ Every skill runs inside a sandbox backend selected at runtime. Backend selection
 | Docker | `full` | Only when the real Docker probe passes (container create + network + capability enforcement). |
 | Privileged Linux (named netns + cgroup v2 + nftables) | `full` | Only on a provisioned self-hosted CI runner with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN`; CI-owned, zero-skip. Never claimed from macOS. |
 | macOS restricted (`sandbox-exec`) | `restricted` (never `full`) | Explicit opt-in only: a trusted caller must set BOTH `defaultBackend:'os'` AND `minIsolationLevel:'restricted'`. `auto` never picks it implicitly, and `minIsolationLevel:'full'` fails closed without Docker. |
+| VM (libkrun) | `full` | macOS Apple Silicon + qualified Linux x64 (with `/dev/kvm`). Skills run inside a Linux guest booted from a sealed read-only ext4 rootfs; the snapshot is a read-only ext4 block image, NOT virtiofs. Implicit TSI disabled — the sole network egress is a vsock-bridged in-process egress proxy. Qualification gates (G1 host-file-unreachable, G2 network-canary-unreachable) bind a signed gate manifest at CI time. |
 
-macOS is **never** described as full isolation: the dyld shared-cache feasibility gate proved `file-read-data` containment cannot be established on Darwin, so the restricted production backend was abandoned and a VM backend supersedes it for full isolation. Restricted use on macOS is opt-in only.
+macOS is **never** described as full isolation via `sandbox-exec`: the dyld shared-cache feasibility gate proved `file-read-data` containment cannot be established on Darwin, so the restricted production backend was abandoned and a VM backend supersedes it for full isolation. Restricted use on macOS is opt-in only. The VM backend (`@agentoctopus/sandbox-vm-native`) provides `full` isolation on macOS Apple Silicon via libkrun + Hypervisor.framework.
 
 ## Development
 
