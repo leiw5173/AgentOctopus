@@ -57,7 +57,7 @@ function buildEngineOpts(config: SandboxConfig): VmEngineOptions {
   const vm = config.vm;
   const helperPath = vm?.helperPath ?? path.join(prebuilds, 'sandbox-vm-helper');
   const artifactsDir = vm?.artifactsDir ?? prebuilds;
-  const tcbManifestPath = vm?.tcbManifestPath ?? path.join(prebuilds, 'sandbox-vm-helper.manifest.json');
+  const tcbManifestPath = vm?.tcbManifestPath ?? path.join(prebuilds, 'vm-tcb-manifest.json');
   const gateManifestPath = vm?.gateManifestPath ?? path.join(prebuilds, 'gate-manifest.json');
   const releaseManifestPath = vm?.releaseManifestPath;
   const releaseManifestSignaturePath = vm?.releaseManifestSignaturePath;

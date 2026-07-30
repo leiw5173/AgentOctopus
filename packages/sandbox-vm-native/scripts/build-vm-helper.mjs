@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /**
- * build-vm-helper.mjs — producer for the trusted sandbox-vm-helper binary
- * consumed by @agentoctopus/sandbox's verifyVmTcb() (Task 6).
+ * build-vm-helper.mjs — producer for the trusted VM TCB artifacts consumed by
+ * @agentoctopus/sandbox's verifyVmTcb() (Task 6) and the VM qualification gates.
  *
  * Produces (gitignored, reproducible):
  *   prebuilds/<platform-arch>/sandbox-vm-helper            (mode 0755)
- *   prebuilds/<platform-arch>/sandbox-vm-helper.manifest.json
+ *   prebuilds/<platform-arch>/sandbox-vm-helper.manifest.json  (per-artifact)
+ *   prebuilds/<platform-arch>/vm-image-builder             (mode 0755)
+ *   prebuilds/<platform-arch>/vm-image-builder.manifest.json   (per-artifact)
+ *   prebuilds/<platform-arch>/vm-tcb-manifest.json             (combined, canonical)
  *
  * where <platform-arch> is e.g. `darwin-arm64` or `linux-x64`.
  *
@@ -32,6 +35,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  buildTcbManifest,
+  readPerArtifactEntry,
+  TCB_MANIFEST_NAME,
+  IMAGE_BUILDER_MANIFEST_NAME,
+} from './tcb-manifest.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -39,6 +48,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(HERE, '..');
 const INCLUDE_DIR = path.join(PKG_ROOT, 'include');
 const HELPER_SRC = path.join(PKG_ROOT, 'src', 'vm-helper.c');
+const IMAGE_BUILDER_SRC = path.join(PKG_ROOT, 'src', 'vm-image-builder.c');
 const HEADER_PATH = path.join(INCLUDE_DIR, 'libkrun.h');
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
@@ -106,6 +116,9 @@ try {
 const targetDir = path.join(PKG_ROOT, 'prebuilds', platformArch());
 const HELPER_PATH = path.join(targetDir, 'sandbox-vm-helper');
 const MANIFEST_PATH = path.join(targetDir, 'sandbox-vm-helper.manifest.json');
+const TCB_MANIFEST_PATH = path.join(targetDir, TCB_MANIFEST_NAME);
+const IMAGE_BUILDER_PATH = path.join(targetDir, 'vm-image-builder');
+const IMAGE_BUILDER_MANIFEST_PATH = path.join(targetDir, IMAGE_BUILDER_MANIFEST_NAME);
 const COMPILE_OK_PATH = path.join(targetDir, 'sandbox-vm-helper.compile-ok');
 const LIBKRUN_NAME = process.platform === 'darwin' ? 'libkrun.dylib' : 'libkrun.so';
 const LIBKRUNFW_NAME = process.platform === 'darwin' ? 'libkrunfw.dylib' : 'libkrunfw.so';
@@ -155,6 +168,58 @@ async function codesignAdHoc(helperPath) {
 }
 
 // ---------------------------------------------------------------------------
+// Build the vm-image-builder binary (imageBuilder TCB artifact).
+//
+// vm-image-builder.c is a self-contained, portable POSIX C program (no
+// external deps — it ships its own SHA-256 impl). Compiled with
+// -std=c11 -Wall -Wextra -Werror per the source's own build instructions
+// (vm-image-builder.c:53-54). Produces:
+//   prebuilds/<platform>/vm-image-builder           (mode 0755)
+//   prebuilds/<platform>/vm-image-builder.manifest.json  (per-artifact)
+//
+// The per-artifact manifest is consumed by buildTcbManifest() below to
+// assemble the combined vm-tcb-manifest.json. Fail-closed: if the source
+// is missing or the compile fails, die() — no partial artifact is left.
+// ---------------------------------------------------------------------------
+
+async function buildImageBuilder() {
+  if (!existsSync(IMAGE_BUILDER_SRC)) {
+    die(`vm-image-builder source not found at ${IMAGE_BUILDER_SRC}`);
+  }
+  const tmpOut = path.join(targetDir, `.vm-image-builder.tmp-${process.pid}`);
+  // vm-image-builder.c:53 — "cc -std=c11 -Wall -Wextra -Werror"
+  const args = [
+    '-O2', '-std=c11', '-Wall', '-Wextra', '-Werror',
+    '-o', tmpOut,
+    IMAGE_BUILDER_SRC,
+  ];
+  try {
+    await execFileAsync('cc', args);
+  } catch (err) {
+    await fs.rm(tmpOut, { force: true }).catch(() => {});
+    die(`vm-image-builder compile failed: ${err.stderr ?? err.message}`);
+  }
+  await fs.chmod(tmpOut, 0o755);
+  await fs.rename(tmpOut, IMAGE_BUILDER_PATH);
+
+  // Write the per-artifact manifest (same shape as vendor-libkrun's
+  // writeArtifactManifest: {schemaVersion, artifact:{sha256,size,mode}, source}).
+  const sha = await sha256File(IMAGE_BUILDER_PATH);
+  if (!SHA256_RE.test(sha)) die('internal error: computed imageBuilder digest is not 64 lowercase hex', 3);
+  const st = await fs.stat(IMAGE_BUILDER_PATH);
+  const manifest = {
+    schemaVersion: 1,
+    artifact: { sha256: sha, size: st.size, mode: st.mode & 0o777 },
+    source: { kind: 'vm-image-builder-c', file: 'src/vm-image-builder.c' },
+  };
+  await writeAtomic(IMAGE_BUILDER_MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n');
+  console.log('build-vm-helper: vm-image-builder OK');
+  console.log(`  binary:   ${IMAGE_BUILDER_PATH}`);
+  console.log(`  sha256:   ${sha}`);
+  console.log(`  manifest: ${IMAGE_BUILDER_MANIFEST_PATH}`);
+}
+
+// ---------------------------------------------------------------------------
 // Path A: full link (dylibs present — post-Task 15)
 // ---------------------------------------------------------------------------
 
@@ -191,28 +256,39 @@ async function buildFullLink() {
 
   const libkrunSha = await sha256File(libkrunPath);
   const libkrunfwSha = await sha256File(libkrunfwPath);
+
+  // Build the vm-image-builder TCB artifact + its per-artifact manifest.
+  // This must happen before the combined manifest so the imageBuilder entry
+  // is available. Fail-closed if the compile fails (buildImageBuilder dies).
+  await buildImageBuilder();
+
+  // Write the per-helper manifest (kept as a build artifact for auditing;
+  // same shape as vendor-libkrun's writeArtifactManifest). The canonical
+  // contract is the combined vm-tcb-manifest.json below.
+  const helperPerArtifactManifest = {
+    schemaVersion: 1,
+    artifact: { sha256: helperSha256, size: st.size, mode: 0o755 },
+    source: { kind: 'sandbox-vm-helper-c', file: 'src/vm-helper.c' },
+  };
+  await writeAtomic(MANIFEST_PATH, JSON.stringify(helperPerArtifactManifest, null, 2) + '\n');
+
+  // Build the combined vm-tcb-manifest.json with ALL FOUR artifacts
+  // (helper, libkrun, libkrunfw, imageBuilder), each {sha256,size,mode}.
+  // verifyVmTcb requires all 4 — fail-closed if the imageBuilder per-artifact
+  // manifest is absent or malformed (buildTcbManifest throws). NEVER write a
+  // 3-artifact combined manifest that verifyVmTcb would reject.
   const libkrunSt = await fs.stat(libkrunPath);
   const libkrunfwSt = await fs.stat(libkrunfwPath);
-
-  // verifyVmTcb (Task 6) expects artifacts { helper, libkrun, libkrunfw,
-  // imageBuilder }. The imageBuilder artifact is produced by a separate
-  // build script (Task 14); until that lands we emit a manifest with the
-  // three artifacts this script owns. The full-link self-check below is
-  // skipped if the verifier or its sibling artifacts are not available.
-  const manifest = {
-    schemaVersion: 1,
-    artifacts: {
-      helper: { sha256: helperSha256, size: st.size, mode: 0o755 },
-      libkrun: { sha256: libkrunSha, size: libkrunSt.size, mode: 0o755 },
-      libkrunfw: { sha256: libkrunfwSha, size: libkrunfwSt.size, mode: 0o755 },
-    },
-  };
-  await writeAtomic(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n');
+  const tcbManifestPath = await buildTcbManifest({
+    artifactsDir: targetDir,
+    helper: { sha256: helperSha256, size: st.size, mode: 0o755 },
+    libkrun: { sha256: libkrunSha, size: libkrunSt.size, mode: libkrunSt.mode & 0o777 },
+    libkrunfw: { sha256: libkrunfwSha, size: libkrunfwSt.size, mode: libkrunfwSt.mode & 0o777 },
+  });
 
   // Self-check: import verifyVmTcb from @agentoctopus/sandbox dist if
-  // available. If the sibling imageBuilder artifact is missing (Task 14
-  // not landed), the verifier will reject — we surface that explicitly
-  // rather than silently passing.
+  // available and verify the combined manifest. A rejection here is FATAL —
+  // the TCB is incomplete/tampered and must not be shipped.
   let verifyVmTcb = null;
   try {
     const sandboxDist = path.join(PKG_ROOT, '..', 'sandbox', 'dist', 'vm', 'vm-helper-build.js');
@@ -226,27 +302,29 @@ async function buildFullLink() {
     console.error(
       'build-vm-helper: WARNING — verifyVmTcb not importable from @agentoctopus/sandbox dist.\n' +
       '  Skipping TCB self-check. Run `pnpm --filter @agentoctopus/sandbox build` to compile it.\n' +
-      '  The helper + dylib manifest was written; verifyVmTcb will validate it at launch time.',
+      '  The combined vm-tcb-manifest.json was written; verifyVmTcb will validate it at launch time.',
     );
   } else {
     try {
-      await verifyVmTcb({ artifactsDir: targetDir, manifestPath: MANIFEST_PATH });
+      await verifyVmTcb({ artifactsDir: targetDir, manifestPath: tcbManifestPath });
+      console.log('build-vm-helper: verifyVmTcb OK (combined manifest verified)');
     } catch (err) {
-      // The most common cause is a missing imageBuilder entry (Task 14).
-      // Surface it explicitly; do NOT delete the artifacts we just built.
-      console.error(
-        `build-vm-helper: WARNING — verifyVmTcb rejected the manifest: ${err.message}\n` +
-        '  This is expected until the imageBuilder artifact (Task 14) is also produced.\n' +
-        '  The helper + dylib manifest was written; re-run after Task 14 lands for a green self-check.',
+      // FATAL: the combined manifest was rejected. This is NOT "expected
+      // until Task 14" — the imageBuilder artifact IS produced above. A
+      // rejection means a real integrity failure. Die; do NOT ship a bad TCB.
+      die(
+        `verifyVmTcb rejected the combined manifest: ${err.message}\n` +
+        '  The TCB is incomplete or tampered. Do NOT ship these artifacts.\n' +
+        '  All four artifacts (helper, libkrun, libkrunfw, imageBuilder) must verify.',
       );
     }
   }
 
   console.log('build-vm-helper: OK (full link)');
-  console.log(`  helper:   ${HELPER_PATH}`);
-  console.log(`  manifest: ${MANIFEST_PATH}`);
-  console.log(`  sha256:   ${helperSha256}`);
-  console.log(`  size:     ${st.size}`);
+  console.log(`  helper:    ${HELPER_PATH}`);
+  console.log(`  tcb manifest: ${tcbManifestPath}`);
+  console.log(`  sha256:    ${helperSha256}`);
+  console.log(`  size:      ${st.size}`);
 }
 
 // ---------------------------------------------------------------------------

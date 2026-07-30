@@ -21,7 +21,7 @@
  * The gate manifest lists qualifiedRootfsDigests[] (the rootfs byte refs
  * produced by build-vm-rootfs.mjs, Task 15 — linux-arm64 + linux-x64) and
  * the artifact digests (libkrun/libkrunfw/helper/imageBuilder) read from
- * the per-artifact TCB manifests. manifestDigest is computed via
+ * the combined vm-tcb-manifest.json. manifestDigest is computed via
  * computeManifestDigest (gate-manifest.ts, Task 7). The manifest is then
  * signed by sign-release-manifest.mjs (Step 2) into the outer release
  * manifest.
@@ -52,6 +52,7 @@ import {
   evaluateG1,
   evaluateG2,
 } from './vm-gate-eval.mjs';
+import { readArtifactRefsFromTcbManifest, TCB_MANIFEST_NAME } from './tcb-manifest.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -386,18 +387,15 @@ for (const [name, p] of [['helper', helperPath], ['libkrun', libkrunPath], ['lib
   }
 }
 
-// Read artifact refs from per-artifact manifests (Task 15 vendoring +
-// Task 14 helper + Task 13 imageBuilder). Fail closed if any is missing.
-const artifactRefs = {
-  libkrun: await readArtifactRef(path.join(targetDir, 'libkrun.manifest.json')),
-  libkrunfw: await readArtifactRef(path.join(targetDir, 'libkrunfw.manifest.json')),
-  helper: await readArtifactRef(path.join(targetDir, 'sandbox-vm-helper.manifest.json')),
-  imageBuilder: await readArtifactRef(path.join(targetDir, 'vm-image-builder.manifest.json')),
-};
-for (const [k, v] of Object.entries(artifactRefs)) {
-  if (!v || !SHA256_REF_RE.test(v)) {
-    die(`artifact '${k}' manifest missing or malformed — re-run security:build-vm.`);
-  }
+// Read artifact refs from the combined vm-tcb-manifest.json. Fail closed if
+// the combined manifest is missing or any entry is malformed.
+const tcbManifestPath = path.join(targetDir, TCB_MANIFEST_NAME);
+let artifactRefs;
+try {
+  artifactRefs = await readArtifactRefsFromTcbManifest(tcbManifestPath);
+} catch (err) {
+  die(`combined TCB manifest missing or malformed: ${err.message}\n` +
+    '  Run security:build-vm first to produce vm-tcb-manifest.json with all four artifacts.');
 }
 
 // Qualified rootfs digests: collect the refs from every rootfs.manifest.json
