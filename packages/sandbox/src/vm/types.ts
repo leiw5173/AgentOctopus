@@ -36,6 +36,8 @@ export interface VmStartConfig {
   cpus: number;
   readyTimeoutMs: number;
   libkrunAbi: 'v1.19.4';
+  /** Environment strings ("KEY=value") passed to the helper and into the guest. */
+  trustedEnv?: string[];
 }
 
 export interface VmInstance {

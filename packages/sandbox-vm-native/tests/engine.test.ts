@@ -212,9 +212,23 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     const inst = await engine.start(baseConfig() as any);
 
     expect(recorded).toBeDefined();
-    // bootstrapArgv contract: [bootstrapPath, blob], length===2, [0]===path.
-    expect(recorded.argv[0]).toBe('/usr/libexec/octopus-vm-init');
+    // Helper argv contract: [helperPath, helperSpecToken], length===2.
+    // The nested bootstrapArgv is inside the base64url(JSON) spec at argv[1].
+    expect(recorded.argv[0]).toBe('/fake/helper');
     expect(recorded.argv.length).toBe(2);
+    expect(typeof recorded.argv[1]).toBe('string');
+    const spec = JSON.parse(Buffer.from(recorded.argv[1], 'base64url').toString('utf8'));
+    expect(spec.helperPath).toBeUndefined();
+    expect(spec.bootstrapPath).toBe('/usr/libexec/octopus-vm-init');
+    expect(spec.bootstrapArgv).toEqual(['/usr/libexec/octopus-vm-init', 'PAYLOAD_BLOB']);
+    expect(spec.rootfsPath).toBe('/fake/rootfs.img');
+    expect(spec.skillBlockPath).toBe('/fake/skill.img');
+    expect(spec.caBlockPath).toBe('/fake/ca.img');
+    expect(spec.vsockPort).toBe(1234);
+    expect(spec.vsockHostSocket).toBe('/tmp/vsock.sock');
+    expect(spec.memMib).toBe(512);
+    expect(spec.cpus).toBe(2);
+    expect(spec.trustedEnv).toEqual([]);
 
     const dup2s = recorded.fileActions.filter((a) => a.kind === 'adddup2') as { src: number; target: number; kind: 'adddup2' }[];
     // Exactly two adddup2: temp→3 (H2G read), temp→4 (G2H write).

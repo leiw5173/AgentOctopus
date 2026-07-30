@@ -46,6 +46,7 @@ import type {
   VerifiedArtifact,
 } from '@agentoctopus/sandbox';
 import { assertExecutablesQualified } from './executables-qualified.js';
+import { buildHelperLaunchSpec } from './helper-launch-spec.js';
 
 // Deep imports into @agentoctopus/sandbox/dist — that package has NO `exports`
 // field (only main/types), so deep module resolution reaches dist/. These are
@@ -401,15 +402,14 @@ export class VmEngineImpl implements VmEnginePort {
     // The helper execs argv[0] (bootstrapPath) with argv[1] as the CBOR
     // launch spec; a malformed argv would let the guest exec an arbitrary
     // binary, so this is a security gate, not a convenience check.
-    const argv = config.bootstrapArgv;
-    if (!Array.isArray(argv) || argv.length !== 2) {
+    if (!Array.isArray(config.bootstrapArgv) || config.bootstrapArgv.length !== 2) {
       throw new Error(
-        `bootstrapArgv must be [bootstrapPath, launchSpecBlob] (length 2); got length ${argv?.length}`,
+        `bootstrapArgv must be [bootstrapPath, launchSpecBlob] (length 2); got length ${config.bootstrapArgv?.length}`,
       );
     }
-    if (argv[0] !== config.bootstrapPath) {
+    if (config.bootstrapArgv[0] !== config.bootstrapPath) {
       throw new Error(
-        `bootstrapArgv[0] must equal bootstrapPath (${config.bootstrapPath}); got ${argv[0]}`,
+        `bootstrapArgv[0] must equal bootstrapPath (${config.bootstrapPath}); got ${config.bootstrapArgv[0]}`,
       );
     }
     if (config.libkrunAbi !== 'v1.19.4') {
@@ -417,6 +417,11 @@ export class VmEngineImpl implements VmEnginePort {
         `unsupported libkrun ABI: ${config.libkrunAbi} (only v1.19.4 is pinned)`,
       );
     }
+
+    // The helper's argv[1] is the base64url(JSON) helper launch spec, NOT the
+    // guest bootstrapArgv. The guest bootstrapArgv is NESTED inside the spec.
+    const helperSpecToken = buildHelperLaunchSpec(config, config.trustedEnv ?? []);
+    const argv = [this.opts.helperPath, helperSpecToken];
 
     // --- R9 P1-1: two cloexec pipes, read end FIRST, write SECOND. ---
     const [h2gRead, h2gWrite] = await this.deps.pipe(); // host→guest
