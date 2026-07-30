@@ -56,10 +56,10 @@ export class VsockBridge {
     }
     this.closed = false;
     const port = allocateVsockPort();
-    const server = createServer((clientSocket) => this.onConnection(clientSocket));
-    this.server = server;
     this.vsockPort = port;
     const socketPath = path.resolve(this.opts.workDir, 'vsock.sock');
+    // bindWithRetry assigns this.server only on a successful bind, so a failed
+    // start leaves this.server undefined and the instance can be retried.
     await this.bindWithRetry(socketPath);
     return { vsockPort: port, vsockHostSocket: this.socketPath! };
   }
