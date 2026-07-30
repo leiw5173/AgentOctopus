@@ -1,6 +1,6 @@
 // packages/sandbox/src/vm/vm-backend.ts
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -20,6 +20,7 @@ import { RunSpecError } from './errors.js';
 import { VsockBridge } from './vsock-bridge.js';
 
 const BOOTSTRAP_PATH = '/usr/libexec/octopus-vm-init';
+const BOOTSTRAP_BIN_NAME = 'octopus-vm-init';
 const READY_TIMEOUT_MS = 10_000;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
@@ -109,6 +110,20 @@ export class VmSandboxBackend implements SandboxBackend {
     this.rootfsArtifact = await this.input.engine.resolveRootfs(vm.rootfs);
     await this.input.engine.assertRootfsQualified(vm.rootfs);
     await this.input.engine.assertExecutablesQualified(vm.rootfs, vm.executables, opts.runtimeProfile.bins);
+    // LO-3: the guest bootstrap PID 1 (BOOTSTRAP_PATH, exec'd by the helper at
+    // spawn) is NOT a skill-requested bin, so it is NOT in the runtime-profile
+    // `executables` map vetted above. Verify it separately with a second call:
+    // a synthesized single-entry map {bin: path} + matching [bin] keeps the
+    // assertExecutablesQualified set-equality contract (executables keys ===
+    // bins) intact AND reuses the full rootfs stat-walk (regular file, not a
+    // symlink, executable bit set, not under a mount-override). Fail-closed:
+    // a missing/unqualified bootstrap must never let spawn() exec an unvetted
+    // guest PID 1.
+    await this.input.engine.assertExecutablesQualified(
+      vm.rootfs,
+      { [BOOTSTRAP_BIN_NAME]: BOOTSTRAP_PATH },
+      [BOOTSTRAP_BIN_NAME],
+    );
     // Start the per-session vsock bridge AFTER the proxy is running, using the
     // actual loopback port from prepareOpts.proxyAddr. Fail-closed: if the
     // bridge cannot bind its unix socket, the backend must not proceed.
@@ -202,6 +217,12 @@ export class VmSandboxBackend implements SandboxBackend {
     catch (err) { softReasons.push(`vsock bridge stop failed: ${(err as Error).message ?? String(err)}`); }
     try { await this.vm?.close(); }
     catch (err) { softReasons.push((err as Error).message ?? String(err)); }
+    // ME-2: remove the backend-owned workDir (holds the sealed skill.img + ca.img
+    // block images). SOFT — best-effort host-fs hygiene, never a containment
+    // failure (the VM is already killed; only an unkillable helper is). force:
+    // true so a missing dir (e.g. never created, or already reaped) is a no-op.
+    try { await rm(this.workDir, { recursive: true, force: true }); }
+    catch (err) { softReasons.push(`workDir removal failed: ${(err as Error).message ?? String(err)}`); }
     if (softReasons.length) console.warn('VmSandboxBackend.cleanup: soft teardown errors', softReasons);
     this.cleanupOutcome = {
       error: containmentReasons.length ? new ContainmentCleanupError(containmentReasons) : undefined,
