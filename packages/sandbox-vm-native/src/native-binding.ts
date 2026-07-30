@@ -3,9 +3,21 @@
 //
 // Fail-closed: if libc/posix_spawn symbols cannot be resolved, construction
 // throws a descriptive error. No silent degradation.
+//
+// Stream ownership (Approach A, post-review):
+//   - controlRead (g2hRead) + stdin (h2gWrite) are owned by the ENGINE, which
+//     created them via deps.pipe() and retains them. The engine overrides
+//     raw.controlRead/raw.stdin with fd-backed streams in start() BEFORE
+//     waitForReady() — see engine.ts. The binding returns throw-on-use
+//     placeholders for those two slots so any accidental access fails loudly.
+//   - stdout/stderr are owned by the BINDING: it creates two cloexec pipes,
+//     appends adddup2(writeEnd → fd1/fd2) file actions, keeps the read ends,
+//     and returns fd-backed Readables. The write ends are added to
+//     parentCloseFds so the parent closes them after spawn (otherwise the
+//     read ends never see EOF).
 
 import { createReadStream, createWriteStream } from 'node:fs';
-import { Readable, Writable, PassThrough } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import koffi from 'koffi';
 import type { SpawnFileAction, VmEngineDeps, VmInstanceRaw } from './engine.js';
 
@@ -56,6 +68,15 @@ function libcPath(): string {
 // (~80-200 bytes). Linux glibc's are larger (~1000+ bytes). We over-allocate
 // with a 2048-byte blob and pass it by pointer; the C functions treat it as
 // opaque storage. This avoids needing platform-specific struct layouts.
+//
+// Struct identity (review Important #3): koffi marshals a plain JS object `{}`
+// passed to an `_Out_` pointer arg by attaching a backing buffer to the SAME
+// object instance (verified: `actions.bytes` is populated after `_init` and
+// survives to the subsequent `_adddup2` / `posix_spawn` calls). Reusing the
+// same object instance across init → adddup2 → posix_spawn therefore shares
+// one backing buffer. The spawn integration test (`spawn bridges real
+// stdout via dup2 file action`) is the load-bearing proof that the actions
+// actually take effect end-to-end.
 const FileActions = koffi.struct('FileActions', { bytes: koffi.array('uint8_t', 2048) });
 const SpawnAttr = koffi.struct('SpawnAttr', { bytes: koffi.array('uint8_t', 2048) });
 const pid_t = koffi.alias('pid_t', 'int');
@@ -80,8 +101,6 @@ interface LoadedLibc {
   posix_spawnattr_init: (attr: unknown) => number;
   posix_spawnattr_destroy: (attr: unknown) => number;
   posix_spawnattr_setflags: (attr: unknown, flags: number) => number;
-  posix_spawnattr_setsigdefault: (attr: unknown, sigset: unknown) => number;
-  posix_spawnattr_setsigmask: (attr: unknown, sigset: unknown) => number;
   waitpid: (pid: number, status: number[], options: number) => number;
   kill: (pid: number, sig: number) => number;
 }
@@ -164,14 +183,6 @@ function loadLibc(): LoadedLibc {
       koffi.pointer(SpawnAttr),
       'short',
     ]) as (attr: unknown, flags: number) => number,
-    posix_spawnattr_setsigdefault: resolve('posix_spawnattr_setsigdefault', 'int', [
-      koffi.pointer(SpawnAttr),
-      'void *',
-    ]) as (attr: unknown, sigset: unknown) => number,
-    posix_spawnattr_setsigmask: resolve('posix_spawnattr_setsigmask', 'int', [
-      koffi.pointer(SpawnAttr),
-      'void *',
-    ]) as (attr: unknown, sigset: unknown) => number,
     waitpid: resolve('waitpid', 'pid_t', ['pid_t', '_Out_ int *', 'int']) as (
       pid: number,
       status: number[],
@@ -188,6 +199,20 @@ function getLibc(): LoadedLibc {
   return cachedLibc;
 }
 
+function setCloexec(libc: LoadedLibc, fd: number): void {
+  const rc = libc.fcntl_int(fd, F_SETFD, FD_CLOEXEC);
+  if (rc === -1) {
+    libc.close(fd);
+    throw new Error(`native-binding: fcntl(F_SETFD, FD_CLOEXEC) failed for fd ${fd}`);
+  }
+}
+
+export function fdIsCloexec(libc: LoadedLibc, fd: number): boolean {
+  const flags = libc.fcntl_int(fd, F_GETFD, 0);
+  if (flags < 0) return false;
+  return (flags & FD_CLOEXEC) !== 0;
+}
+
 function cloexecPipeLinux(libc: LoadedLibc): [number, number] {
   const fds: number[] = [0, 0];
   const rc = libc.pipe2(fds, O_CLOEXEC);
@@ -199,21 +224,13 @@ function cloexecPipeLinux(libc: LoadedLibc): [number, number] {
 
 function cloexecPipeDarwin(libc: LoadedLibc): [number, number] {
   const fds = libc.pipe();
-  for (const fd of fds) {
-    const rc = libc.fcntl_int(fd, F_SETFD, FD_CLOEXEC);
-    if (rc === -1) {
-      libc.close(fds[0]);
-      libc.close(fds[1]);
-      throw new Error(`native-binding: fcntl(F_SETFD, FD_CLOEXEC) failed for fd ${fd}`);
-    }
-  }
+  for (const fd of fds) setCloexec(libc, fd);
   return fds;
 }
 
-function fdIsCloexec(libc: LoadedLibc, fd: number): boolean {
-  const flags = libc.fcntl_int(fd, F_GETFD, 0);
-  if (flags < 0) return false;
-  return (flags & FD_CLOEXEC) !== 0;
+/** Cross-platform cloexec pipe (used internally for stdout/stderr bridging). */
+function cloexecPipe(libc: LoadedLibc): [number, number] {
+  return PLATFORM === 'linux-x64' ? cloexecPipeLinux(libc) : cloexecPipeDarwin(libc);
 }
 
 function fdToReadable(fd: number): Readable {
@@ -231,6 +248,12 @@ function pollWaitpid(
   libc: LoadedLibc,
   pid: number,
 ): Promise<{ exitCode: number; timedOut: boolean }> {
+  // Review Important #5: a rc < 0 from waitpid is ECHILD (child already
+  // reaped by init / already waited on). For a security sandbox that means
+  // the child is GONE — treat that as success (resolve with exitCode 0)
+  // rather than rejecting, so kill()/close() don't surface a spurious error
+  // and the caller can't be fooled into thinking the child may still run.
+  // Keep reject only for thrown exceptions (genuine call failure).
   return new Promise((resolve, reject) => {
     const status: number[] = [0];
     const timer = setInterval(() => {
@@ -243,9 +266,11 @@ function pollWaitpid(
           const exitCode = signal !== 0 ? 128 + signal : (raw >> 8) & 0xff;
           resolve({ exitCode, timedOut: false });
         } else if (rc < 0) {
+          // ECHILD or similar — child already reaped; treat as already-dead.
           clearInterval(timer);
-          reject(new Error(`native-binding: waitpid failed (rc=${rc})`));
+          resolve({ exitCode: 0, timedOut: false });
         }
+        // rc === 0 → child still running; keep polling.
       } catch (err) {
         clearInterval(timer);
         reject(err);
@@ -257,12 +282,34 @@ function pollWaitpid(
   });
 }
 
+/**
+ * Reject any string containing a NUL byte. koffi's 'str'/'char **' encoding
+ * silently truncates at the first NUL (verified: `getenv('FOO\0BAR')`
+ * returns the value of `FOO`, not null) — for argv/envp that is a fail-closed
+ * violation (a malicious `OCTOPUS_VSOCK_HOST_SOCKET` containing `\0` would
+ * be silently truncated and could redirect the vsock bridge). Reject up front.
+ */
+function rejectNul(s: string, label: string): void {
+  if (s.includes('\0')) {
+    throw new Error(`native-binding: ${label} contains a NUL byte (refusing to truncate)`);
+  }
+}
+
 function toCArgv(argv: string[]): unknown {
+  for (const a of argv) rejectNul(a, 'argv element');
   return koffi.as([...argv, null], 'char **');
 }
 
 function toCEnvp(env: NodeJS.ProcessEnv): unknown {
-  return koffi.as([...Object.entries(env).map(([k, v]) => `${k}=${v}`), null], 'char **');
+  const entries: string[] = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) continue;
+    const entry = `${k}=${v}`;
+    rejectNul(entry, `env entry ${k}`);
+    entries.push(entry);
+  }
+  entries.push(''); // sentinel placeholder; replaced by null below
+  return koffi.as([...entries.slice(0, -1), null], 'char **');
 }
 
 function spawnWithLibc(
@@ -275,21 +322,43 @@ function spawnWithLibc(
   parentCloseFds: number[],
   platform: VmEngineDeps['platform'],
 ): VmInstanceRaw {
+  // Two cloexec pipes for stdout/stderr bridging. The write ends are dup2'd
+  // into the child's fd1/fd2 via appended file actions; the parent keeps the
+  // read ends and returns them as the raw.stdout/raw.stderr streams.
+  const [stdoutRead, stdoutWrite] = cloexecPipe(libc);
+  const [stderrRead, stderrWrite] = cloexecPipe(libc);
+
+  // Append the stdio file actions to the engine-supplied list. We copy the
+  // array rather than mutating the caller's (the engine may reuse it).
+  const allActions: SpawnFileAction[] = [
+    ...fileActions,
+    { kind: 'adddup2', src: stdoutWrite, target: 1 },
+    { kind: 'adddup2', src: stderrWrite, target: 2 },
+  ];
+
+  // The parent must close the write ends after spawn so the read ends see EOF
+  // when the helper exits. Merge with the engine-supplied parentCloseFds.
+  const allParentCloseFds = [...parentCloseFds, stdoutWrite, stderrWrite];
+
   const actions = {};
   const attr = {};
 
   let rc = libc.posix_spawn_file_actions_init(actions);
   if (rc !== 0) {
+    libc.close(stdoutRead); libc.close(stdoutWrite);
+    libc.close(stderrRead); libc.close(stderrWrite);
     throw new Error(`native-binding: posix_spawn_file_actions_init failed (rc=${rc})`);
   }
   rc = libc.posix_spawnattr_init(attr);
   if (rc !== 0) {
     libc.posix_spawn_file_actions_destroy(actions);
+    libc.close(stdoutRead); libc.close(stdoutWrite);
+    libc.close(stderrRead); libc.close(stderrWrite);
     throw new Error(`native-binding: posix_spawnattr_init failed (rc=${rc})`);
   }
 
   try {
-    for (const action of fileActions) {
+    for (const action of allActions) {
       if (action.kind === 'adddup2') {
         rc = libc.posix_spawn_file_actions_adddup2(actions, action.src, action.target);
         if (rc !== 0) {
@@ -324,20 +393,44 @@ function spawnWithLibc(
       throw new Error(`native-binding: posix_spawn('${helperPath}') failed (rc=${rc})`);
     }
 
-    // Close parent fds as instructed by the engine.
-    for (const fd of parentCloseFds) {
+    // Close parent fds as instructed (engine's + our stdio write ends).
+    for (const fd of allParentCloseFds) {
       libc.close(fd);
     }
 
-    // The engine retains g2hRead (controlRead) and h2gWrite (stdin).
-    // The engine does not currently pass the retained fd numbers into the
-    // binding, so we cannot bridge real child stdio/control fds here. We
-    // return PassThrough placeholders; the engine pipes to/from them. The
-    // real fd-backed streams are a follow-up concern documented in the report.
-    const controlRead = new PassThrough();
-    const stdin = new PassThrough();
-    const stdout = new PassThrough();
-    const stderr = new PassThrough();
+    // controlRead/stdin are owned by the ENGINE (it created g2hRead/h2gWrite
+    // and overrides raw.controlRead/raw.stdin with fd-backed streams in
+    // start() before waitForReady). Return throw-on-use sentinels here so
+    // any accidental access before the override fails loudly rather than
+    // silently hanging on an empty PassThrough.
+    //
+    // We tag the sentinels with a non-enumerable `__octopusNeedsEngineOverride`
+    // property so the engine can detect them and override ONLY when the
+    // binding expects it — the L1 fake returns a real working PassThrough
+    // for controlRead/stdin (its fds are fake numbers), so the engine must
+    // NOT clobber those. The production binding sets this marker; fakes don't.
+    const controlRead = new Readable({
+      read() {
+        throw new Error(
+          'native-binding: controlRead must be overridden by the engine (g2hRead fd-backed stream)',
+        );
+      },
+    });
+    Object.defineProperty(controlRead, '__octopusNeedsEngineOverride', {
+      value: true,
+      enumerable: false,
+    });
+    const stdin = new Writable({
+      write(_chunk, _enc, cb) {
+        cb(new Error(
+          'native-binding: stdin must be overridden by the engine (h2gWrite fd-backed stream)',
+        ));
+      },
+    });
+    Object.defineProperty(stdin, '__octopusNeedsEngineOverride', {
+      value: true,
+      enumerable: false,
+    });
 
     const exited = pollWaitpid(libc, pid[0]);
 
@@ -355,8 +448,8 @@ function spawnWithLibc(
 
     return {
       stdin,
-      stdout,
-      stderr,
+      stdout: fdToReadable(stdoutRead),
+      stderr: fdToReadable(stderrRead),
       controlRead,
       exited,
       kill,
@@ -402,4 +495,4 @@ export function createNativeDeps(): VmEngineDeps {
 }
 
 // Re-export for tests/consumers that want to inspect the resolved libc object.
-export { getLibc, F_GETFD, fdIsCloexec };
+export { getLibc, F_GETFD };

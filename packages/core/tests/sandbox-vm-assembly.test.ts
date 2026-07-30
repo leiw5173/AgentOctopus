@@ -6,6 +6,9 @@
  * seams — production call sites omit those deps.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
   SandboxConfigSchema,
   type SandboxConfig,
@@ -20,6 +23,23 @@ import { getConfig, resetConfig } from '../src/config-resolver.js';
 
 function makeConfig(): SandboxConfig {
   return SandboxConfigSchema.parse({});
+}
+
+// Create dummy binaries so the assembly's existence check passes.
+function makeVmConfigWithDummyBinaries(): { config: SandboxConfig; cleanup: () => void } {
+  const dir = mkdtempSync(path.join(tmpdir(), 'octopus-vm-asm-'));
+  const helperPath = path.join(dir, 'sandbox-vm-helper');
+  const builderPath = path.join(dir, 'vm-image-builder');
+  writeFileSync(helperPath, '#!/bin/sh\n');
+  writeFileSync(builderPath, '#!/bin/sh\n');
+  const config = SandboxConfigSchema.parse({
+    vm: {
+      rootfs: 'sha256:' + 'a'.repeat(64),
+      helperPath,
+      builderBinaryPath: builderPath,
+    },
+  });
+  return { config, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 const FAKE_ARTIFACT: VerifiedArtifact = {
@@ -102,17 +122,22 @@ describe('createVmBackend', () => {
   });
 
   it('returns a VmSandboxBackend when native is present with both constructors', async () => {
-    const result = await createVmBackend(makeConfig(), {
-      loadNative: async () => ({
-        VmEngineImpl: fakeEngine(),
-        VmImageBuilderImpl: fakeImageBuilder(),
-        createNativeDeps: () => ({ platform: 'unsupported' } as unknown as VmEngineDeps),
-      }),
-    });
-    expect('unavailable' in result).toBe(false);
-    if (!('unavailable' in result)) {
-      expect(result.kind).toBe('vm');
-      expect(result.isolationLevel).toBe('full');
+    const { config, cleanup } = makeVmConfigWithDummyBinaries();
+    try {
+      const result = await createVmBackend(config, {
+        loadNative: async () => ({
+          VmEngineImpl: fakeEngine(),
+          VmImageBuilderImpl: fakeImageBuilder(),
+          createNativeDeps: () => ({ platform: 'unsupported' } as unknown as VmEngineDeps),
+        }),
+      });
+      expect('unavailable' in result).toBe(false);
+      if (!('unavailable' in result)) {
+        expect(result.kind).toBe('vm');
+        expect(result.isolationLevel).toBe('full');
+      }
+    } finally {
+      cleanup();
     }
   });
 });
@@ -156,12 +181,12 @@ describe('createDefaultSandboxRunnerAsync', () => {
   it('includes a vm backend when createVmBackend returns a real backend', async () => {
     expect(getConfig().sandbox).toBeDefined();
 
+    const fakeBackend = new (class {
+      kind = 'vm' as const;
+      isolationLevel = 'full' as const;
+    })();
     const runner = await createDefaultSandboxRunnerAsync(undefined, {
-      loadNative: async () => ({
-        VmEngineImpl: fakeEngine(),
-        VmImageBuilderImpl: fakeImageBuilder(),
-        createNativeDeps: () => ({ platform: 'unsupported' } as unknown as VmEngineDeps),
-      }),
+      createVmBackend: async () => fakeBackend as unknown as Awaited<ReturnType<typeof createVmBackend>>,
     });
     const kinds = backendKinds(runner);
     expect(kinds).toContain('docker');

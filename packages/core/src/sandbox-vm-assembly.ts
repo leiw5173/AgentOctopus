@@ -8,6 +8,7 @@
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import {
   VmSandboxBackend,
   type SandboxConfig,
@@ -111,8 +112,29 @@ export async function createVmBackend(
     };
   }
 
+  // Fail-closed (review Important #10): if the resolved helper binary or
+  // builder binary does not exist on disk, return { unavailable } rather than
+  // handing back a backend whose probe()/start() would throw a confusing
+  // "file not found" later. This is especially load-bearing for an installed
+  // @agentoctopus/core where defaultPrebuildRoot() (assembly.ts:42-48) walks
+  // up from import.meta.url and resolves wrong in node_modules — the
+  // existence check converts that silent mis-resolution into a clean
+  // unavailable reason instead of a half-wired backend.
+  if (!existsSync(engineOpts.helperPath)) {
+    return {
+      unavailable: true,
+      reason: `VM helper binary not found at ${engineOpts.helperPath} (set sandbox.vm.helperPath)`,
+    };
+  }
+
   const prebuilds = defaultPrebuildRoot();
   const resolvedBuilderPath = config.vm?.builderBinaryPath ?? path.join(prebuilds, 'vm-image-builder');
+  if (!existsSync(resolvedBuilderPath)) {
+    return {
+      unavailable: true,
+      reason: `VM image-builder binary not found at ${resolvedBuilderPath} (set sandbox.vm.builderBinaryPath)`,
+    };
+  }
 
   const engine: VmEnginePort = new native.VmEngineImpl(engineOpts, native.createNativeDeps());
   const imageBuilder: VmImageBuilderPort = new native.VmImageBuilderImpl(resolvedBuilderPath);

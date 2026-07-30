@@ -36,7 +36,7 @@
 //   dup'd copies, independent of what Node does to the originals.
 import { PassThrough } from 'node:stream';
 import { execFile } from 'node:child_process';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -540,6 +540,33 @@ export class VmEngineImpl implements VmEnginePort {
       spawnAttrFlags,
       parentCloseFds,
     );
+
+    // --- Approach A: bridge the retained control + stdin fds HERE, before
+    // waitForReady(). The engine created g2hRead/h2gWrite via deps.pipe() and
+    // retains them (engine.ts:475-476, NOT in parentCloseFds:519). The binding
+    // cannot bridge them because the locked spawn() signature does not carry
+    // the retained fd numbers. The VmInstanceRaw doc-comment (engine.ts:122-
+    // 132) says controlRead IS the parent's g2hRead end; waitForReady()
+    // attaches data/end listeners to raw.controlRead (683-685), so it MUST be
+    // a real fd-backed stream emitting the guest's {"ready":true} frame — an
+    // empty PassThrough would hang until readyTimeoutMs and throw (CR-5
+    // review Critical #1). autoClose:false keeps fd ownership with the
+    // VmInstance lifecycle.
+    //
+    // We only override when the binding tags its placeholder with
+    // `__octopusNeedsEngineOverride` (the production koffi binding does this;
+    // the L1 fake returns a real working PassThrough and must NOT be
+    // clobbered — its fds are fake numbers).
+    const rawAny = raw as {
+      controlRead: NodeJS.ReadableStream & { __octopusNeedsEngineOverride?: boolean };
+      stdin: NodeJS.WritableStream & { __octopusNeedsEngineOverride?: boolean };
+    };
+    if (rawAny.controlRead?.__octopusNeedsEngineOverride) {
+      rawAny.controlRead = createReadStream('', { fd: g2hRead, autoClose: false });
+    }
+    if (rawAny.stdin?.__octopusNeedsEngineOverride) {
+      rawAny.stdin = createWriteStream('', { fd: h2gWrite, autoClose: false });
+    }
 
     // --- Ready handshake: wait for {"ready":true} on g2hRead, or {"error":...},
     // or helper exit before ready, or readyTimeoutMs. EOF on g2hRead before
