@@ -14,15 +14,18 @@
  *
  * Compile target: src/vm-helper.c against the vendored include/libkrun.h
  * (v1.19.4 ABI pin). The header is committed in this package; the dylibs
- * are NOT vendored yet (Task 15 owns full vendoring). Until the dylibs
- * land under prebuilds/<platform-arch>/ this script runs a COMPILE-ONLY
- * smoke (cc -c) that proves the source typechecks against the header and
- * writes a `.compile-ok` marker recording the object sha256. It does NOT
- * leave a half-linked fake "helper" binary that pretends to be runnable.
+ * are produced first by `security:build-vm` running `vendor-libkrun.mjs`
+ * before this script. When the dylibs are present under
+ * prebuilds/<platform-arch>/, this script links a real binary, ad-hoc
+ * codesigns on Darwin with the hypervisor entitlements, builds the
+ * vm-image-builder artifact, writes the combined vm-tcb-manifest.json,
+ * and runs the verifyVmTcb() self-check.
  *
- * When libkrun.{dylib,so} + libkrunfw.{dylib,so} ARE present (post-Task
- * 15), the script links a real binary, ad-hoc codesigns on Darwin with
- * the hypervisor entitlements, and runs the verifyVmTcb() self-check.
+ * If the dylibs are absent (e.g. a compile-only check on a fresh checkout),
+ * this script falls back to a COMPILE-ONLY smoke (cc -c) that proves the
+ * source typechecks against the header and writes a `.compile-ok` marker
+ * recording the object sha256. It does NOT leave a half-linked fake
+ * "helper" binary that pretends to be runnable.
  *
  * Fail-closed everywhere: missing tool/input exits non-zero; no partial
  * artifact is ever left in place.

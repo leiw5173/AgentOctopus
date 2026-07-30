@@ -27,13 +27,17 @@
  *               linux-x64 tarball libkrunfw-x86_64.tgz
  *                 SHA-256: c169206b01c89fbe134f1728bf4f988702bc7f73b4cf73e6fdece447d6fceca1
  *
- * The script runs ON THE MATCHING PLATFORM CI LANE: it builds libkrun
- * .dylib (darwin-arm64) or .so (linux-x64) from the pinned source, extracts
- * the matching libkrunfw prebuilt tarball (firmware blob), and writes both
- * into prebuilds/<platform-arch>/ alongside per-artifact TCB manifests
- * (libkrun.manifest.json, libkrunfw.manifest.json) consumed by verifyVmTcb
- * (Task 6). It then runs a minimal link test (cc -lkrun -lkrunfw smoke) and,
- * when possible, a real VM boot smoke (delegated to run-vm-gates.mjs).
+ * The script runs ON THE MATCHING PLATFORM CI LANE and must run FIRST in
+ * the `security:build-vm` chain, before `build-vm-helper.mjs`. It builds
+ * libkrun .dylib (darwin-arm64) or .so (linux-x64) from the pinned source,
+ * extracts the matching libkrunfw prebuilt tarball (firmware blob), and
+ * writes both into prebuilds/<platform-arch>/ alongside per-artifact TCB
+ * manifests (libkrun.manifest.json, libkrunfw.manifest.json). Having the
+ * dylibs in place lets the subsequent `build-vm-helper.mjs` run its full-link
+ * path, build the vm-image-builder artifact, and write the combined
+ * vm-tcb-manifest.json consumed by verifyVmTcb. It then runs a minimal link
+ * test (cc -lkrun -lkrunfw smoke) and, when possible, a real VM boot smoke
+ * (delegated to run-vm-gates.mjs).
  *
  * Fail-closed everywhere: checksum mismatch, missing build deps, or a failed
  * link test exits non-zero and removes the partial artifact. No partial
