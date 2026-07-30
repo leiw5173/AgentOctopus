@@ -160,13 +160,23 @@ static void krun_check(int32_t rc, const char *what) {
 
 /* Return the inclusive-exclusive upper bound for the fallback close
  * loops. Uses RLIMIT_NOFILE when available, otherwise _SC_OPEN_MAX,
- * capped defensively at FD_CEILING_MAX. */
+ * capped defensively at FD_CEILING_MAX. The bound is clamped to at
+ * least FD_LOW_WATERMARK so the fallback loop never runs zero
+ * iterations. When rlim_cur is below the old hard-coded 4096, the
+ * loop closes exactly [FD_LOW_WATERMARK, rlim_cur) -- this is the
+ * intended design (bound by the real fd ceiling, not an arbitrary
+ * constant). Comparisons against rlim_cur are done in the unsigned
+ * rlim_t domain to avoid sign-wrap on pathological limits. */
 static int fd_ceiling(void) {
     long max_fds;
     struct rlimit rl;
 
-    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) {
-        max_fds = (long)rl.rlim_cur;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > (rlim_t)FD_CEILING_MAX) {
+            max_fds = FD_CEILING_MAX;
+        } else {
+            max_fds = (long)rl.rlim_cur;
+        }
     } else {
         max_fds = sysconf(_SC_OPEN_MAX);
         if (max_fds < 0) {
@@ -176,6 +186,9 @@ static int fd_ceiling(void) {
 
     if (max_fds > FD_CEILING_MAX) {
         max_fds = FD_CEILING_MAX;
+    }
+    if (max_fds < FD_LOW_WATERMARK) {
+        max_fds = FD_LOW_WATERMARK;
     }
     return (int)max_fds;
 }
