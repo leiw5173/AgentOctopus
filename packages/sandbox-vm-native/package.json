@@ -5,7 +5,11 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["README.md", "dist", "prebuilds"],
+  "files": [
+    "README.md",
+    "dist",
+    "prebuilds"
+  ],
   "scripts": {
     "build": "tsc",
     "build:helper": "node scripts/build-vm-helper.mjs",
@@ -16,13 +20,16 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@agentoctopus/sandbox": "workspace:^"
+    "@agentoctopus/sandbox": "workspace:^",
+    "koffi": "^3.1.2"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",
     "typescript": "^6.0.3",
     "vitest": "^1.5.0"
   },
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "Apache-2.0"
 }

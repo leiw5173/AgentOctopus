@@ -14,6 +14,7 @@ import {
   type VerifiedArtifact,
 } from '@agentoctopus/sandbox';
 import { createVmBackend, type NativeVmModule } from '../src/sandbox-vm-assembly.js';
+import type { VmEngineDeps } from '@agentoctopus/sandbox-vm-native';
 import { createDefaultSandboxRunnerAsync } from '../src/sandbox-runner-factory.js';
 import { getConfig, resetConfig } from '../src/config-resolver.js';
 
@@ -105,6 +106,7 @@ describe('createVmBackend', () => {
       loadNative: async () => ({
         VmEngineImpl: fakeEngine(),
         VmImageBuilderImpl: fakeImageBuilder(),
+        createNativeDeps: () => ({ platform: 'unsupported' } as unknown as VmEngineDeps),
       }),
     });
     expect('unavailable' in result).toBe(false);
@@ -158,6 +160,7 @@ describe('createDefaultSandboxRunnerAsync', () => {
       loadNative: async () => ({
         VmEngineImpl: fakeEngine(),
         VmImageBuilderImpl: fakeImageBuilder(),
+        createNativeDeps: () => ({ platform: 'unsupported' } as unknown as VmEngineDeps),
       }),
     });
     const kinds = backendKinds(runner);

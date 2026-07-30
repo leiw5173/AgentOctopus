@@ -147,6 +147,16 @@ export const SandboxConfigSchema = z
         cpus: z.number().int().positive().max(4).default(1),
         kernelCmdline: z.string().optional(),
         libkrunAbi: z.literal('v1.19.4').default('v1.19.4'),
+        // Paths to the verified TCB artifacts. When unset, createVmBackend
+        // resolves documented defaults under prebuilds/<platform>/.
+        helperPath: z.string().optional(),
+        artifactsDir: z.string().optional(),
+        tcbManifestPath: z.string().optional(),
+        gateManifestPath: z.string().optional(),
+        releaseManifestPath: z.string().optional(),
+        releaseManifestSignaturePath: z.string().optional(),
+        rootfsDir: z.string().optional(),
+        builderBinaryPath: z.string().optional(),
       })
       .optional(),
     proxy: z
