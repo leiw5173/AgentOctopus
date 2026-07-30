@@ -17,6 +17,7 @@ import { encodeLaunchSpec } from './launch-spec.js';
 import { buildGuestEnv } from './env.js';
 import { buildBlockImages } from './block-image.js';
 import { RunSpecError } from './errors.js';
+import { VsockBridge } from './vsock-bridge.js';
 
 const BOOTSTRAP_PATH = '/usr/libexec/octopus-vm-init';
 const READY_TIMEOUT_MS = 10_000;
@@ -33,8 +34,9 @@ export class VmSandboxBackend implements SandboxBackend {
   private vm?: VmInstance;
   private readonly sessionId: string;
   private readonly workDir: string; // backend-owned (mirrors OsSandboxBackend.workDir)
-  private vsockPort = 0;          // assigned in prepareTopology (ephemeral)
-  private vsockHostSocket = '';   // per-session AF_VSOCK socket path
+  private vsockPort = 0;          // assigned in prepare() (ephemeral)
+  private vsockHostSocket = '';   // per-session AF_VSOCK host socket path
+  private vsockBridge?: VsockBridge;
   private cleaned = false;
   private cleanupOutcome?: { error?: ContainmentCleanupError };
 
@@ -55,11 +57,29 @@ export class VmSandboxBackend implements SandboxBackend {
   }
 
   async prepareTopology(): Promise<ProxyCarrier> {
+    // The in-process carrier is created here, but the vsock bridge cannot start
+    // until the egress proxy's actual loopback port is known. The runner calls
+    // prepareTopology(), launches the proxy, then passes proxyAddr to prepare().
     this.carrier = { kind: 'in-process', listenHost: '127.0.0.1', reachableHost: '127.0.0.1' };
-    // Assign an ephemeral vsock port + per-session host socket here (real impl
-    // binds AF_VSOCK; the L2 fake leaves these at 0/'' since the fake engine
-    // never reads them).
     return this.carrier;
+  }
+
+  private parseProxyLoopbackAddr(proxyAddr: string): { host: string; port: number } {
+    let url: URL;
+    try {
+      url = new URL(proxyAddr);
+    } catch {
+      throw new Error(`VmSandboxBackend: proxyAddr is not a valid URL: ${proxyAddr}`);
+    }
+    if (url.protocol !== 'http:') {
+      throw new Error(`VmSandboxBackend: proxyAddr protocol must be http:, got ${url.protocol}`);
+    }
+    const host = url.hostname;
+    const port = parseInt(url.port, 10);
+    if (!host || Number.isNaN(port) || port <= 0 || port > 65535) {
+      throw new Error(`VmSandboxBackend: proxyAddr must be http://<host>:<port>, got ${proxyAddr}`);
+    }
+    return { host, port };
   }
 
   async prepare(opts: BackendPrepareOptions): Promise<void> {
@@ -81,6 +101,14 @@ export class VmSandboxBackend implements SandboxBackend {
     this.rootfsArtifact = await this.input.engine.resolveRootfs(vm.rootfs);
     await this.input.engine.assertRootfsQualified(vm.rootfs);
     await this.input.engine.assertExecutablesQualified(vm.rootfs, vm.executables, opts.runtimeProfile.bins);
+    // Start the per-session vsock bridge AFTER the proxy is running, using the
+    // actual loopback port from prepareOpts.proxyAddr. Fail-closed: if the
+    // bridge cannot bind its unix socket, the backend must not proceed.
+    const { host: proxyHost, port: proxyPort } = this.parseProxyLoopbackAddr(opts.proxyAddr);
+    this.vsockBridge = new VsockBridge({ workDir: this.workDir, proxyHost, proxyPort });
+    const { vsockPort, vsockHostSocket } = await this.vsockBridge.start();
+    this.vsockPort = vsockPort;
+    this.vsockHostSocket = vsockHostSocket;
     // R4 P1-2: both block images (skill dir + CA single-file). Backend computes
     // the CA expectedFileDigest inside buildBlockImages BEFORE delegating.
     const { skillBlockImage, caBlockImage } = await buildBlockImages(this.input.imageBuilder, {
@@ -126,6 +154,10 @@ export class VmSandboxBackend implements SandboxBackend {
       cpus: opts.runtimeProfile.vmRuntime!.cpus,
       readyTimeoutMs: READY_TIMEOUT_MS,
       libkrunAbi: 'v1.19.4',
+      trustedEnv: [
+        `OCTOPUS_VSOCK_PORT=${this.vsockPort}`,
+        `OCTOPUS_VSOCK_HOST_SOCKET=${this.vsockHostSocket}`,
+      ],
     });
     this.vm = vm;
     return collectBoundedVmResult(
@@ -157,6 +189,8 @@ export class VmSandboxBackend implements SandboxBackend {
     try { await this.vm?.kill(); }
     catch (err) { containmentReasons.push(`vm helper kill failed: ${(err as Error).message ?? String(err)}`); }
     // SOFT (best-effort, never promoted): vsock bridge close, block-image temp removal.
+    try { await this.vsockBridge?.stop().catch(() => {}); }
+    catch (err) { softReasons.push(`vsock bridge stop failed: ${(err as Error).message ?? String(err)}`); }
     try { await this.vm?.close().catch(() => {}); }
     catch (err) { softReasons.push((err as Error).message ?? String(err)); }
     if (softReasons.length) console.warn('VmSandboxBackend.cleanup: soft teardown errors', softReasons);

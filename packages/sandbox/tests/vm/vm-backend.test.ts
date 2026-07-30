@@ -15,6 +15,7 @@ async function makeOpts() {
     snapshotRoot: dir,
     expectedSnapshotDigest: 'sha256:' + 'a'.repeat(64),
     caBundlePath: join(dir, 'ca.pem'),
+    proxyAddr: 'http://127.0.0.1:18080',
     runtimeProfile: {
       id: 'node-default', bins: ['node'], path: '/usr/bin',
       vmRuntime: { rootfs: 'sha256:' + 'b'.repeat(64), memMib: 512, cpus: 1, executables: { node: '/usr/bin/node' } },
@@ -45,6 +46,21 @@ describe('VmSandboxBackend', () => {
     expect(c.kind).toBe('in-process');
   });
 
+  it('prepare assigns non-zero vsockPort and non-empty vsockHostSocket', async () => {
+    const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-prep-vsock-')));
+    await be.prepare(await makeOpts());
+    expect((be as any).vsockPort).toBeGreaterThan(0);
+    expect(typeof (be as any).vsockHostSocket).toBe('string');
+    expect((be as any).vsockHostSocket).toMatch(/^\//);
+  });
+
+  it('prepare rejects invalid proxyAddr', async () => {
+    const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-prep-proxy-')));
+    const opts = await makeOpts();
+    opts.proxyAddr = 'not-a-url';
+    await expect(be.prepare(opts)).rejects.toThrow(/proxyAddr/);
+  });
+
   it('prepare resolves rootfs + asserts qualified + builds both block images', async () => {
     const engine = new FakeVmEngine();
     const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-prep-')), engine);
@@ -59,7 +75,7 @@ describe('VmSandboxBackend', () => {
     await expect(be.prepare(opts)).rejects.toThrow(/rootfs/);
   });
 
-  it('spawn constructs bootstrapArgv = [bootstrapPath, launchSpecBlob]', async () => {
+  it('spawn constructs bootstrapArgv = [bootstrapPath, launchSpecBlob] and passes trustedEnv', async () => {
     const engine = new FakeVmEngine();
     const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-argv-')), engine);
     await be.prepare(await makeOpts());
@@ -68,6 +84,10 @@ describe('VmSandboxBackend', () => {
     expect(cfg.bootstrapArgv[0]).toBe('/usr/libexec/octopus-vm-init');
     expect(cfg.bootstrapArgv).toHaveLength(2);
     expect(cfg.bootstrapArgv[1]).toMatch(/^[A-Za-z0-9_-]+$/); // base64url
+    expect(cfg.vsockPort).toBeGreaterThan(0);
+    expect(cfg.vsockHostSocket).toMatch(/^\//);
+    expect(cfg.trustedEnv).toContain(`OCTOPUS_VSOCK_PORT=${cfg.vsockPort}`);
+    expect(cfg.trustedEnv).toContain(`OCTOPUS_VSOCK_HOST_SOCKET=${cfg.vsockHostSocket}`);
   });
 
   it('spawn rejects empty command BEFORE reading command[0]', async () => {
