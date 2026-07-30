@@ -48,6 +48,7 @@ import type {
   VerifiedArtifact,
 } from '@agentoctopus/sandbox';
 import { assertExecutablesQualified } from './executables-qualified.js';
+import { createLoopbackStatRootfsFile } from './rootfs-loopback-mount.js';
 import { buildHelperLaunchSpec } from './helper-launch-spec.js';
 
 // Deep imports into @agentoctopus/sandbox/dist — that package has NO `exports`
@@ -421,27 +422,24 @@ export class VmEngineImpl implements VmEnginePort {
     // Delegate to the existing native-pkg function. It walks the rootfs to
     // confirm every executable/bin resolves only to paths allowed by the
     // mount-shadow rules. It needs the resolved rootfs path (set by
-    // resolveRootfs) and a real stat seam against the rootfs file. We pass a
-    // rootfs-relative stat: the native function passes guest paths and we
-    // resolve them against this.resolvedRootfsPath.
+    // resolveRootfs) and a real stat seam against the rootfs file.
     const rootfsPath = this.resolvedRootfsPath;
     if (!rootfsPath) {
       throw new Error(
         'assertExecutablesQualified: no resolved rootfs path — resolveRootfs must be called first',
       );
     }
+    // Real stat seam (HI-2): mount the rootfs image read-only per call and stat
+    // the guest path. The loopback mount needs CAP_SYS_ADMIN, available on the
+    // privileged-Linux CI lane where the VM backend's prepare() runs. The
+    // factory is fail-closed: on non-Linux it throws rather than silently
+    // returning null (a mount failure must never degrade to "all executables
+    // qualified"). The VM lane on macOS cannot loopback-mount ext4, so the
+    // production path that exercises this runs only where CAP_SYS_ADMIN is
+    // available; the previous stub (always-null) is gone.
     await assertExecutablesQualified(ref, executables, bins, {
       rootfsPath,
-      statRootfsFile: async (_rootfsPath, guestPath) => {
-        // The rootfs is a sealed ext4 image; in a real build the helper mounts
-        // it and these guest paths resolve inside. At this layer (the engine)
-        // we cannot mount, so the qualification walk is exercised end-to-end
-        // at L3 where a mounted rootfs exists. Return null here to let the
-        // native function's own "not found ⇒ reject" path apply for any path
-        // it cannot stat — the success path (executables present in the image)
-        // is verified at L3, not L1.
-        return null;
-      },
+      statRootfsFile: createLoopbackStatRootfsFile(),
     });
   }
 

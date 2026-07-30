@@ -8,6 +8,9 @@ import { VmEngineImpl } from './engine.js';
 import { VmImageBuilderImpl } from './image-builder.js';
 
 export { assertExecutablesQualified } from './executables-qualified.js';
+export { createLoopbackStatRootfsFile, mountRootfsReadOnly, umount, RootfsMountError } from './rootfs-loopback-mount.js';
+export type { MountHandle } from './rootfs-loopback-mount.js';
+export type { ExecStatResult, AssertExecutablesDeps } from './executables-qualified.js';
 export { VmEngineImpl, VmImageBuilderImpl };
 export { createNativeDeps } from './native-binding.js';
 export type { VmEngineDeps, SpawnFileAction, VmEngineOptions } from './engine.js';
