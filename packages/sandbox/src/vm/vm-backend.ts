@@ -21,6 +21,7 @@ import { VsockBridge } from './vsock-bridge.js';
 
 const BOOTSTRAP_PATH = '/usr/libexec/octopus-vm-init';
 const READY_TIMEOUT_MS = 10_000;
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
 export class VmSandboxBackend implements SandboxBackend {
   readonly kind = 'vm' as const;
@@ -78,6 +79,13 @@ export class VmSandboxBackend implements SandboxBackend {
     const port = parseInt(url.port, 10);
     if (!host || Number.isNaN(port) || port <= 0 || port > 65535) {
       throw new Error(`VmSandboxBackend: proxyAddr must be http://<host>:<port>, got ${proxyAddr}`);
+    }
+    // The contract is the in-process egress proxy loopback. Enforce it: a
+    // non-loopback host would bridge the guest's sole egress path to an
+    // arbitrary/attacker-controlled address, breaking containment.
+    // url.hostname strips IPv6 brackets, so '::1' arrives bare.
+    if (!LOOPBACK_HOSTS.has(host)) {
+      throw new Error(`VmSandboxBackend: proxyAddr host must be loopback (127.0.0.1, ::1, localhost), got ${host}`);
     }
     return { host, port };
   }
@@ -189,9 +197,10 @@ export class VmSandboxBackend implements SandboxBackend {
     try { await this.vm?.kill(); }
     catch (err) { containmentReasons.push(`vm helper kill failed: ${(err as Error).message ?? String(err)}`); }
     // SOFT (best-effort, never promoted): vsock bridge close, block-image temp removal.
-    try { await this.vsockBridge?.stop().catch(() => {}); }
+    // No inner .catch(() => {}) — let failures surface into softReasons diagnostics.
+    try { await this.vsockBridge?.stop(); }
     catch (err) { softReasons.push(`vsock bridge stop failed: ${(err as Error).message ?? String(err)}`); }
-    try { await this.vm?.close().catch(() => {}); }
+    try { await this.vm?.close(); }
     catch (err) { softReasons.push((err as Error).message ?? String(err)); }
     if (softReasons.length) console.warn('VmSandboxBackend.cleanup: soft teardown errors', softReasons);
     this.cleanupOutcome = {

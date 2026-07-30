@@ -46,12 +46,13 @@ describe('VmSandboxBackend', () => {
     expect(c.kind).toBe('in-process');
   });
 
-  it('prepare assigns non-zero vsockPort and non-empty vsockHostSocket', async () => {
-    const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-prep-vsock-')));
+  it('prepare assigns non-zero vsockPort and a vsockHostSocket under the backend workDir', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'vm-prep-vsock-'));
+    const be = makeBackend(workDir);
     await be.prepare(await makeOpts());
     expect((be as any).vsockPort).toBeGreaterThan(0);
     expect(typeof (be as any).vsockHostSocket).toBe('string');
-    expect((be as any).vsockHostSocket).toMatch(/^\//);
+    expect((be as any).vsockHostSocket.startsWith(workDir)).toBe(true);
   });
 
   it('prepare rejects invalid proxyAddr', async () => {
@@ -59,6 +60,13 @@ describe('VmSandboxBackend', () => {
     const opts = await makeOpts();
     opts.proxyAddr = 'not-a-url';
     await expect(be.prepare(opts)).rejects.toThrow(/proxyAddr/);
+  });
+
+  it('prepare rejects a non-loopback proxyAddr host (containment)', async () => {
+    const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-prep-noloop-')));
+    const opts = await makeOpts();
+    opts.proxyAddr = 'http://attacker.example.com:18080';
+    await expect(be.prepare(opts)).rejects.toThrow(/loopback/);
   });
 
   it('prepare resolves rootfs + asserts qualified + builds both block images', async () => {

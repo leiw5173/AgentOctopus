@@ -54,18 +54,22 @@ export class VsockBridge {
     if (this.server) {
       throw new Error('VsockBridge.start() called twice');
     }
+    this.closed = false;
     const port = allocateVsockPort();
     const server = createServer((clientSocket) => this.onConnection(clientSocket));
     this.server = server;
     this.vsockPort = port;
     const socketPath = path.resolve(this.opts.workDir, 'vsock.sock');
-    await this.bindWithRetry(server, socketPath);
+    await this.bindWithRetry(socketPath);
     return { vsockPort: port, vsockHostSocket: this.socketPath! };
   }
 
-  private async bindWithRetry(server: Server, socketPath: string, attempts = 3): Promise<void> {
+  // Each bind attempt uses a FRESH Server: after a failed listen() the same
+  // Server instance is not reliably reusable across all error conditions.
+  private async bindWithRetry(socketPath: string, attempts = 3): Promise<void> {
     for (let i = 0; i < attempts; i++) {
       const tryPath = i === 0 ? socketPath : `${socketPath}.${i}`;
+      const server = createServer((clientSocket) => this.onConnection(clientSocket));
       try {
         await new Promise<void>((resolve, reject) => {
           const onErr = (err: Error) => {
@@ -79,19 +83,19 @@ export class VsockBridge {
             resolve();
           });
         });
+        this.server = server;
         return;
       } catch (err: unknown) {
         const code = (err as NodeJS.ErrnoException)?.code;
         const isAddrInUse = code === 'EADDRINUSE';
+        await this.tryUnlink(tryPath);
         if (!isAddrInUse || i === attempts - 1) {
-          await this.tryUnlink(tryPath);
           throw new Error(
             `VsockBridge failed to bind unix socket ${tryPath}: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
         }
-        await this.tryUnlink(tryPath);
       }
     }
     throw new Error('VsockBridge bindWithRetry exhausted attempts');
@@ -122,6 +126,10 @@ export class VsockBridge {
     this.closed = true;
     const server = this.server;
     const socketPath = this.socketPath;
+    // Reset state so the instance can be restarted via start().
+    this.server = undefined;
+    this.socketPath = undefined;
+    this.vsockPort = undefined;
     if (!server) return;
     await new Promise<void>((resolve) => {
       server.close(() => resolve());

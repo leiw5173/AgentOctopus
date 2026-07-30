@@ -1,6 +1,5 @@
 ---
 '@agentoctopus/sandbox': patch
-'@agentoctopus/sandbox-vm-native': patch
 ---
 
 Implement the per-session vsock host bridge and trustedEnv plumbing.

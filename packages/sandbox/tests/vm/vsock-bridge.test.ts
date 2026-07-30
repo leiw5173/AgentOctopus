@@ -6,9 +6,9 @@
 // real AF_VSOCK end-to-end is exercised only at L3 (the vm-lane CI).
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
-import { createServer, type Server } from 'node:net';
+import { connect, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, isAbsolute } from 'node:path';
 import { VsockBridge } from '../../src/vm/vsock-bridge.js';
 
 async function makeWorkDir() {
@@ -55,8 +55,8 @@ describe('VsockBridge', () => {
     const result = await bridge.start();
     try {
       expect(result.vsockPort).toBeGreaterThan(0);
-      expect(result.vsockHostSocket).toMatch(/^\//);
-      expect(result.vsockHostSocket.endsWith('.sock') || result.vsockHostSocket.endsWith('.sock.1')).toBe(true);
+      expect(isAbsolute(result.vsockHostSocket)).toBe(true);
+      expect(result.vsockHostSocket.startsWith(workDir)).toBe(true);
     } finally {
       await bridge.stop();
     }
@@ -68,7 +68,7 @@ describe('VsockBridge', () => {
     const { vsockHostSocket } = await bridge.start();
     try {
       const reply = await new Promise<string>((resolve, reject) => {
-        const client = require('node:net').connect(vsockHostSocket);
+        const client = connect(vsockHostSocket);
         let buf = '';
         client.on('connect', () => client.write('hello'));
         client.on('data', (data: Buffer) => {
@@ -94,7 +94,7 @@ describe('VsockBridge', () => {
     const { vsockHostSocket } = await bridge.start();
     await bridge.stop();
 
-    const client = require('node:net').connect(vsockHostSocket);
+    const client = connect(vsockHostSocket);
     const rejected = await new Promise<boolean>((resolve) => {
       client.on('error', () => resolve(true));
       client.on('connect', () => {
@@ -104,5 +104,35 @@ describe('VsockBridge', () => {
       client.setTimeout(1000, () => resolve(true));
     });
     expect(rejected).toBe(true);
+  });
+
+  it('retries with a suffixed socket path when the default is EADDRINUSE', async () => {
+    const workDir = await makeWorkDir();
+    // Pre-occupy the default path with a live unix server so bind hits EADDRINUSE.
+    const blocker = createServer();
+    await new Promise<void>((res) => blocker.listen(join(workDir, 'vsock.sock'), () => res()));
+    const bridge = new VsockBridge({ workDir, proxyHost: '127.0.0.1', proxyPort: proxy!.port });
+    const result = await bridge.start();
+    try {
+      expect(result.vsockHostSocket.endsWith('.sock.1')).toBe(true);
+      expect(result.vsockHostSocket.startsWith(workDir)).toBe(true);
+    } finally {
+      await bridge.stop();
+      blocker.close();
+    }
+  });
+
+  it('can restart after stop() resets internal state', async () => {
+    const workDir = await makeWorkDir();
+    const bridge = new VsockBridge({ workDir, proxyHost: '127.0.0.1', proxyPort: proxy!.port });
+    await bridge.start();
+    await bridge.stop();
+    const again = await bridge.start();
+    try {
+      expect(again.vsockPort).toBeGreaterThan(0);
+      expect(isAbsolute(again.vsockHostSocket)).toBe(true);
+    } finally {
+      await bridge.stop();
+    }
   });
 });
