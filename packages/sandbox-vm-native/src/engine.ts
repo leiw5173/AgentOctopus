@@ -35,6 +35,8 @@
 //   and h2gWrite (to send future commands). The helper's fd0/fd4 are its own
 //   dup'd copies, independent of what Node does to the originals.
 import { PassThrough } from 'node:stream';
+import { execFile } from 'node:child_process';
+import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -101,6 +103,9 @@ async function loadSandboxVm(): Promise<SandboxVmHelpers> {
   >;
   return { ...gate, ...tcb };
 }
+
+/** Maximum tolerated non-empty, non-JSON control frames during the ready handshake. */
+const MAX_MALFORMED_FRAMES = 2;
 
 /** Helper fixed control-fd slots (must match vm-helper.c H2G_READ_FD/G2H_WRITE_FD). */
 const H2G_READ_FD = 3;
@@ -185,6 +190,24 @@ export class VmEngineImpl implements VmEnginePort {
   private sandbox(): Promise<SandboxVmHelpers> {
     if (!this.sandboxVm) this.sandboxVm = loadSandboxVm();
     return this.sandboxVm;
+  }
+
+  private async probeBlkFeature(): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      execFile(this.opts.helperPath, ['--has-blk'], { timeout: 10_000 }, (err, _stdout, _stderr) => {
+        if (err) {
+          // execFile sets err.code to the exit status for non-zero exits.
+          if (typeof err.code === 'number') {
+            resolve(err.code === 0);
+          } else {
+            // Spawn failure (ENOENT, EACCES, etc.) — fail closed.
+            reject(err);
+          }
+        } else {
+          resolve(true);
+        }
+      });
+    });
   }
 
   async probe(): Promise<VmProbeResult> {
@@ -277,16 +300,34 @@ export class VmEngineImpl implements VmEnginePort {
             platform: this.deps.platform,
             reason: 'outer release manifest signature invalid',
             gateManifest: 'verified',
-            blkFeature: 'present',
             releaseManifest: 'signature-invalid',
           };
         }
         // 'no-key' falls through to 'missing' (capability probe, not a failure).
       }
-      // (4) Lightweight hypervisor probe: the TCB-verified helper binary
-      //     existing on disk IS the gate; krun_start_enter is exercised for
-      //     real at L3/L4. No selected-rootfs check here (that is prepare()'s
-      //     job via resolveRootfs + assertRootfsQualified).
+      // (4) Real BLK feature probe via the TCB-verified helper. Fail-closed:
+      //     if libkrun was not built with KRUN_FEATURE_BLK, the helper exits 1.
+      let blkFeature: 'present' | 'absent';
+      try {
+        blkFeature = (await this.probeBlkFeature()) ? 'present' : 'absent';
+      } catch (err) {
+        return {
+          available: false,
+          platform: this.deps.platform,
+          reason: `BLK feature probe failed: ${err instanceof Error ? err.message : String(err)}`,
+          gateManifest: 'verified',
+          blkFeature: 'absent',
+        };
+      }
+      if (blkFeature === 'absent') {
+        return {
+          available: false,
+          platform: this.deps.platform,
+          reason: 'libkrun BLK feature not available',
+          gateManifest: 'verified',
+          blkFeature: 'absent',
+        };
+      }
       return {
         available: true,
         platform: this.deps.platform,
@@ -324,15 +365,22 @@ export class VmEngineImpl implements VmEnginePort {
       throw new Error(`resolveRootfs: ref not in qualifiedRootfsDigests: ${ref}`);
     }
     const absolutePath = path.join(this.opts.rootfsDir, ref);
-    let bytes: Buffer;
     let st: Awaited<ReturnType<typeof stat>>;
     try {
-      bytes = await readFile(absolutePath);
       st = await stat(absolutePath);
+    } catch (err) {
+      throw new Error(`resolveRootfs: cannot stat rootfs file ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const hash = createHash('sha256');
+    try {
+      const stream = createReadStream(absolutePath);
+      for await (const chunk of stream) {
+        hash.update(chunk as Buffer);
+      }
     } catch (err) {
       throw new Error(`resolveRootfs: cannot read rootfs file ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const recomputed = 'sha256:' + createHash('sha256').update(bytes).digest('hex');
+    const recomputed = 'sha256:' + hash.digest('hex');
     if (recomputed !== ref) {
       throw new Error(`resolveRootfs: byte digest mismatch (expected ${ref}, got ${recomputed})`);
     }
@@ -574,6 +622,8 @@ export class VmEngineImpl implements VmEnginePort {
         finish({ ok: false, reason: `VM ready handshake timed out after ${readyTimeoutMs}ms` });
       }, readyTimeoutMs);
 
+      let malformedCount = 0;
+
       const onFrame = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed) return;
@@ -581,7 +631,11 @@ export class VmEngineImpl implements VmEnginePort {
         try {
           parsed = JSON.parse(trimmed);
         } catch {
-          return; // ignore non-JSON lines (e.g. early stderr bleed-through)
+          malformedCount++;
+          if (malformedCount > MAX_MALFORMED_FRAMES) {
+            finish({ ok: false, reason: `${malformedCount} malformed control frames` });
+          }
+          return; // tolerate a small amount of stderr bleed-through
         }
         const obj = parsed as { ready?: boolean; error?: string };
         if (obj.ready === true) {

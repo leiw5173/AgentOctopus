@@ -14,10 +14,38 @@
 //     g2hRead + h2gWrite.
 //   - Ready handshake: {"ready":true} on g2hRead ⇒ resolves VmInstance.
 //   - Failure paths: {"error"} frame / helper-exit-before-ready / timeout.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { PassThrough } from 'node:stream';
-import { VmEngineImpl, type VmEngineDeps } from '../src/engine.js';
+import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { VmEngineImpl, type VmEngineDeps, type VmInstanceRaw } from '../src/engine.js';
 import { _resetExecCacheForTest } from '../src/executables-qualified.js';
+import * as gateManifest from '@agentoctopus/sandbox/dist/vm/gate-manifest.js';
+import * as tcbManifest from '@agentoctopus/sandbox/dist/vm/vm-helper-build.js';
+
+vi.mock('@agentoctopus/sandbox/dist/vm/gate-manifest.js', () => ({
+  verifyGateManifest: vi.fn(),
+  isRootfsQualified: vi.fn(),
+  GateManifestSchema: { parse: vi.fn() },
+  verifyOuterReleaseManifest: vi.fn(),
+}));
+
+vi.mock('@agentoctopus/sandbox/dist/vm/vm-helper-build.js', () => ({
+  verifyVmTcb: vi.fn(),
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    createReadStream: vi.fn((...args: Parameters<typeof actual.createReadStream>) =>
+      actual.createReadStream(...args),
+    ),
+  };
+});
 
 // Deterministic fake fds. Real fds would be ≥3 (0/1/2 taken), but we
 // deliberately use 3/4 for the SOURCE ends to exercise the R10 P1-2
@@ -453,5 +481,266 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     expect(r.exitCode).toBe(137);
     expect(r.timedOut).toBe(true);
     await inst.close();
+  });
+
+  it('kills handshake after >2 malformed non-JSON control frames (HI-4)', async () => {
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) =>
+        makeFakeChild(['stderr bleed\n', 'more garbage\n', 'third strike\n'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
+    const cfg = { ...baseConfig(), readyTimeoutMs: 5000 };
+    await expect(engine.start(cfg as any)).rejects.toThrow(/3 malformed control frames/);
+  });
+
+  it('tolerates ≤2 malformed frames before a valid ready frame (HI-4)', async () => {
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) =>
+        makeFakeChild(['stderr bleed\n', 'more garbage\n', '{"ready":true}\n'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
+    const cfg = { ...baseConfig(), readyTimeoutMs: 5000 };
+    const inst = await engine.start(cfg as any);
+    expect(inst.stdin).toBeDefined();
+    await inst.close();
+  });
+
+  it('ignores empty lines without counting them as malformed (HI-4)', async () => {
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) =>
+        makeFakeChild(['\n', '\n', 'bad\n', '\n', 'bad\n', '{"ready":true}\n'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
+    const cfg = { ...baseConfig(), readyTimeoutMs: 5000 };
+    const inst = await engine.start(cfg as any);
+    expect(inst.stdin).toBeDefined();
+    await inst.close();
+  });
+});
+
+describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
+  const sha = (c: string) => 'sha256:' + c.repeat(64);
+  const hex = (c: string) => c.repeat(64);
+  const helperPath = '/fake/helper';
+  const artifactsDir = '/fake/artifacts';
+  const rootfsDir = '/fake/rootfs';
+  let tempDir: string;
+  let tcbPath: string;
+  let gatePath: string;
+
+  function makeProbeEngine(opts: Partial<ConstructorParameters<typeof VmEngineImpl>[0]> = {}) {
+    return new VmEngineImpl(
+      {
+        helperPath,
+        artifactsDir,
+        tcbManifestPath: tcbPath,
+        gateManifestPath: gatePath,
+        rootfsDir,
+        ...opts,
+      },
+      {
+        platform: 'darwin-arm64',
+        pipe: () => [10, 11] as [number, number],
+        dupFdCloexec: distinctDups(),
+        spawn: () => ({}) as unknown as VmInstanceRaw,
+      } as unknown as VmEngineDeps,
+    );
+  }
+
+  function validGateBody() {
+    return {
+      platform: 'darwin-arm64' as const,
+      schemaVersion: 1 as const,
+      artifacts: {
+        libkrun: sha('a'),
+        libkrunfw: sha('b'),
+        helper: sha('c'),
+        imageBuilder: sha('d'),
+      },
+      qualifiedRootfsDigests: [] as string[],
+      libkrunAbi: 'v1.19.4' as const,
+      blkFeatureRequired: true as const,
+      gates: { G1: 'GO' as const, G2: 'GO' as const },
+      gateReasons: [] as string[],
+      qualifiedAt: new Date().toISOString(),
+      manifestDigest: sha('z'),
+    };
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.mocked(tcbManifest.verifyVmTcb).mockResolvedValue({
+      helper: '/fake/helper',
+      libkrun: '/fake/libkrun.dylib',
+      libkrunfw: '/fake/libkrunfw.dylib',
+      imageBuilder: '/fake/vm-image-builder',
+    });
+    tempDir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-probe-'));
+    tcbPath = path.join(tempDir, 'tcb.json');
+    gatePath = path.join(tempDir, 'gate.json');
+    await fsPromises.writeFile(
+      tcbPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        artifacts: {
+          libkrun: { sha256: hex('a'), size: 1, mode: 0o555 },
+          libkrunfw: { sha256: hex('b'), size: 1, mode: 0o555 },
+          helper: { sha256: hex('c'), size: 1, mode: 0o555 },
+          imageBuilder: { sha256: hex('d'), size: 1, mode: 0o555 },
+        },
+      }),
+    );
+    await fsPromises.writeFile(gatePath, '{}');
+  });
+
+  afterEach(async () => {
+    await fsPromises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('returns available:false when BLK feature is absent', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const engine = makeProbeEngine();
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(false);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.blkFeature).toBe('absent');
+    expect(r.reason).toMatch(/BLK|block|libkrun/i);
+    expect(r.gateManifest).toBe('verified');
+  });
+
+  it('returns available:true when BLK feature is present', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const engine = makeProbeEngine();
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(true);
+    expect(r.blkFeature).toBe('present');
+    expect(r.gateManifest).toBe('verified');
+    expect(r.releaseManifest).toBe('missing');
+  });
+
+  it('fails closed when the BLK probe itself throws', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const engine = makeProbeEngine();
+    vi.spyOn(engine as any, 'probeBlkFeature').mockRejectedValue(new Error('exec ENOENT'));
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.blkFeature).toBe('absent');
+    expect(r.reason).toMatch(/BLK|probe/i);
+  });
+});
+
+describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
+  async function tempRootfs(content: Buffer) {
+    const dir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-rootfs-'));
+    const ref = 'sha256:' + createHash('sha256').update(content).digest('hex');
+    const absolutePath = path.join(dir, ref);
+    await fsPromises.writeFile(absolutePath, content, { mode: 0o444 });
+    return { dir, ref, absolutePath };
+  }
+
+  function makeResolveEngine(gatePath: string, rootfsDir: string) {
+    return new VmEngineImpl(
+      {
+        helperPath: '/fake/helper',
+        artifactsDir: '/fake/artifacts',
+        tcbManifestPath: '/fake/tcb.json',
+        gateManifestPath: gatePath,
+        rootfsDir,
+      },
+      {
+        platform: 'darwin-arm64',
+        pipe: () => [10, 11] as [number, number],
+        dupFdCloexec: distinctDups(),
+        spawn: () => ({}) as unknown as VmInstanceRaw,
+      } as unknown as VmEngineDeps,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('hashes the rootfs with createReadStream instead of fs.readFile', async () => {
+    const content = Buffer.from('hello streaming rootfs');
+    const { dir, ref, absolutePath } = await tempRootfs(content);
+    const gatePath = path.join(dir, 'gate.json');
+    const gateBody = {
+      platform: 'darwin-arm64' as const,
+      schemaVersion: 1 as const,
+      artifacts: {},
+      qualifiedRootfsDigests: [ref],
+      libkrunAbi: 'v1.19.4' as const,
+      blkFeatureRequired: true as const,
+      gates: { G1: 'GO' as const, G2: 'GO' as const },
+      gateReasons: [] as string[],
+      qualifiedAt: new Date().toISOString(),
+      manifestDigest: 'sha256:' + '0'.repeat(64),
+    };
+    await fsPromises.writeFile(gatePath, JSON.stringify(gateBody));
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.isRootfsQualified).mockReturnValue(true);
+
+    const createReadStreamSpy = fs.createReadStream;
+
+    const engine = makeResolveEngine(gatePath, dir);
+    const artifact = await engine.resolveRootfs(ref);
+
+    expect(artifact.ref).toBe(ref);
+    expect(artifact.absolutePath).toBe(absolutePath);
+    expect(createReadStreamSpy).toHaveBeenCalledWith(absolutePath);
+
+    await fsPromises.rm(dir, { recursive: true, force: true });
+  });
+
+  it('matches the expected digest for a multi-chunk rootfs', async () => {
+    // 256 KiB of deterministic data — large enough to exercise stream chunks.
+    const content = Buffer.alloc(256 * 1024);
+    for (let i = 0; i < content.length; i++) content[i] = i % 256;
+    const { dir, ref, absolutePath } = await tempRootfs(content);
+    const gatePath = path.join(dir, 'gate.json');
+    const gateBody = {
+      platform: 'darwin-arm64' as const,
+      schemaVersion: 1 as const,
+      artifacts: {},
+      qualifiedRootfsDigests: [ref],
+      libkrunAbi: 'v1.19.4' as const,
+      blkFeatureRequired: true as const,
+      gates: { G1: 'GO' as const, G2: 'GO' as const },
+      gateReasons: [] as string[],
+      qualifiedAt: new Date().toISOString(),
+      manifestDigest: 'sha256:' + '0'.repeat(64),
+    };
+    await fsPromises.writeFile(gatePath, JSON.stringify(gateBody));
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.isRootfsQualified).mockReturnValue(true);
+
+    const engine = makeResolveEngine(gatePath, dir);
+    const artifact = await engine.resolveRootfs(ref);
+    expect(artifact.ref).toBe(ref);
+    expect(artifact.size).toBe(content.length);
+
+    await fsPromises.rm(dir, { recursive: true, force: true });
   });
 });

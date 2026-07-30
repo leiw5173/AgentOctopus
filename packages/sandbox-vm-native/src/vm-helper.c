@@ -17,6 +17,7 @@
  * recovery path and no partial-launch state.
  *
  * Invocation (argument array, never shell):
+ *   sandbox-vm-helper --has-blk           (exit 0 if BLK support present, 1 otherwise)
  *   sandbox-vm-helper <base64url-json-launch-spec>
  *
  * where the decoded JSON (Task 13 engine produces this exact shape) is:
@@ -561,6 +562,14 @@ int vm_helper_main(int argc, char **argv) {
     /* R10 P1-2: mass-close every fd >= 5 BEFORE any krun_* call. fd 0-4
      * (stdio + control pipes) are below the watermark and preserved. */
     mass_close_fds();
+
+    /* Early-return subcommand: probe whether the linked libkrun was built
+     * with block-device (BLK) support. The engine uses this to fail-closed
+     * when KRUN_FEATURE_BLK is unavailable. This path MUST NOT parse argv[1]
+     * as a launch spec. */
+    if (argc >= 2 && strcmp(argv[1], "--has-blk") == 0) {
+        return krun_has_feature(KRUN_FEATURE_BLK) ? 0 : 1;
+    }
 
     if (argc != 2) {
         die("usage: sandbox-vm-helper <base64url-json-launch-spec>");
