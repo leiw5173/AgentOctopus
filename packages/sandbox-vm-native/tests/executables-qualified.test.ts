@@ -1,7 +1,7 @@
 // packages/sandbox-vm-native/tests/executables-qualified.test.ts
 import { describe, it, expect, beforeEach, beforeAll, afterEach } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile, chmod, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, symlink, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -206,6 +206,31 @@ describe.skipIf(!isLinux)('real statRootfsFile via ro loopback mount (HI-2, Linu
     const statRootfsFile = createLoopbackStatRootfsFile();
     // /usr/bin/nonexec is a regular file WITHOUT the exec bit → reject.
     await expect(assertExecutablesQualified(ref, { nonexec: '/usr/bin/nonexec' }, ['nonexec'], {
+      statRootfsFile,
+      rootfsPath: imgPath,
+    })).rejects.toBeInstanceOf(ExecutablesUnqualifiedError);
+  });
+
+  it('rejects a symlink at the guest path against the real mount (review #2/#5)', async () => {
+    if (!mke2fsAvailable) return;
+    const imgPath = path.join(imgDir, 'rootfs.ext4');
+    // Build a fixture where /usr/bin/linker is a SYMLINK → /usr/bin/node.
+    // This is the security-sensitive case from review Finding #2: the stat
+    // seam must report {isSymlink:true} WITHOUT following the link, so
+    // assertExecutablesQualified rejects it (executables-qualified.ts:73).
+    await mkdir(path.join(stagingDir, 'usr', 'bin'), { recursive: true });
+    await writeFile(path.join(stagingDir, 'usr', 'bin', 'node'), '#!/bin/sh\necho node\n', { mode: 0o755 });
+    // Symlink target is RELATIVE (valid inside the image). An absolute target
+    // would resolve against the host root when followed; lstat-primary never
+    // follows, so either form is safe — but relative keeps the fixture portable.
+    await symlink('node', path.join(stagingDir, 'usr', 'bin', 'linker'));
+    await execFileAsync('mke2fs', [
+      '-t', 'ext4', '-d', stagingDir, '-b', '1024', '-L', 'octtest', imgPath, '256k',
+    ]);
+    const ref = 'sha256:' + 'f'.repeat(64);
+    const statRootfsFile = createLoopbackStatRootfsFile();
+    // /usr/bin/linker is a symlink → stat reports {isSymlink:true} → reject.
+    await expect(assertExecutablesQualified(ref, { linker: '/usr/bin/linker' }, ['linker'], {
       statRootfsFile,
       rootfsPath: imgPath,
     })).rejects.toBeInstanceOf(ExecutablesUnqualifiedError);

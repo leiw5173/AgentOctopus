@@ -23,7 +23,7 @@
 // still thrown — but the temp dir is cleaned up best-effort).
 
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, stat, lstat } from 'node:fs/promises';
+import { mkdtemp, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -93,7 +93,11 @@ export async function umount(handle: MountHandle): Promise<void> {
  * `ExecStatResult` describing the file type + exec bit, or `null` if the path
  * does not exist (ENOENT) — the caller treats null as "missing executable".
  *
- * All other errors throw `RootfsMountError` (fail-closed).
+ * Symlink detection is lstat-PRIMARY: lstat() is called first and, if the
+ * guest path IS a symlink, the symlink verdict is returned WITHOUT ever
+ * calling stat() (which would follow the link, potentially into the HOST
+ * filesystem for absolute symlinks). ENOENT is the ONLY null-return; every
+ * other error (ENOTDIR, EACCES, EIO, …) throws `RootfsMountError` (fail-closed).
  */
 async function statInMount(
   handle: MountHandle,
@@ -104,48 +108,45 @@ async function statInMount(
   // is preserved (path.join('/mnt', '/usr/bin/node') would ignore /mnt).
   const rel = guestPath.replace(/^\/+/, '');
   const full = path.join(handle.mountpoint, rel);
-  let st: Awaited<ReturnType<typeof stat>>;
+
+  // lstat-PRIMARY symlink detection (review Important #2). We call lstat()
+  // FIRST and NEVER call stat() (which follows symlinks) when the guest path
+  // IS a symlink. Rationale: a sealed image may contain an ABSOLUTE symlink
+  // (e.g. /usr/bin/node → /etc/passwd). stat(full) would FOLLOW that link,
+  // resolving an absolute target against the HOST root (not the mountpoint)
+  // — a host-path side effect (info leak via timing/error-code) and a TOCTOU
+  // window. By detecting symlinks via lstat() first and returning the symlink
+  // verdict WITHOUT ever calling stat(), symlink detection is authoritative:
+  // no host path is touched, and a future refactor that reorders checks cannot
+  // turn an absolute-symlink guest path into "followed, isFile true, isExec
+  // true → qualified" (qualification bypass). assertExecutablesQualified
+  // rejects on the isSymlink field alone (executables-qualified.ts:73), so
+  // stat() is never needed for the symlink verdict.
+  let lst: Awaited<ReturnType<typeof lstat>>;
   try {
-    st = await stat(full);
+    lst = await lstat(full);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return null; // missing guest path → null (caller rejects)
-    if (code === 'ENOTDIR') return null; // a path component is not a dir → null
-    // Any other stat error (EACCES, EIO, …) is fail-closed.
-    throw new RootfsMountError('stat', `stat failed for ${full}: ${(err as Error).message ?? String(err)}`, err);
+    // ENOTDIR and every other error (EACCES, EIO, …) are fail-closed. ENOENT
+    // is the ONLY null-return, matching the documented invariant airtight
+    // (review Important #1).
+    throw new RootfsMountError('stat', `lstat failed for ${full}: ${(err as Error).message ?? String(err)}`, err);
   }
-  // lstat semantics: stat() follows symlinks. We use stat() (not lstat) because
-  // the existing test seam expects isSymlink to flag a symlinked TARGET. The
-  // assertExecutablesQualified check rejects symlinks BEFORE they could be
-  // followed, so a symlinked executable path is rejected. To detect a symlink
-  // at the guest path itself we stat() and rely on the mode: stat() on a
-  // symlink resolves the target, so isSymbolicLink() would be false for a
-  // resolved symlink. However the mount is read-only and the image is sealed,
-  // so the only symlinks present are those baked into the image — which stat()
-  // follows. We additionally lstat to catch a symlink at the exact guest path
-  // (the security check rejects a guest path that IS a symlink, even if its
-  // target is a valid regular file, because a mutable symlink is a shadowing
-  // vector). The existing seam's contract: isSymlink=true ⇒ reject.
-  let isSymlink = false;
-  try {
-    const lst = await lstat(full);
-    isSymlink = lst.isSymbolicLink();
-  } catch (err) {
-    // If lstat fails but stat succeeded, that's a TOCTOU (the path was
-    // replaced between calls). Fail closed.
-    throw new RootfsMountError('stat', `lstat failed for ${full} after stat succeeded: ${(err as Error).message ?? String(err)}`, err);
-  }
-  // If the guest path is a symlink, report it as such (reject). Otherwise use
-  // the stat() result (which followed the symlink to its target if any — but
-  // we already flagged the symlink at the guest path).
-  if (isSymlink) {
+  if (lst.isSymbolicLink()) {
+    // Guest path IS a symlink → reject. Never follow it (no stat() call).
     return { isReg: false, isExec: false, isSymlink: true };
   }
-  const mode = st.mode;
+  // Not a symlink: lstat gives the true file/dir mode (no link-following
+  // needed). Use lst directly — it has the same type/exec semantics as stat()
+  // for non-symlink paths, with no TOCTOU gap between two syscalls.
   return {
-    isReg: st.isFile(),
-    // Owner-exec bit (0o100). assertExecutablesQualified rejects non-exec.
-    isExec: Boolean(mode & 0o100),
+    isReg: lst.isFile(),
+    // Owner-exec bit (0o100) — the sealed image is built with a known owner;
+    // checking owner-exec is stricter than any-exec (0o111) and errs toward
+    // reject (a file executable only by group/other but not owner is flagged
+    // unqualified). assertExecutablesQualified rejects non-exec.
+    isExec: Boolean(lst.mode & 0o100),
     isSymlink: false,
   };
 }
