@@ -143,9 +143,10 @@ function makeFakeChild(
 function makeDeps(
   binding: FakeBinding,
   controlReadStream: PassThrough,
+  platform: VmEngineDeps['platform'] = 'darwin-arm64',
 ): VmEngineDeps {
   return {
-    platform: 'darwin-arm64',
+    platform,
     pipe: async () => binding.pipe(),
     dupFdCloexec: async (src, min) => binding.dupFdCloexec(src, min),
     spawn: async (
@@ -264,7 +265,9 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     await inst.close();
   });
 
-  it('passes a minimal allowlisted env to the helper (HI-1)', async () => {
+  async function runEnvAllowlistScenario(
+    platform: VmEngineDeps['platform'],
+  ): Promise<NodeJS.ProcessEnv> {
     const controlReadStream = new PassThrough();
     let recordedEnv: NodeJS.ProcessEnv | undefined;
     const binding: FakeBinding = {
@@ -275,9 +278,10 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
         return makeFakeChild(['{"ready":true}\n'], crs);
       },
     };
-    const deps = makeDeps(binding, controlReadStream);
+    const deps = makeDeps(binding, controlReadStream, platform);
     const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
 
+    const hadPath = 'PATH' in process.env;
     const originalPath = process.env.PATH;
     const originalDyld = process.env.DYLD_LIBRARY_PATH;
     const originalLd = process.env.LD_LIBRARY_PATH;
@@ -285,15 +289,16 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     const originalHome = process.env.HOME;
     try {
       process.env.PATH = '/test/bin';
-      process.env.DYLD_LIBRARY_PATH = '/test/libkrun';
-      delete process.env.LD_LIBRARY_PATH;
+      process.env.DYLD_LIBRARY_PATH = '/test/dyld';
+      process.env.LD_LIBRARY_PATH = '/test/ld';
       process.env.GITHUB_TOKEN = 'secret-token';
       process.env.HOME = '/test/home';
 
       const inst = await engine.start(baseConfig() as any);
       await inst.close();
     } finally {
-      process.env.PATH = originalPath;
+      if (hadPath) process.env.PATH = originalPath!;
+      else delete process.env.PATH;
       if (originalDyld === undefined) delete process.env.DYLD_LIBRARY_PATH;
       else process.env.DYLD_LIBRARY_PATH = originalDyld;
       if (originalLd === undefined) delete process.env.LD_LIBRARY_PATH;
@@ -304,11 +309,17 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       else process.env.HOME = originalHome;
     }
 
-    expect(recordedEnv).toBeDefined();
-    expect(recordedEnv!.GITHUB_TOKEN).toBeUndefined();
-    expect(recordedEnv!.HOME).toBeUndefined();
-    expect(recordedEnv!.LD_LIBRARY_PATH).toBeUndefined();
-    expect(Object.keys(recordedEnv!).sort()).toEqual(
+    if (!recordedEnv) throw new Error('spawn was not called');
+    return recordedEnv;
+  }
+
+  it('passes a minimal allowlisted env on darwin-arm64 (HI-1)', async () => {
+    const env = await runEnvAllowlistScenario('darwin-arm64');
+
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.HOME).toBeUndefined();
+    expect(env.LD_LIBRARY_PATH).toBeUndefined();
+    expect(Object.keys(env).sort()).toEqual(
       [
         'DYLD_LIBRARY_PATH',
         'OCTOPUS_VSOCK_PORT',
@@ -318,12 +329,36 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
         'PATH',
       ].sort(),
     );
-    expect(recordedEnv!.PATH).toBe('/test/bin');
-    expect(recordedEnv!.OCTOPUS_VSOCK_PORT).toBe('1234');
-    expect(recordedEnv!.OCTOPUS_VSOCK_HOST_SOCKET).toBe('/tmp/vsock.sock');
-    expect(recordedEnv!.OCTOPUS_VM_MEM_MIB).toBe('512');
-    expect(recordedEnv!.OCTOPUS_VM_CPUS).toBe('2');
-    expect(recordedEnv!.DYLD_LIBRARY_PATH).toBe('/test/libkrun');
+    expect(env.PATH).toBe('/test/bin');
+    expect(env.OCTOPUS_VSOCK_PORT).toBe('1234');
+    expect(env.OCTOPUS_VSOCK_HOST_SOCKET).toBe('/tmp/vsock.sock');
+    expect(env.OCTOPUS_VM_MEM_MIB).toBe('512');
+    expect(env.OCTOPUS_VM_CPUS).toBe('2');
+    expect(env.DYLD_LIBRARY_PATH).toBe('/test/dyld');
+  });
+
+  it('passes a minimal allowlisted env on linux-x64 (HI-1)', async () => {
+    const env = await runEnvAllowlistScenario('linux-x64');
+
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.HOME).toBeUndefined();
+    expect(env.DYLD_LIBRARY_PATH).toBeUndefined();
+    expect(Object.keys(env).sort()).toEqual(
+      [
+        'LD_LIBRARY_PATH',
+        'OCTOPUS_VSOCK_PORT',
+        'OCTOPUS_VSOCK_HOST_SOCKET',
+        'OCTOPUS_VM_CPUS',
+        'OCTOPUS_VM_MEM_MIB',
+        'PATH',
+      ].sort(),
+    );
+    expect(env.PATH).toBe('/test/bin');
+    expect(env.OCTOPUS_VSOCK_PORT).toBe('1234');
+    expect(env.OCTOPUS_VSOCK_HOST_SOCKET).toBe('/tmp/vsock.sock');
+    expect(env.OCTOPUS_VM_MEM_MIB).toBe('512');
+    expect(env.OCTOPUS_VM_CPUS).toBe('2');
+    expect(env.LD_LIBRARY_PATH).toBe('/test/ld');
   });
 
   it('rejects bootstrapArgv that violates the [path, blob] length===2 contract', async () => {
