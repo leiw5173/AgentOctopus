@@ -94,6 +94,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #ifdef __linux__
@@ -118,6 +119,10 @@
 
 /* Stdio FDs preserved by mass_close_fds(). */
 #define FD_LOW_WATERMARK 5
+
+/* Defensive cap for fallback close loops so a huge/INFINITY rlim_cur
+ * cannot cause millions of EBADF close() iterations. */
+#define FD_CEILING_MAX (1 << 20)
 
 /* ------------------------------------------------------------------ */
 /* Diagnostics + fatal                                                 */
@@ -153,6 +158,28 @@ static void krun_check(int32_t rc, const char *what) {
 /* R10 P1-2 mass-close: close every fd >= 5 immediately after spawn   */
 /* ------------------------------------------------------------------ */
 
+/* Return the inclusive-exclusive upper bound for the fallback close
+ * loops. Uses RLIMIT_NOFILE when available, otherwise _SC_OPEN_MAX,
+ * capped defensively at FD_CEILING_MAX. */
+static int fd_ceiling(void) {
+    long max_fds;
+    struct rlimit rl;
+
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) {
+        max_fds = (long)rl.rlim_cur;
+    } else {
+        max_fds = sysconf(_SC_OPEN_MAX);
+        if (max_fds < 0) {
+            max_fds = FD_CEILING_MAX;
+        }
+    }
+
+    if (max_fds > FD_CEILING_MAX) {
+        max_fds = FD_CEILING_MAX;
+    }
+    return (int)max_fds;
+}
+
 static void mass_close_fds(void) {
 #ifdef __linux__
     /* Prefer close_range (Linux 5.9+). ~0u is the inclusive upper bound. */
@@ -161,7 +188,7 @@ static void mass_close_fds(void) {
     }
     /* Fallback: ENOSYS on older kernels, or other error. Close a bounded
      * range. RLIMIT_NOFILE bounds this; cap defensively at a high int. */
-    for (int fd = FD_LOW_WATERMARK; fd < 4096; fd++) {
+    for (int fd = FD_LOW_WATERMARK; fd < fd_ceiling(); fd++) {
         (void)close(fd);
     }
 #else
@@ -171,7 +198,7 @@ static void mass_close_fds(void) {
 #ifdef HAVE_CLOSEFROM
     closefrom(FD_LOW_WATERMARK);
 #else
-    for (int fd = FD_LOW_WATERMARK; fd < 4096; fd++) {
+    for (int fd = FD_LOW_WATERMARK; fd < fd_ceiling(); fd++) {
         (void)close(fd);
     }
 #endif
