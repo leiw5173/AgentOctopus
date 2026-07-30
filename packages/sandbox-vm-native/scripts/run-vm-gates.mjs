@@ -44,6 +44,14 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  BOOTSTRAP_PATH,
+  buildG1ProbeScript,
+  buildG2ProbeScript,
+  buildHelperArgv,
+  evaluateG1,
+  evaluateG2,
+} from './vm-gate-eval.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -122,7 +130,7 @@ async function readArtifactRef(manifestPath) {
 
 const HOST_CANARY_PATHS = ['/etc/passwd', '/etc/shadow', '/root/.ssh/id_rsa', '/root/.ssh/id_ed25519'];
 
-async function runGateG1(targetDir, helperPath, rootfsImg, rootfsRef, skillBlockImg) {
+async function runGateG1(targetDir, helperPath, rootfsImg, rootfsRef, skillBlockImg, caBlockImg) {
   console.log('run-vm-gates: G1 (host-file-unreachable)...');
 
   // Write a unique host canary sentinel. If the guest can read it, G1 fails.
@@ -134,51 +142,30 @@ async function runGateG1(targetDir, helperPath, rootfsImg, rootfsRef, skillBlock
   // Add the sentinel path to the canary set the guest must NOT reach.
   const canaryPaths = [...HOST_CANARY_PATHS, sentinelPath];
 
-  // The guest probe runs via the launch spec: a tiny script that tries to
-  // cat each canary path and prints any bytes it gets. The gate captures
-  // the guest's stdout; G1 GO iff the host sentinel value NEVER appears in
-  // that stdout (i.e. the guest could not read the host file).
-  //
-  // The actual VM boot is delegated to sandbox-vm-helper (Task 11). We
-  // construct the launch spec (CBOR+base64url, Task 3) carrying the probe
-  // command + the canary paths, and invoke the helper. The helper boots the
-  // VM, vm-init (PID 1) decodes the spec, and execve's the probe.
-  const probeScript = makeG1ProbeScript(canaryPaths, sentinelValue);
-  const launchSpecBlob = await buildLaunchSpec({
-    executable: '/bin/sh',
-    argv: ['/bin/sh', '-c', probeScript],
+  // Direct-Node probe: run /usr/bin/node -e "<script>" inside the guest.
+  // The script uses node:fs to attempt reads of host canary paths. It emits
+  // the sentinel value only if actually read, then emits G1-DONE.
+  const probeScript = buildG1ProbeScript(canaryPaths, sentinelValue);
+  const { blob: launchSpecBlob } = await buildLaunchSpec({
+    executable: '/usr/bin/node',
+    argv: ['/usr/bin/node', '-e', probeScript],
     cwd: '/tmp',
-    env: {},
-    allowedExecutables: { '/bin/sh': '/bin/sh' },
+    env: [],
+    allowedExecutables: { '/usr/bin/node': '/usr/bin/node' },
   });
 
   let guestStdout = '';
   try {
     guestStdout = await bootVmAndCaptureStdout({
-      helperPath, rootfsImg, skillBlockImg, launchSpecBlob,
+      targetDir, helperPath, rootfsImg, skillBlockImg, caBlockImg, launchSpecBlob,
     });
   } catch (err) {
     await fs.rm(hostSentinelDir, { recursive: true, force: true }).catch(() => {});
     return { gate: 'G1', status: 'NO-GO', reason: `VM boot failed: ${err.message}` };
   }
 
-  // G1 GO iff the host sentinel does NOT appear in the guest's output AND
-  // none of the canary paths were readable as the host's real content.
-  const leaked = guestStdout.includes(sentinelValue);
   await fs.rm(hostSentinelDir, { recursive: true, force: true }).catch(() => {});
-
-  if (leaked) {
-    return { gate: 'G1', status: 'NO-GO', reason: 'host sentinel value leaked into guest stdout — host filesystem reachable' };
-  }
-  return { gate: 'G1', status: 'GO', reason: 'all host canary paths unreadable from guest' };
-}
-
-function makeG1ProbeScript(canaryPaths, sentinelValue) {
-  // For each canary path, attempt to read it and emit a marker line. The
-  // gate inspects the aggregate stdout for the sentinel value. Using `cat`
-  // with error redirection means unreadable paths produce nothing on stdout.
-  const tries = canaryPaths.map((p) => `echo "--- ${p} ---"; cat '${p.replace(/'/g, `'"'"'`)}' 2>/dev/null || true`).join('; ');
-  return `set -e; ${tries}; echo "G1-DONE"`;
+  return { gate: 'G1', ...evaluateG1(guestStdout, sentinelValue) };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +180,7 @@ function makeG1ProbeScript(canaryPaths, sentinelValue) {
 // network path.
 // ---------------------------------------------------------------------------
 
-async function runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, skillBlockImg) {
+async function runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, skillBlockImg, caBlockImg) {
   console.log('run-vm-gates: G2 (network-canary-unreachable)...');
 
   // Host canary listener. Records whether ANY connection arrived.
@@ -210,19 +197,22 @@ async function runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, skillBlock
   // this is the theoretical target; the gate asserts it's unreachable.
   const hostCanaryAddr = '127.0.0.1';
 
-  const probeScript = makeG2ProbeScript(hostCanaryAddr, canaryPort);
-  const launchSpecBlob = await buildLaunchSpec({
-    executable: '/bin/sh',
-    argv: ['/bin/sh', '-c', probeScript],
+  // Direct-Node probe: run /usr/bin/node -e "<script>" inside the guest.
+  // The script uses node:net to attempt TCP connects. It emits CONNECT-OK*
+  // only on successful connects, then emits G2-DONE.
+  const probeScript = buildG2ProbeScript(hostCanaryAddr, canaryPort);
+  const { blob: launchSpecBlob } = await buildLaunchSpec({
+    executable: '/usr/bin/node',
+    argv: ['/usr/bin/node', '-e', probeScript],
     cwd: '/tmp',
-    env: {},
-    allowedExecutables: { '/bin/sh': '/bin/sh' },
+    env: [],
+    allowedExecutables: { '/usr/bin/node': '/usr/bin/node' },
   });
 
   let guestStdout = '';
   try {
     guestStdout = await bootVmAndCaptureStdout({
-      helperPath, rootfsImg, skillBlockImg, launchSpecBlob,
+      targetDir, helperPath, rootfsImg, skillBlockImg, caBlockImg, launchSpecBlob,
     });
   } catch (err) {
     canary.close();
@@ -233,29 +223,7 @@ async function runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, skillBlock
   await new Promise((r) => setTimeout(r, 100));
   canary.close();
 
-  // G2 GO iff canary received no connection AND the guest's connect
-  // attempts all failed (no "CONNECT-OK" marker in stdout).
-  const oneDotOneDotOneConnectOk = guestStdout.includes('CONNECT-OK');
-  if (canaryReceivedConnection) {
-    return { gate: 'G2', status: 'NO-GO', reason: 'host canary received a connection from the guest' };
-  }
-  if (oneDotOneDotOneConnectOk) {
-    return { gate: 'G2', status: 'NO-GO', reason: 'guest connected to 1.1.1.1:80 — outbound network reachable' };
-  }
-  return { gate: 'G2', status: 'GO', reason: 'guest could not reach host canary or 1.1.1.1' };
-}
-
-function makeG2ProbeScript(hostAddr, port) {
-  // Attempt TCP connect to the host canary and to 1.1.1.1:80. Emit
-  // CONNECT-OK only if a connect succeeds. With no netif in the guest,
-  // every connect should fail (ENETUNREACH/ETIMEDOUT).
-  return (
-    `set +e; ` +
-    // Host canary connect attempt. Use /dev/tcp (bash) or a tiny helper.
-    `timeout 2 sh -c 'echo > /dev/tcp/${hostAddr}/${port}' 2>/dev/null && echo "CONNECT-OK-CANARY" || echo "CONNECT-FAIL-CANARY"; ` +
-    `timeout 2 sh -c 'echo > /dev/tcp/1.1.1.1/80' 2>/dev/null && echo "CONNECT-OK" || echo "CONNECT-FAIL"; ` +
-    `echo "G2-DONE"`
-  );
+  return { gate: 'G2', ...evaluateG2(guestStdout, canaryReceivedConnection) };
 }
 
 // ---------------------------------------------------------------------------
@@ -288,30 +256,64 @@ async function buildLaunchSpec(spec) {
   return encode(spec);
 }
 
-async function bootVmAndCaptureStdout({ helperPath, rootfsImg, skillBlockImg, launchSpecBlob }) {
-  // Invoke sandbox-vm-helper with the pinned start sequence. The helper
-  // boots the VM, vm-init decodes the launch spec, execve's the probe, and
-  // the probe's stdout flows back over the vsock→loopback forwarder. We
-  // capture stdout + exit code.
-  const child = execFile(helperPath, [launchSpecBlob], {
-    env: {
-      ...process.env,
-      OCTOPUS_ROOTFS_IMG: rootfsImg,
-      OCTOPUS_SKILL_IMG: skillBlockImg,
-      OCTOPUS_VSOCK_PORT: '1234',
-    },
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  let stdout = '';
-  child.stdout?.on('data', (c) => { stdout += c.toString('utf8'); });
+async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillBlockImg, caBlockImg, launchSpecBlob }) {
+  // Build the helper launch spec (base64url JSON) and invoke the helper with
+  // [helperPath, helperSpecToken]. The guest's per-probe launch spec blob is
+  // nested inside bootstrapArgv[1]; it is NOT the helper's own argv.
+  const vsockPort = 4242 + (process.pid % 1000);
+  const vsockHostSocket = path.join(os.tmpdir(), `octopus-gate-vsock-${process.pid}-${Date.now()}.sock`);
+  const vsockServer = net.createServer();
+  let serverReady = false;
+
   try {
-    await child;
-  } catch (err) {
-    // Non-zero exit is expected for probe scripts that `set -e` on a failed
-    // read; treat the captured stdout as the result regardless.
-    if (err.stdout) stdout += err.stdout.toString('utf8');
+    await new Promise((resolve, reject) => {
+      vsockServer.once('error', reject);
+      vsockServer.listen(vsockHostSocket, () => {
+        vsockServer.removeListener('error', reject);
+        serverReady = true;
+        resolve();
+      });
+    });
+
+    const argv = await buildHelperArgv(helperPath, {
+      rootfsImg,
+      skillBlockImg,
+      caBlockImg,
+      vsockPort,
+      vsockHostSocket,
+      cpus: 1,
+      memMib: 512,
+      launchSpecBlob,
+    });
+
+    // Minimal env so the helper can find vendored libkrun/libkrunfw.
+    const env = { PATH: process.env.PATH ?? '' };
+    if (process.platform === 'darwin') {
+      env.DYLD_LIBRARY_PATH = targetDir;
+    } else {
+      env.LD_LIBRARY_PATH = targetDir;
+    }
+
+    const child = execFile(helperPath, argv, {
+      env,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    let stdout = '';
+    child.stdout?.on('data', (c) => { stdout += c.toString('utf8'); });
+    try {
+      await child;
+    } catch (err) {
+      // Non-zero exit is expected for probe scripts that encounter failures;
+      // treat the captured stdout as the result regardless.
+      if (err.stdout) stdout += err.stdout.toString('utf8');
+    }
+    return stdout;
+  } finally {
+    if (serverReady) {
+      await new Promise((r) => vsockServer.close(r));
+    }
+    await fs.rm(vsockHostSocket, { force: true }).catch(() => {});
   }
-  return stdout;
 }
 
 function cryptoRandomHex(bytes) {
@@ -430,22 +432,35 @@ if (!rootfsRef) die('rootfs.manifest.json missing ref');
 const fixtureScriptPath = path.join(os.tmpdir(), `octopus-gate-probe-${process.pid}-${Date.now()}.sh`);
 const fixtureImg = path.join(targetDir, '.gate-fixture.img');
 await fs.writeFile(fixtureScriptPath, '#!/bin/sh\necho gate-probe-ready\n', { mode: 0o755 });
+
+// Build a matching fixture CA block image (the helper spec requires three
+// block devices: rootfs vda, skill vdb, CA vdc). Content is irrelevant for
+// the gates; the image just needs to be a valid sealed ext4 block.
+const caFixturePath = path.join(os.tmpdir(), `octopus-gate-ca-${process.pid}-${Date.now()}.pem`);
+const caFixtureImg = path.join(targetDir, '.gate-ca-fixture.img');
+await fs.writeFile(caFixturePath, 'stub-ca-cert\n', { mode: 0o644 });
+
 try {
   await execFileAsync(imageBuilderPath, ['single-file', fixtureScriptPath, 'probe.sh', 'sha256:' + await sha256File(fixtureScriptPath), fixtureImg]);
+  await execFileAsync(imageBuilderPath, ['single-file', caFixturePath, 'ca.pem', 'sha256:' + await sha256File(caFixturePath), caFixtureImg]);
 } catch (err) {
   await fs.rm(fixtureScriptPath, { force: true }).catch(() => {});
   await fs.rm(fixtureImg, { force: true }).catch(() => {});
-  die(`fixture skill block image build failed: ${err.stderr ?? err.message}`);
+  await fs.rm(caFixturePath, { force: true }).catch(() => {});
+  await fs.rm(caFixtureImg, { force: true }).catch(() => {});
+  die(`fixture block image build failed: ${err.stderr ?? err.message}`);
 }
 await fs.rm(fixtureScriptPath, { force: true }).catch(() => {});
+await fs.rm(caFixturePath, { force: true }).catch(() => {});
 
 // Run G1 + G2.
-const g1 = await runGateG1(targetDir, helperPath, rootfsImg, rootfsRef, fixtureImg);
+const g1 = await runGateG1(targetDir, helperPath, rootfsImg, rootfsRef, fixtureImg, caFixtureImg);
 console.log(`  G1: ${g1.status} — ${g1.reason}`);
-const g2 = await runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, fixtureImg);
+const g2 = await runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, fixtureImg, caFixtureImg);
 console.log(`  G2: ${g2.status} — ${g2.reason}`);
 
 await fs.rm(fixtureImg, { force: true }).catch(() => {});
+await fs.rm(caFixtureImg, { force: true }).catch(() => {});
 
 // Emit gate manifest (regardless of GO/NO-GO — a NO-GO manifest is itself
 // auditable, and verifyGateManifest rejects NO-GO gates at launch time).
