@@ -81,7 +81,9 @@ export interface SandboxVmHelpers {
     loaded: { libkrun: string; libkrunfw: string; helper: string; imageBuilder: string },
   ) => { ok: boolean; reasons: string[] };
   isRootfsQualified: (m: GateManifest, rootfsRef: string) => boolean;
-  verifyOuterReleaseManifest: (outerBytes: Buffer, signature: Buffer) => boolean;
+  verifyOuterReleaseManifest: (outerBytes: Buffer, signature: Buffer) =>
+    | { ok: true; reason: 'ok' }
+    | { ok: false; reason: 'no-key' | 'bad-signature' };
   GateManifestSchema: { parse: (u: unknown) => GateManifest };
   verifyVmTcb: (input: { artifactsDir: string; manifestPath: string }) =>
     Promise<VmTcbArtifacts>;
@@ -249,18 +251,36 @@ export class VmEngineImpl implements VmEnginePort {
         };
       }
       // (3) Outer release-manifest signature (Ed25519), if both manifest +
-      //     signature paths are wired. Returns false if the release key is
-      //     unset (e.g. dev builds) — surfaced as 'missing' rather than a hard
-      //     failure so probe stays a capability probe.
-      let releaseManifest: 'verified' | 'missing' = 'missing';
-      if (this.opts.releaseManifestPath && this.opts.releaseManifestSignaturePath) {
+      //     signature paths are wired. Distinguish three states:
+      //       - both files absent → 'missing' (dev box capability probe stays soft)
+      //       - both present, key unavailable ('no-key') → 'missing' (still a
+      //         capability probe, because we have not claimed a signed release)
+      //       - both present, signature invalid ('bad-signature') → fail-closed
+      //         with 'signature-invalid' and available:false
+      //       - both present, signature valid → 'verified', available true
+      let releaseManifest: 'verified' | 'missing' | 'signature-invalid' = 'missing';
+      const haveReleaseManifest =
+        this.opts.releaseManifestPath && this.opts.releaseManifestSignaturePath;
+      if (haveReleaseManifest) {
         const [outerBytes, sigB64] = await Promise.all([
-          readFile(this.opts.releaseManifestPath),
-          readFile(this.opts.releaseManifestSignaturePath, 'utf8'),
+          readFile(this.opts.releaseManifestPath!),
+          readFile(this.opts.releaseManifestSignaturePath!, 'utf8'),
         ]);
         const signature = Buffer.from(sigB64.trim(), 'base64');
-        releaseManifest = sv.verifyOuterReleaseManifest(outerBytes, signature)
-          ? 'verified' : 'missing';
+        const verifyResult = sv.verifyOuterReleaseManifest(outerBytes, signature);
+        if (verifyResult.ok) {
+          releaseManifest = 'verified';
+        } else if (verifyResult.reason === 'bad-signature') {
+          return {
+            available: false,
+            platform: this.deps.platform,
+            reason: 'outer release manifest signature invalid',
+            gateManifest: 'verified',
+            blkFeature: 'present',
+            releaseManifest: 'signature-invalid',
+          };
+        }
+        // 'no-key' falls through to 'missing' (capability probe, not a failure).
       }
       // (4) Lightweight hypervisor probe: the TCB-verified helper binary
       //     existing on disk IS the gate; krun_start_enter is exercised for

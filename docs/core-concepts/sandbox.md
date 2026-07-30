@@ -192,7 +192,7 @@ The libkrun VM backend (`@agentoctopus/sandbox-vm-native`) ships a trusted compu
 
 **helper** (`scripts/build-vm-helper.mjs`) — the `sandbox-vm-helper` C subprocess (Task 11). Links against the vendored libs, ad-hoc codesigns on Darwin with hypervisor + vm.networking entitlements, and runs the `verifyVmTcb()` self-check. Run all three producers with `pnpm --filter @agentoctopus/sandbox-vm-native security:build-vm`; qualify a lane with `security:probe-vm`.
 
-The TCB manifest (`verifyVmTcb`, `vm-helper-build.ts`) ties four artifacts together — `helper`, `libkrun`, `libkrunfw`, `imageBuilder` — each with `{sha256, size, mode}`. The gate manifest (`gate-manifest.ts`) lists `qualifiedRootfsDigests[]` and is signed with an Ed25519 release key (Task 16). The backend rejects any rootfs not in the qualified list and any TCB artifact whose digest mismatches its manifest.
+The TCB manifest (`verifyVmTcb`, `vm-helper-build.ts`) ties four artifacts together — `helper`, `libkrun`, `libkrunfw`, `imageBuilder` — each with `{sha256, size, mode}`. The gate manifest (`gate-manifest.ts`) lists `qualifiedRootfsDigests[]` and is signed with an Ed25519 release key (Task 16). The backend rejects any rootfs not in the qualified list and any TCB artifact whose digest mismatches its manifest. The release public key is compiled into `packages/sandbox/src/vm/release-key.ts` as the trust root; a present-but-invalid release signature makes the VM backend fail closed (available: false), while absent release artifacts are treated as an unsigned capability probe (`releaseManifest: 'missing'`).
 
 ## Immutable image update procedure
 

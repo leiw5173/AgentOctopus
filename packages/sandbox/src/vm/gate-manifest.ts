@@ -1,7 +1,7 @@
 // packages/sandbox/src/vm/gate-manifest.ts
 import { createHash, verify } from 'node:crypto';
 import { z } from 'zod';
-import { RELEASE_PUBLIC_KEY_BASE64 } from './release-key.js';
+import { RELEASE_PUBLIC_KEY_BASE64, RELEASE_PUBLIC_KEY_TEST_SEAM } from './release-key.js';
 
 const SHA256_REF_RE = /^sha256:[0-9a-f]{64}$/;
 
@@ -50,22 +50,35 @@ export function isRootfsQualified(manifest: GateManifest, rootfsRef: string): bo
   return manifest.qualifiedRootfsDigests.includes(rootfsRef);
 }
 
+export type ReleaseVerifyResult =
+  | { ok: true; reason: 'ok' }
+  | { ok: false; reason: 'no-key' | 'bad-signature' };
+
 /**
  * Verify the outer release manifest's Ed25519 signature against the compiled-in
- * public key. Uses Node's crypto.verify with null algorithm (Ed25519). Returns
- * false if the key is unset (placeholder) or verification fails. Exercised with
- * a real keypair in Task 16.
+ * public key. Uses Node's crypto.verify with null algorithm (Ed25519).
+ *
+ * - 'no-key': the compiled-in public key is the placeholder '' (no real key
+ *   committed yet) AND the test seam is also unset. The caller can treat this as
+ *   an unverifiable release manifest.
+ * - 'bad-signature': a real key is available but verification failed — the caller
+ *   MUST fail closed.
+ * - 'ok': signature verified.
  */
-export function verifyOuterReleaseManifest(outerBytes: Buffer, signature: Buffer): boolean {
-  if (!RELEASE_PUBLIC_KEY_BASE64) return false;
+export function verifyOuterReleaseManifest(outerBytes: Buffer, signature: Buffer): ReleaseVerifyResult {
+  const publicKeyBase64 = RELEASE_PUBLIC_KEY_BASE64 || RELEASE_PUBLIC_KEY_TEST_SEAM;
+  if (!publicKeyBase64) {
+    return { ok: false, reason: 'no-key' };
+  }
   try {
-    return verify(
+    const ok = verify(
       null,
       outerBytes,
-      { key: Buffer.from(RELEASE_PUBLIC_KEY_BASE64, 'base64'), format: 'der', type: 'spki' },
+      { key: Buffer.from(publicKeyBase64, 'base64'), format: 'der', type: 'spki' },
       signature,
     );
+    return ok ? { ok: true, reason: 'ok' } : { ok: false, reason: 'bad-signature' };
   } catch {
-    return false;
+    return { ok: false, reason: 'bad-signature' };
   }
 }
