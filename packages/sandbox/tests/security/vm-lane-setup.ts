@@ -20,9 +20,11 @@
  * @agentoctopus/{registry,adapters,skills} directly.
  */
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 
 import { SandboxConfigSchema, type SandboxConfig } from '../../src/schema.js';
 import { buildSnapshot, verifySnapshot, type BuiltSnapshot } from '../../src/snapshot.js';
@@ -72,6 +74,75 @@ export interface VmSandbox {
  */
 export function vmLaneEnabled(): boolean {
   return process.env.OCTOPUS_VM_LANE === '1';
+}
+
+/**
+ * Resolve the native package's `prebuilds/<platform>` dir. Mirrors
+ * `defaultPrebuildRoot` in core's sandbox-vm-assembly.ts: resolve
+ * `@agentoctopus/sandbox-vm-native/package.json` via the require resolver
+ * (walks node_modules / workspace symlinks), then append `prebuilds/<plat>`.
+ * Falls back to null when the package isn't resolvable or the platform is
+ * unsupported — the caller then throws/skips fail-closed.
+ */
+function resolveLanePrebuildRoot(nativePkgName: string): string | null {
+  const platform =
+    process.platform === 'darwin' && process.arch === 'arm64' ? 'darwin-arm64' :
+    process.platform === 'linux' && process.arch === 'x64' ? 'linux-x64' :
+    null;
+  if (!platform) return null;
+  try {
+    const require = createRequire(import.meta.url);
+    const pkgJsonPath = require.resolve(`${nativePkgName}/package.json`);
+    const dir = join(pkgJsonPath, '..', 'prebuilds', platform);
+    return existsSync(dir) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a real VmEngineImpl wired with real opts + deps (NOT the no-arg
+ * construction that previously made every L3/L4 test silently skip).
+ *
+ * The engine constructor (`new VmEngineImpl(opts, deps)`) requires both args:
+ * `opts` points at the produced prebuilds (helper, artifacts dir, TCB/gate/
+ * release manifests, rootfs dir), and `deps` is the platform-native pipe/dup/
+ * spawn binding from `createNativeDeps()`. With no args, `probe()` reads
+ * `this.deps.platform` → TypeError → the `beforeAll` catch swallowed it →
+ * every test `ctx.skip()`'d → the lane passed with ZERO tests executed.
+ *
+ * Returns `{ engine, imageBuilder, prebuilds }` on success, or `null` when the
+ * native package is missing/incomplete or no prebuilds dir resolves (caller
+ * skips fail-closed).
+ */
+export async function buildLaneVmEngine(): Promise<{
+  engine: import('@agentoctopus/sandbox').VmEnginePort;
+  imageBuilder: import('@agentoctopus/sandbox').VmImageBuilderPort;
+  prebuilds: string;
+} | null> {
+  let native: any;
+  try {
+    native = await import('@agentoctopus/sandbox-vm-native');
+  } catch {
+    return null;
+  }
+  if (typeof native.VmEngineImpl !== 'function' || typeof native.VmImageBuilderImpl !== 'function' || typeof native.createNativeDeps !== 'function') {
+    return null;
+  }
+  const prebuilds = resolveLanePrebuildRoot('@agentoctopus/sandbox-vm-native');
+  if (!prebuilds) return null;
+  const opts = {
+    helperPath: join(prebuilds, 'sandbox-vm-helper'),
+    artifactsDir: prebuilds,
+    tcbManifestPath: join(prebuilds, 'vm-tcb-manifest.json'),
+    gateManifestPath: join(prebuilds, 'gate-manifest.json'),
+    releaseManifestPath: join(prebuilds, 'release-manifest.json'),
+    releaseManifestSignaturePath: join(prebuilds, 'release-manifest.json.sig'),
+    rootfsDir: join(prebuilds, 'rootfs'),
+  };
+  const engine = new native.VmEngineImpl(opts, native.createNativeDeps());
+  const imageBuilder = new native.VmImageBuilderImpl(join(prebuilds, 'vm-image-builder'));
+  return { engine, imageBuilder, prebuilds };
 }
 
 /**
@@ -129,26 +200,17 @@ export async function setupVmSandbox(opts: VmSandboxOptions = {}): Promise<VmSan
     },
   } as ResolvedRuntimeProfile;
 
-  // Assemble the real native VM backend by dynamically importing
-  // @agentoctopus/sandbox-vm-native (same pattern as createVmBackend in
-  // core, but inlined here so the leaf sandbox package does not import core
-  // — that would be a circular dependency). Missing/incomplete native fails
-  // closed to a thrown Error.
-  let native: any;
-  try {
-    native = await import('@agentoctopus/sandbox-vm-native');
-  } catch {
+  // Assemble the real native VM backend. buildLaneVmEngine wires the engine
+  // with REAL opts + deps (the prebuilds paths + createNativeDeps()) — the
+  // no-arg `new VmEngineImpl()` previously made probe() throw a TypeError that
+  // the beforeAll catch swallowed, silently skipping every L3/L4 test.
+  const built = await buildLaneVmEngine();
+  if (!built) {
     await rm(skillSrc, { recursive: true, force: true }).catch(() => {});
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
-    throw new Error('VM backend unavailable: native package missing');
+    throw new Error('VM backend unavailable: native package missing, incomplete, or no prebuilds dir resolved');
   }
-  if (typeof native.VmEngineImpl !== 'function' || typeof native.VmImageBuilderImpl !== 'function') {
-    await rm(skillSrc, { recursive: true, force: true }).catch(() => {});
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
-    throw new Error('VM backend unavailable: native package incomplete');
-  }
-  const engine = new native.VmEngineImpl();
-  const imageBuilder = new native.VmImageBuilderImpl();
+  const { engine, imageBuilder } = built;
   const backend = new VmSandboxBackend({ config: baseConfig, engine, imageBuilder });
 
   const selected = await selectBackend(baseConfig, [backend]);

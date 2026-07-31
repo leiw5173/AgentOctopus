@@ -24,25 +24,24 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { createHostCanary } from './harness.js';
-import { setupVmSandbox, runProbe, vmLaneEnabled } from './vm-lane-setup.js';
+import { setupVmSandbox, runProbe, vmLaneEnabled, buildLaneVmEngine } from './vm-lane-setup.js';
 
 const RUN_TIMEOUT = 120_000;
 
 let vmAvailable = false;
 beforeAll(async () => {
   if (!vmLaneEnabled()) { vmAvailable = false; return; }
-  let native: any;
-  try { native = await import('@agentoctopus/sandbox-vm-native'); }
-  catch { vmAvailable = false; return; }
-  if (typeof native.VmEngineImpl !== 'function' || typeof native.VmImageBuilderImpl !== 'function') {
-    vmAvailable = false; return;
-  }
+  // buildLaneVmEngine wires the engine with REAL opts + deps — the no-arg
+  // `new VmEngineImpl()` previously threw in probe() and this catch swallowed
+  // it, silently skipping every L4 escape-matrix test (zero executed).
   try {
     const { VmSandboxBackend } = await import('../../src/vm/vm-backend.js');
+    const built = await buildLaneVmEngine();
+    if (!built) { vmAvailable = false; return; }
     const be = new VmSandboxBackend({
       config: { defaultBackend: 'vm', minIsolationLevel: 'full', defaults: { outputMaxBytes: 1024 * 1024 } } as any,
-      engine: new native.VmEngineImpl(),
-      imageBuilder: new native.VmImageBuilderImpl(),
+      engine: built.engine,
+      imageBuilder: built.imageBuilder,
     });
     vmAvailable = await be.probe();
   } catch { vmAvailable = false; }

@@ -26,7 +26,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { createHostCanary } from './harness.js';
-import { setupVmSandbox, runProbe, vmLaneEnabled, type ProbeResult } from './vm-lane-setup.js';
+import { setupVmSandbox, runProbe, vmLaneEnabled, buildLaneVmEngine, type ProbeResult } from './vm-lane-setup.js';
 
 // Re-export so the shared helper is importable from this module.
 export { runProbe } from './vm-lane-setup.js';
@@ -36,21 +36,18 @@ const RUN_TIMEOUT = 120_000;
 let vmAvailable = false;
 beforeAll(async () => {
   if (!vmLaneEnabled()) { vmAvailable = false; return; }
-  // Probe the real backend: dynamically import the native package (same
-  // pattern as createVmBackend in core, inlined to avoid sandbox→core
-  // circular dep) + probe() checks libkrun/rootfs/helper.
-  let native: any;
-  try { native = await import('@agentoctopus/sandbox-vm-native'); }
-  catch { vmAvailable = false; return; }
-  if (typeof native.VmEngineImpl !== 'function' || typeof native.VmImageBuilderImpl !== 'function') {
-    vmAvailable = false; return;
-  }
+  // Probe the real backend. buildLaneVmEngine wires the engine with REAL
+  // opts + deps (prebuilds paths + createNativeDeps()) — the no-arg
+  // `new VmEngineImpl()` previously threw a TypeError in probe() that this
+  // catch swallowed, silently skipping every L3/L4 test (zero executed).
   try {
     const { VmSandboxBackend } = await import('../../src/vm/vm-backend.js');
+    const built = await buildLaneVmEngine();
+    if (!built) { vmAvailable = false; return; }
     const be = new VmSandboxBackend({
       config: { defaultBackend: 'vm', minIsolationLevel: 'full', defaults: { outputMaxBytes: 1024 * 1024 } } as any,
-      engine: new native.VmEngineImpl(),
-      imageBuilder: new native.VmImageBuilderImpl(),
+      engine: built.engine,
+      imageBuilder: built.imageBuilder,
     });
     vmAvailable = await be.probe();
   } catch { vmAvailable = false; }
