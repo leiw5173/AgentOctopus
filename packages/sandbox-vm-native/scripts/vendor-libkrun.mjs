@@ -77,7 +77,9 @@ const LIBKRUN_PIN = {
   version: 'v1.19.4',
   commit: '728df8125077d0db44265f6e997c72b81b65c015',
   // SHA-256 of the source tarball (codeload.github.com/containers/libkrun/tar.gz/<commit>).
-  sourceTarSha256: 'e8775fab2b460972a67ca6cd936296bb79cdb078d852d712a283cb290dd0b284',
+  // Corrected 2026-08-01: the previous value (e8775fab…) did not match the
+  // actual tarball; re-verified against a deterministic double download.
+  sourceTarSha256: 'a0dfa34a688efad7c3a6cebfed0a5d2e9b2a938432caaf4466f525cbb6907a7e',
   sourceTarUrl: (commit) => `https://codeload.github.com/containers/libkrun/tar.gz/${commit}`,
 };
 
