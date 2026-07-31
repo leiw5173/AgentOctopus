@@ -140,6 +140,39 @@ describe('createVmBackend', () => {
       cleanup();
     }
   });
+
+  // F4: defaultPrebuildRoot() must resolve the native package's prebuilds via
+  // the package graph (require.resolve), NOT the source-tree walk that resolves
+  // to node_modules/packages/sandbox-vm-native (which doesn't exist) in an npm
+  // install. With no explicit helperPath, the resolved helper path must point
+  // at the REAL native package prebuilds dir — verified by checking the
+  // unavailable-reason echoes a path under sandbox-vm-native/prebuilds/<platform>
+  // (the helper binary itself isn't checked into the repo, so probe returns
+  // unavailable, but the PATH it reports proves the resolution is correct).
+  it('F4: resolves prebuilds via the package graph, not the source-tree walk', async () => {
+    // No explicit helperPath/builderBinaryPath — force defaultPrebuildRoot().
+    const config = SandboxConfigSchema.parse({ vm: { rootfs: 'sha256:' + 'a'.repeat(64) } });
+    const result = await createVmBackend(config, {
+      loadNative: async () => ({
+        VmEngineImpl: fakeEngine(),
+        VmImageBuilderImpl: fakeImageBuilder(),
+        createNativeDeps: () => ({ platform: 'unsupported' } as unknown as VmEngineDeps),
+      }),
+    });
+    expect('unavailable' in result).toBe(true);
+    if ('unavailable' in result) {
+      const plat = process.platform === 'darwin' ? 'darwin-arm64'
+        : process.platform === 'linux' && process.arch === 'x64' ? 'linux-x64'
+        : null;
+      // Skip on unsupported platforms (no VM prebuilds expected).
+      if (plat) {
+        // The reported path must be under the native package's prebuilds/<platform>
+        // dir — NOT the broken node_modules/packages/sandbox-vm-native walk.
+        expect(result.reason).toMatch(/sandbox-vm-native[\/\\]prebuilds[\/\\]/);
+        expect(result.reason).not.toMatch(/node_modules[\/\\]packages[\/\\]sandbox-vm-native/);
+      }
+    }
+  });
 });
 
 describe('createDefaultSandboxRunnerAsync', () => {

@@ -9,6 +9,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import {
   VmSandboxBackend,
   type SandboxConfig,
@@ -40,12 +41,50 @@ function resolveVmPlatform(): 'darwin-arm64' | 'linux-x64' | 'unsupported' {
   return 'unsupported';
 }
 
-function defaultPrebuildRoot(): string {
-  // packages/sandbox-vm-native/prebuilds/<platform>
+/**
+ * Resolve the native package's `prebuilds/<platform>` directory.
+ *
+ * Two resolution paths, in order:
+ *
+ *  1. Package-graph resolve (installed npm consumers): resolve
+ *     `@agentoctopus/sandbox-vm-native/package.json` via Node's require
+ *     resolver, which walks `node_modules` the same way `import` does. The
+ *     prebuilds ship in the published tarball (`files: [..., "prebuilds"]`),
+ *     so `path.dirname(resolvedPkgJson)/prebuilds/<platform>` is the correct
+ *     installed location regardless of how deep `@agentoctopus/core` is nested.
+ *
+ *  2. Source-tree walk (monorepo dev only): `core`'s source lives at
+ *     `packages/core/src/`, so walking up from `import.meta.url` reaches
+ *     `packages/sandbox-vm-native/prebuilds`. This path is WRONG in an npm
+ *     install (`node_modules/@agentoctopus/core/dist/` → `node_modules/packages/…`),
+ *     so it is only a fallback for when the package-graph resolve fails —
+ *     i.e. the native package isn't installed as a dependency, which is the
+ *     monorepo-dev case (workspace symlinks make the graph resolve succeed too,
+ *     so in practice the fallback only fires for unusual layouts).
+ *
+ * Returns `null` if neither path resolves — `buildEngineOpts` then throws and
+ * `createVmBackend` returns `{ unavailable }` fail-closed.
+ */
+function defaultPrebuildRoot(): string | null {
+  const platform = resolveVmPlatform();
+  if (platform === 'unsupported') return null;
+
+  // (1) Package-graph resolve.
+  try {
+    const require = createRequire(import.meta.url);
+    const pkgJsonPath = require.resolve('@agentoctopus/sandbox-vm-native/package.json');
+    return path.join(path.dirname(pkgJsonPath), 'prebuilds', platform);
+  } catch {
+    // native package not resolvable as a dependency — fall through to the
+    // source-tree walk (monorepo dev).
+  }
+
+  // (2) Source-tree walk (monorepo dev fallback).
   const currentFile = fileURLToPath(import.meta.url);
   const coreSrc = path.dirname(currentFile);
   const pkgRoot = path.resolve(coreSrc, '..', '..', '..', 'packages', 'sandbox-vm-native');
-  return path.join(pkgRoot, 'prebuilds', resolveVmPlatform());
+  const prebuilds = path.join(pkgRoot, 'prebuilds', platform);
+  return existsSync(prebuilds) ? prebuilds : null;
 }
 
 function buildEngineOpts(config: SandboxConfig): VmEngineOptions {
@@ -54,6 +93,13 @@ function buildEngineOpts(config: SandboxConfig): VmEngineOptions {
     throw new Error('createVmBackend: unsupported host platform for VM backend');
   }
   const prebuilds = defaultPrebuildRoot();
+  if (!prebuilds) {
+    throw new Error(
+      'createVmBackend: could not resolve @agentoctopus/sandbox-vm-native prebuilds directory ' +
+      '(neither the installed package nor the monorepo source tree provided one); ' +
+      'set sandbox.vm.helperPath / builderBinaryPath explicitly',
+    );
+  }
   const vm = config.vm;
   const helperPath = vm?.helperPath ?? path.join(prebuilds, 'sandbox-vm-helper');
   const artifactsDir = vm?.artifactsDir ?? prebuilds;
@@ -132,10 +178,9 @@ export async function createVmBackend(
   // Fail-closed (review Important #10): if the resolved helper binary or
   // builder binary does not exist on disk, return { unavailable } rather than
   // handing back a backend whose probe()/start() would throw a confusing
-  // "file not found" later. This is especially load-bearing for an installed
-  // @agentoctopus/core where defaultPrebuildRoot() (assembly.ts:42-48) walks
-  // up from import.meta.url and resolves wrong in node_modules — the
-  // existence check converts that silent mis-resolution into a clean
+  // "file not found" later. defaultPrebuildRoot() resolves the native package
+  // through the package graph (installed npm consumers) or the monorepo source
+  // tree (dev) — the existence check converts a missing prebuild into a clean
   // unavailable reason instead of a half-wired backend.
   if (!existsSync(engineOpts.helperPath)) {
     return {
@@ -144,8 +189,12 @@ export async function createVmBackend(
     };
   }
 
-  const prebuilds = defaultPrebuildRoot();
-  const resolvedBuilderPath = config.vm?.builderBinaryPath ?? path.join(prebuilds, 'vm-image-builder');
+  // Derive the builder path from the SAME resolved prebuilds dir as the helper
+  // (engineOpts.helperPath's dirname) so the two binaries always come from one
+  // consistent location — never a second package-graph resolve that could
+  // disagree with the first.
+  const builderDefault = path.join(path.dirname(engineOpts.helperPath), 'vm-image-builder');
+  const resolvedBuilderPath = config.vm?.builderBinaryPath ?? builderDefault;
   if (!existsSync(resolvedBuilderPath)) {
     return {
       unavailable: true,
