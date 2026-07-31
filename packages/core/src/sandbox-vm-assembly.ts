@@ -85,7 +85,19 @@ export async function createVmBackend(
   const load =
     deps?.loadNative ??
     (async () =>
-      (await import('@agentoctopus/sandbox-vm-native')) as NativeVmModule);
+      // webpackIgnore: the VM backend is a runtime-only OPTIONAL native package
+      // (libkrun microVM for macOS/Linux hosts). Turbopack (Next.js web app)
+      // would otherwise statically resolve this dynamic-import specifier and
+      // bundle koffi's native `.node` binding — a "non-ecmascript placeable
+      // asset" that fails the web build. serverExternalPackages cannot
+      // externalize a dynamic-import() specifier. This comment makes Turbopack
+      // skip bundling and leave the import as-is: in plain Node (CLI, gateway)
+      // it resolves normally; in the web app's serverless runtime the import
+      // throws and the catch below returns the fail-closed `unavailable` path —
+      // exactly what the web app already does (it never selects the VM backend).
+      // Harmless to tsc: removeComments is unset, so the comment survives to
+      // dist/ where Turbopack reads it.
+      (await import(/* webpackIgnore: true */ '@agentoctopus/sandbox-vm-native')) as NativeVmModule);
 
   let native: NativeVmModule;
   try {
