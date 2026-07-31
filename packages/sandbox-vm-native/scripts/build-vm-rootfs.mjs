@@ -34,7 +34,12 @@
  * skipped with a clear message rather than failing the whole run.)
  *
  * Output (per arch):
- *   prebuilds/linux-<arch>/rootfs.img             (ext4, mode 0444 after seal)
+ *   prebuilds/linux-<arch>/rootfs.img             (ext4, mode 0444 after seal;
+ *                                                  consumed by run-vm-gates.mjs)
+ *   prebuilds/linux-<arch>/rootfs/<ref>           (identical sealed bytes under
+ *                                                  the ref filename — consumed
+ *                                                  by engine.resolveRootfs at
+ *                                                  launch time)
  *   prebuilds/linux-<arch>/rootfs.manifest.json    ({schemaVersion, ref, ...})
  *
  * `ref` is `sha256:<64hex>` over the .img bytes — the block-image byte
@@ -423,8 +428,23 @@ async function buildArch(arch, nodeHostPath, runtimeBins) {
     };
     await writeAtomic(ROOTFS_MANIFEST, JSON.stringify(manifest, null, 2) + '\n');
 
+    // Runtime placement: engine.resolveRootfs() reads the sealed image from
+    // prebuilds/<arch>/rootfs/<ref> (engine.ts resolveRootfs joins rootfsDir +
+    // the ref verbatim — the ref IS the filename), while run-vm-gates.mjs
+    // reads the top-level rootfs.img for qualification. Emit BOTH placements
+    // here so every producer (all CI lanes + local builds) yields the layout
+    // each consumer resolves, with no workflow-side copying. Preserve the 0444
+    // seal on the runtime copy (the backend's rootfs mode assertion requires it).
+    const runtimeDir = path.join(targetDir, 'rootfs');
+    await fs.mkdir(runtimeDir, { recursive: true });
+    const runtimeImg = path.join(runtimeDir, rootfsRef);
+    await fs.rm(runtimeImg, { force: true }).catch(() => {});
+    await fs.copyFile(ROOTFS_IMG, runtimeImg);
+    await fs.chmod(runtimeImg, 0o444);
+
     console.log(`build-vm-rootfs: OK (${target})`);
     console.log(`  rootfs:    ${ROOTFS_IMG}`);
+    console.log(`  runtime:   ${runtimeImg}`);
     console.log(`  manifest:  ${ROOTFS_MANIFEST}`);
     console.log(`  ref:       ${rootfsRef}`);
     console.log(`  tree id:   ${expectedTreeDigest}`);
