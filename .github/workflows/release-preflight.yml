@@ -104,16 +104,26 @@ jobs:
       # artifacts below were produced + qualified + signed by the sandbox-security
       # lanes in THIS run (vm-lane: darwin-arm64; privileged-linux: linux-x64).
       # Any missing artifact fails the pack job before anything is published.
+      #
+      # Layout note (F4): both qualified artifacts were uploaded from a SINGLE
+      # platform directory, so upload-artifact stored the directory CONTENTS
+      # with that directory as the artifact root (the platform prefix is NOT
+      # preserved). Each must therefore be downloaded into its OWN platform
+      # directory to restore prebuilds/<platform>/... — a shared download path
+      # would scatter files at prebuilds/* and break both the TCB enforcement
+      # step and the packed tarball layout. (The producer's vm-tcb-linux-x64
+      # artifact uses two input paths, so its least-common ancestor preserves
+      # structure and it downloads correctly into the shared prebuilds/.)
       - name: Download qualified darwin-arm64 VM TCB (vm-lane)
         uses: actions/download-artifact@v4
         with:
           name: vm-tcb-darwin-arm64
-          path: packages/sandbox-vm-native/prebuilds
+          path: packages/sandbox-vm-native/prebuilds/darwin-arm64
       - name: Download qualified linux-x64 VM TCB (privileged-linux)
         uses: actions/download-artifact@v4
         with:
           name: vm-tcb-linux-x64-qualified
-          path: packages/sandbox-vm-native/prebuilds
+          path: packages/sandbox-vm-native/prebuilds/linux-x64
       - name: Enforce complete signed VM TCB in both platform prebuilds (fail closed)
         shell: bash
         run: |
