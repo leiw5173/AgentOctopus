@@ -291,6 +291,39 @@ jobs:
             tests/security/linux-topology.test.ts \
             --reporter=json --outputFile=/tmp/linux-security.json
           node packages/sandbox/scripts/assert-no-skipped-tests.mjs /tmp/linux-security.json
+      # F3: qualify + sign the linux-x64 VM TCB. This is the ONLY lane with
+      # KVM — run-vm-gates' G1/G2 boot a real guest — so the linux-x64
+      # gate-manifest.json + signed release-manifest pair that the release
+      # pack job requires (fail-closed) can only be produced here. The base
+      # TCB (helper + libs + image builder + tcb-manifest + both-arch rootfs)
+      # comes from produce-linux-artifacts. This job is fork-guarded, so the
+      # signing secret is always available when these steps run.
+      - name: Build sandbox-vm-native package
+        run: pnpm --filter @agentoctopus/sandbox-vm-native build
+      - name: Download linux-x64 VM TCB from the producer
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-tcb-linux-x64
+          path: packages/sandbox-vm-native/prebuilds
+      - name: Qualify linux-x64 VM TCB (G1/G2 under KVM, fail closed)
+        run: pnpm --filter @agentoctopus/sandbox-vm-native security:probe-vm
+      - name: Sign linux-x64 release manifest (fail closed)
+        run: |
+          set -euo pipefail
+          if [ -z "${OCTOPUS_VM_RELEASE_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: OCTOPUS_VM_RELEASE_PRIVATE_KEY is not set — cannot sign the linux-x64 release manifest." >&2
+            exit 1
+          fi
+          pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/sign-release-manifest.mjs
+        env:
+          OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
+      - name: Upload qualified linux-x64 VM TCB
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-tcb-linux-x64-qualified
+          path: packages/sandbox-vm-native/prebuilds/linux-x64/
+          if-no-files-found: error
+          retention-days: 7
       - name: Clean stale privileged state after the lane
         if: always()
         shell: bash

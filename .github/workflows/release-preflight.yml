@@ -92,6 +92,41 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `name=${job.name}\n`);
           appendFileSync(process.env.GITHUB_OUTPUT, `conclusion=${job.conclusion}\n`);
           NODE
+      # F3: the native package tarball must contain the REAL signed VM TCB for
+      # both platforms — not the empty prebuilds/ of a fresh checkout. The lane
+      # artifacts below were produced + qualified + signed by the sandbox-security
+      # lanes in THIS run (vm-lane: darwin-arm64; privileged-linux: linux-x64).
+      # Any missing artifact fails the pack job before anything is published.
+      - name: Download qualified darwin-arm64 VM TCB (vm-lane)
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-tcb-darwin-arm64
+          path: packages/sandbox-vm-native/prebuilds
+      - name: Download qualified linux-x64 VM TCB (privileged-linux)
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-tcb-linux-x64-qualified
+          path: packages/sandbox-vm-native/prebuilds
+      - name: Enforce complete signed VM TCB in both platform prebuilds (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=packages/sandbox-vm-native/prebuilds
+          for plat in darwin-arm64 linux-x64; do
+            d="$base/$plat"
+            case "$plat" in
+              darwin-arm64) libkrun=libkrun.dylib; libkrunfw=libkrunfw.dylib ;;
+              linux-x64)    libkrun=libkrun.so;    libkrunfw=libkrunfw.so ;;
+            esac
+            for f in sandbox-vm-helper vm-image-builder "$libkrun" "$libkrunfw" \
+                     vm-tcb-manifest.json gate-manifest.json rootfs.manifest.json \
+                     release-manifest.json release-manifest.json.sig; do
+              test -f "$d/$f" || { echo "ERROR: $d/$f missing — VM TCB incomplete; refusing to pack the native package." >&2; exit 1; }
+            done
+            test -f "$d/rootfs.img" || { echo "ERROR: $d/rootfs.img missing" >&2; exit 1; }
+            ls "$d"/rootfs/sha256:* >/dev/null 2>&1 || { echo "ERROR: $d/rootfs/<digest> runtime placement missing" >&2; exit 1; }
+            echo "VM TCB complete for $plat"
+          done
       - name: Pack and write metadata
         env:
           PREFLIGHT_RUN_ID: ${{ github.run_id }}
@@ -148,6 +183,34 @@ jobs:
 
           echo "Packed tarballs:"
           ls -la /tmp/preflight/*.tgz
+      - name: Assert the native tarball contains the full signed VM TCB
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball=$(ls /tmp/preflight/agentoctopus-sandbox-vm-native-*.tgz | head -1)
+          listing=$(tar -tzf "$tarball")
+          for entry in \
+            package/prebuilds/darwin-arm64/sandbox-vm-helper \
+            package/prebuilds/darwin-arm64/libkrun.dylib \
+            package/prebuilds/darwin-arm64/libkrunfw.dylib \
+            package/prebuilds/darwin-arm64/vm-image-builder \
+            package/prebuilds/darwin-arm64/vm-tcb-manifest.json \
+            package/prebuilds/darwin-arm64/gate-manifest.json \
+            package/prebuilds/darwin-arm64/release-manifest.json \
+            package/prebuilds/darwin-arm64/release-manifest.json.sig \
+            package/prebuilds/linux-x64/sandbox-vm-helper \
+            package/prebuilds/linux-x64/libkrun.so \
+            package/prebuilds/linux-x64/libkrunfw.so \
+            package/prebuilds/linux-x64/vm-image-builder \
+            package/prebuilds/linux-x64/vm-tcb-manifest.json \
+            package/prebuilds/linux-x64/gate-manifest.json \
+            package/prebuilds/linux-x64/release-manifest.json \
+            package/prebuilds/linux-x64/release-manifest.json.sig; do
+            echo "$listing" | grep -Fqx "$entry" || { echo "ERROR: native tarball missing $entry — publish would ship an incomplete VM backend." >&2; exit 1; }
+          done
+          echo "$listing" | grep -q 'package/prebuilds/darwin-arm64/rootfs/sha256:' || { echo "ERROR: native tarball missing the darwin-arm64 sealed rootfs" >&2; exit 1; }
+          echo "$listing" | grep -q 'package/prebuilds/linux-x64/rootfs/sha256:' || { echo "ERROR: native tarball missing the linux-x64 sealed rootfs" >&2; exit 1; }
+          echo "Native tarball VM TCB contents verified: $tarball"
       - name: Upload preflight artifact
         uses: actions/upload-artifact@v7
         with:
