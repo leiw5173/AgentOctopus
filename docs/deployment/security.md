@@ -96,6 +96,28 @@ Fail-closed semantics:
   harness) an absent pair degrades softly to `releaseManifest:'missing'` and
   the capability probe stays up.
 
+Post-probe TOCTOU hardening:
+
+`probe()` is the only point that reads and verifies `gate-manifest.json`
+(binding the release signature to it) and the TCB manifest (`verifyVmTcb`
+returns the exact manifest it verified — there is no double-read substitution
+window). On success the engine caches the verified state per instance, and
+every later phase consumes only that cache:
+
+- `resolveRootfs()` / `assertRootfsQualified()` never re-read the gate file —
+  a post-probe swap with a self-consistent but unsigned gate is invisible.
+- **Prepare boundary:** all four TCB artifacts (helper, libkrun, libkrunfw,
+  image-builder) are re-verified (digest + symlink + mode) when
+  `resolveRootfs()` runs, immediately before the image builder is consumed.
+- **Launch boundary:** `start()` re-verifies helper/libkrun/libkrunfw and
+  re-hashes the rootfs image against its ref and the cached gate's
+  `qualifiedRootfsDigests` immediately before exec / `krun_add_disk`.
+- A gate, helper, library, builder, or rootfs swapped after `probe()` fails
+  closed (regression-tested). The residual hash→exec gap (microseconds)
+  cannot be closed from JavaScript without fd-pinning inside the C helper;
+  file permissions (0555/0444, root-owned in release installs) are the outer
+  defense for that window.
+
 Release infrastructure:
 
 - CI signs with the secret `OCTOPUS_VM_RELEASE_PRIVATE_KEY` (a base64 32-byte

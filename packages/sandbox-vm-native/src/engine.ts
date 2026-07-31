@@ -37,7 +37,7 @@
 import { PassThrough } from 'node:stream';
 import { execFile } from 'node:child_process';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { lstat, readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type {
@@ -67,6 +67,20 @@ type VmTcbManifestShape = {
     imageBuilder: { sha256: string; size: number; mode: number };
   };
 };
+/**
+ * The TCB + gate state probe() verified end to end (TCB binaries ↔ manifest,
+ * gate manifest ↔ loaded digests, release signature ↔ loaded gate). Set once
+ * per successful probe(). resolveRootfs()/assertRootfsQualified()/start()
+ * consume ONLY this instance: they never re-read gate-manifest.json (a
+ * post-probe swap with a self-consistent but UNSIGNED gate is invisible), and
+ * they re-verify the TCB/rootfs files against THESE cached digests at the
+ * prepare and launch boundaries.
+ */
+interface VerifiedProbeState {
+  gateManifest: GateManifest;
+  tcbManifest: VmTcbManifestShape;
+  tcbPaths: VmTcbArtifacts;
+}
 type GateManifest = {
   platform: 'darwin-arm64' | 'linux-x64';
   schemaVersion: 1;
@@ -203,6 +217,8 @@ export class VmEngineImpl implements VmEnginePort {
    * engine threads the resolved path between them.
    */
   private resolvedRootfsPath: string | undefined;
+  /** See VerifiedProbeState — the sole gate/TCB source after a successful probe(). */
+  private verifiedProbe: VerifiedProbeState | undefined;
 
   constructor(
     private readonly opts: VmEngineOptions,
@@ -212,6 +228,63 @@ export class VmEngineImpl implements VmEnginePort {
   private sandbox(): Promise<SandboxVmHelpers> {
     if (!this.sandboxVm) this.sandboxVm = loadSandboxVm();
     return this.sandboxVm;
+  }
+
+  /**
+   * Fail-closed accessor for the probe()-verified state. prepare()/start()
+   * must never consult the on-disk gate manifest or trust unverified file
+   * bytes, so they require a successful probe() to have cached it first.
+   */
+  private requireVerifiedProbe(method: string): VerifiedProbeState {
+    const v = this.verifiedProbe;
+    if (!v) {
+      throw new Error(`${method}: engine.probe() must succeed first — no verified TCB/gate state is cached`);
+    }
+    return v;
+  }
+
+  private async hashFile(p: string, context: string): Promise<string> {
+    const hash = createHash('sha256');
+    try {
+      const stream = createReadStream(p);
+      for await (const chunk of stream) {
+        hash.update(chunk as Buffer);
+      }
+    } catch (err) {
+      throw new Error(`${context}: cannot read ${p}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return hash.digest('hex');
+  }
+
+  /**
+   * Re-verify one cached TCB artifact against the digest/size/mode probe()
+   * verified (lstat symlink check + sha256 + mode + not group/world-writable).
+   * Called at the prepare and launch boundaries so a binary swapped onto disk
+   * after probe() fails closed instead of being executed/loaded.
+   */
+  private async reVerifyTcbArtifact(
+    name: 'helper' | 'libkrun' | 'libkrunfw' | 'imageBuilder',
+    context: string,
+  ): Promise<void> {
+    const v = this.requireVerifiedProbe(context);
+    const entry = v.tcbManifest.artifacts[name];
+    const p = v.tcbPaths[name];
+    let lst: Awaited<ReturnType<typeof lstat>>;
+    try {
+      lst = await lstat(p);
+    } catch (err) {
+      throw new Error(`${context}: TCB artifact ${name} missing at ${p}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!lst.isFile() || lst.isSymbolicLink()) {
+      throw new Error(`${context}: TCB artifact ${name} at ${p} is not a regular file (swapped post-probe?)`);
+    }
+    const digest = await this.hashFile(p, context);
+    if (digest !== entry.sha256) {
+      throw new Error(`${context}: TCB artifact ${name} changed since probe() verification (digest mismatch — swapped post-probe)`);
+    }
+    if ((lst.mode & 0o777) !== entry.mode || (lst.mode & 0o022) !== 0) {
+      throw new Error(`${context}: TCB artifact ${name} mode changed since probe() verification`);
+    }
   }
 
   private async probeBlkFeature(): Promise<boolean> {
@@ -423,6 +496,14 @@ export class VmEngineImpl implements VmEnginePort {
           blkFeature: 'absent',
         };
       }
+      // Cache the fully-verified state: resolveRootfs()/assertRootfsQualified()/
+      // start() consume ONLY this instance. The gate manifest here is the one
+      // the release signature bound to; the TCB digests/paths are the ones
+      // verifyVmTcb verified. A post-probe on-disk swap of gate-manifest.json
+      // is invisible to the prepare/start phases (they never re-read it), and
+      // the TCB/rootfs files are re-verified against these cached digests at
+      // the prepare and launch boundaries.
+      this.verifiedProbe = { gateManifest, tcbManifest: verified.manifest, tcbPaths: verified.paths };
       return {
         available: true,
         platform: this.deps.platform,
@@ -441,22 +522,26 @@ export class VmEngineImpl implements VmEnginePort {
 
   async resolveRootfs(ref: string): Promise<VerifiedArtifact> {
     // The rootfs ref is a block-image byte digest (sha256:<64hex>). Resolution
-    // re-reads the on-disk file under rootfsDir, recomputes its sha256, and
-    // asserts equality with the ref (TOCTOU-closed) before returning the
-    // artifact. The returned artifact is STORED by the backend orchestrator as
-    // its rootfsArtifact, so this MUST return a real VerifiedArtifact — never
-    // throw on the success path. Qualification (is the ref in the gate
-    // manifest's qualifiedRootfsDigests[]) is a separate gate, exercised by
-    // assertRootfsQualified(); here we only verify the bytes match the ref.
+    // re-hashes the on-disk file under rootfsDir and asserts equality with the
+    // ref. The returned artifact is STORED by the backend orchestrator as its
+    // rootfsArtifact, so this MUST return a real VerifiedArtifact — never
+    // throw on the success path.
+    //
+    // QUALIFICATION consults ONLY the probe()-cached (signature-verified) gate
+    // manifest — this method never re-reads gate-manifest.json, so a
+    // post-probe swap with a self-consistent but UNSIGNED gate is invisible
+    // here. This is also the PREPARE BOUNDARY for the TCB: all four artifacts
+    // are re-verified against the probe-cached manifest because the image
+    // builder is consumed immediately after this method returns (backend
+    // prepare() builds the block images with it).
     const sv = await this.sandbox();
-    let gateManifest: GateManifest;
-    try {
-      const raw = await readFile(this.opts.gateManifestPath, 'utf8');
-      gateManifest = sv.GateManifestSchema.parse(JSON.parse(raw));
-    } catch {
-      throw new Error(`resolveRootfs: gate manifest missing/unparseable; cannot qualify ${ref}`);
-    }
-    if (!sv.isRootfsQualified(gateManifest, ref)) {
+    this.requireVerifiedProbe('resolveRootfs');
+    await this.reVerifyTcbArtifact('helper', 'resolveRootfs');
+    await this.reVerifyTcbArtifact('libkrun', 'resolveRootfs');
+    await this.reVerifyTcbArtifact('libkrunfw', 'resolveRootfs');
+    await this.reVerifyTcbArtifact('imageBuilder', 'resolveRootfs');
+    const v = this.verifiedProbe!;
+    if (!sv.isRootfsQualified(v.gateManifest, ref)) {
       throw new Error(`resolveRootfs: ref not in qualifiedRootfsDigests: ${ref}`);
     }
     const absolutePath = path.join(this.opts.rootfsDir, ref);
@@ -466,16 +551,7 @@ export class VmEngineImpl implements VmEnginePort {
     } catch (err) {
       throw new Error(`resolveRootfs: cannot stat rootfs file ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const hash = createHash('sha256');
-    try {
-      const stream = createReadStream(absolutePath);
-      for await (const chunk of stream) {
-        hash.update(chunk as Buffer);
-      }
-    } catch (err) {
-      throw new Error(`resolveRootfs: cannot read rootfs file ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    const recomputed = 'sha256:' + hash.digest('hex');
+    const recomputed = 'sha256:' + await this.hashFile(absolutePath, 'resolveRootfs');
     if (recomputed !== ref) {
       throw new Error(`resolveRootfs: byte digest mismatch (expected ${ref}, got ${recomputed})`);
     }
@@ -495,15 +571,11 @@ export class VmEngineImpl implements VmEnginePort {
   }
 
   async assertRootfsQualified(ref: string): Promise<void> {
+    // Consumes ONLY the probe()-cached (signature-verified) gate manifest —
+    // never re-reads gate-manifest.json (see resolveRootfs).
     const sv = await this.sandbox();
-    let gateManifest: GateManifest;
-    try {
-      const raw = await readFile(this.opts.gateManifestPath, 'utf8');
-      gateManifest = sv.GateManifestSchema.parse(JSON.parse(raw));
-    } catch {
-      throw new Error(`assertRootfsQualified: gate manifest missing/unparseable; cannot qualify ${ref}`);
-    }
-    if (!sv.isRootfsQualified(gateManifest, ref)) {
+    const v = this.requireVerifiedProbe('assertRootfsQualified');
+    if (!sv.isRootfsQualified(v.gateManifest, ref)) {
       throw new Error(`assertRootfsQualified: ref not in qualifiedRootfsDigests: ${ref}`);
     }
   }
@@ -556,6 +628,33 @@ export class VmEngineImpl implements VmEnginePort {
       throw new Error(
         `unsupported libkrun ABI: ${config.libkrunAbi} (only v1.19.4 is pinned)`,
       );
+    }
+
+    // LAUNCH BOUNDARY re-verification (fail closed, immediately before exec).
+    // probe() verified the TCB binaries + gate manifest and cached them; this
+    // re-check closes the probe→spawn window so a file swapped after probe()
+    // (or after prepare()'s boundary check) cannot be executed:
+    //   - helper / libkrun / libkrunfw re-hashed against the cached manifest
+    //     (the helper is exec'd below; the libs are loaded by the linker)
+    //   - rootfs image re-hashed against its ref (attached via krun_add_disk
+    //     inside the helper) AND gated against the cached signature-verified
+    //     qualifiedRootfsDigests
+    const v = this.requireVerifiedProbe('start');
+    if (this.opts.helperPath !== v.tcbPaths.helper) {
+      throw new Error(
+        'start: opts.helperPath diverges from the probe-verified TCB helper path — refusing to exec an unverified binary',
+      );
+    }
+    await this.reVerifyTcbArtifact('helper', 'start');
+    await this.reVerifyTcbArtifact('libkrun', 'start');
+    await this.reVerifyTcbArtifact('libkrunfw', 'start');
+    const svStart = await this.sandbox();
+    if (!svStart.isRootfsQualified(v.gateManifest, config.rootfsArtifact.ref)) {
+      throw new Error(`start: rootfs ref not in the probe-verified gate manifest: ${config.rootfsArtifact.ref}`);
+    }
+    const rootfsNow = await this.hashFile(config.rootfsArtifact.absolutePath, 'start');
+    if ('sha256:' + rootfsNow !== config.rootfsArtifact.ref) {
+      throw new Error('start: rootfs image changed since resolveRootfs (digest mismatch — swapped pre-launch)');
     }
 
     // The helper's argv[1] is the base64url(JSON) helper launch spec, NOT the

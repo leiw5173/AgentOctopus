@@ -197,9 +197,11 @@ function fdPoolOrder(order: number[]): () => number {
   return () => order[i++];
 }
 
-function baseConfig() {
+function baseConfig(rootfsArtifact?: {
+  ref: string; absolutePath: string; manifestDigest: string; size: number; mode: number;
+}) {
   return {
-    rootfsArtifact: { ref: 'sha256:' + 'a'.repeat(64), absolutePath: '/fake/rootfs.img', manifestDigest: 'sha256:' + 'b'.repeat(64), size: 1, mode: 0o444 },
+    rootfsArtifact: rootfsArtifact ?? { ref: 'sha256:' + 'a'.repeat(64), absolutePath: '/fake/rootfs.img', manifestDigest: 'sha256:' + 'b'.repeat(64), size: 1, mode: 0o444 },
     skillBlockImage: { ref: 'sha256:' + 'c'.repeat(64), absolutePath: '/fake/skill.img', manifestDigest: 'sha256:' + 'd'.repeat(64), size: 1, mode: 0o444 },
     caBlockImage: { ref: 'sha256:' + 'e'.repeat(64), absolutePath: '/fake/ca.img', manifestDigest: 'sha256:' + 'f'.repeat(64), size: 1, mode: 0o444 },
     bootstrapPath: '/usr/libexec/octopus-vm-init',
@@ -213,8 +215,111 @@ function baseConfig() {
   };
 }
 
+// --- Post-probe TOCTOU harness (R4) ---------------------------------------
+// start()/resolveRootfs() now RE-VERIFY the TCB binaries and rootfs image
+// against the probe()-cached state at the launch/prepare boundaries, so the
+// old '/fake/...' fixtures no longer work: the harness writes REAL tiny files,
+// computes their digests, and seeds the verifiedProbe cache exactly the way a
+// successful probe() would. The start-boundary helperPath check requires
+// opts.helperPath === the seeded TCB helper path, so engines are built with
+// harness.helperPath.
+const harnessDirs: string[] = [];
+afterEach(async () => {
+  while (harnessDirs.length) {
+    await fsPromises.rm(harnessDirs.pop()!, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+const sha256Hex = (content: string | Buffer) => createHash('sha256').update(content).digest('hex');
+const LIBKRUN_NAME = process.platform === 'darwin' ? 'libkrun.dylib' : 'libkrun.so';
+const LIBKRUNFW_NAME = process.platform === 'darwin' ? 'libkrunfw.dylib' : 'libkrunfw.so';
+
+async function makeStartHarness(extraQualifiedRootfsRefs: string[] = []) {
+  const dir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-harness-'));
+  harnessDirs.push(dir);
+  const helperPath = path.join(dir, 'sandbox-vm-helper');
+  const libkrunPath = path.join(dir, LIBKRUN_NAME);
+  const libkrunfwPath = path.join(dir, LIBKRUNFW_NAME);
+  const imageBuilderPath = path.join(dir, 'vm-image-builder');
+  await fsPromises.writeFile(helperPath, 'HELPER', { mode: 0o555 });
+  await fsPromises.writeFile(libkrunPath, 'LIBKRUN', { mode: 0o555 });
+  await fsPromises.writeFile(libkrunfwPath, 'LIBKRUNFW', { mode: 0o555 });
+  await fsPromises.writeFile(imageBuilderPath, 'BUILDER', { mode: 0o555 });
+  const rootfsRef = 'sha256:' + sha256Hex('ROOTFS-BYTES');
+  // Production layout: rootfsDir/<ref> (what resolveRootfs stats + rehashes).
+  const rootfsPath = path.join(dir, rootfsRef);
+  await fsPromises.writeFile(rootfsPath, 'ROOTFS-BYTES', { mode: 0o444 });
+  const entry = (content: string) => ({ sha256: sha256Hex(content), size: content.length, mode: 0o555 });
+  const tcbManifest = {
+    artifacts: {
+      helper: entry('HELPER'),
+      libkrun: entry('LIBKRUN'),
+      libkrunfw: entry('LIBKRUNFW'),
+      imageBuilder: entry('BUILDER'),
+    },
+  };
+  const gate = {
+    platform: 'darwin-arm64' as const,
+    schemaVersion: 1 as const,
+    artifacts: {
+      libkrun: 'sha256:' + sha256Hex('LIBKRUN'),
+      libkrunfw: 'sha256:' + sha256Hex('LIBKRUNFW'),
+      helper: 'sha256:' + sha256Hex('HELPER'),
+      imageBuilder: 'sha256:' + sha256Hex('BUILDER'),
+    },
+    qualifiedRootfsDigests: [rootfsRef, ...extraQualifiedRootfsRefs],
+    libkrunAbi: 'v1.19.4' as const,
+    blkFeatureRequired: true as const,
+    gates: { G1: 'GO' as const, G2: 'GO' as const },
+    gateReasons: [] as string[],
+    qualifiedAt: '2026-08-01T00:00:00.000Z',
+    manifestDigest: 'sha256:' + '0'.repeat(64),
+  };
+  return {
+    dir, helperPath, libkrunPath, libkrunfwPath, imageBuilderPath, rootfsPath, rootfsRef,
+    artifactsDir: dir, tcbManifest, gate,
+    rootfsArtifact: {
+      ref: rootfsRef, absolutePath: rootfsPath, manifestDigest: rootfsRef,
+      size: 'ROOTFS-BYTES'.length, mode: 0o444,
+    },
+    /** Seed the probe-verified cache the way a successful probe() would. */
+    seed(engine: VmEngineImpl) {
+      (engine as unknown as { verifiedProbe: unknown }).verifiedProbe = {
+        gateManifest: gate,
+        tcbManifest,
+        tcbPaths: { helper: helperPath, libkrun: libkrunPath, libkrunfw: libkrunfwPath, imageBuilder: imageBuilderPath },
+      };
+    },
+  };
+}
+
+type StartHarness = Awaited<ReturnType<typeof makeStartHarness>>;
+
+async function makeStartEngine(deps: VmEngineDeps): Promise<{ engine: VmEngineImpl; harness: StartHarness }> {
+  const harness = await makeStartHarness();
+  const engine = new VmEngineImpl(
+    {
+      helperPath: harness.helperPath,
+      artifactsDir: harness.artifactsDir,
+      tcbManifestPath: path.join(harness.dir, 'vm-tcb-manifest.json'),
+      gateManifestPath: path.join(harness.dir, 'gate-manifest.json'),
+      rootfsDir: harness.dir,
+    },
+    deps,
+  );
+  harness.seed(engine);
+  return { engine, harness };
+}
+
 describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
-  beforeEach(() => _resetExecCacheForTest());
+  beforeEach(() => {
+    _resetExecCacheForTest();
+    // start() gates the rootfs ref against the probe-cached gate manifest —
+    // mirror the real membership check over the seeded gate.
+    vi.mocked(gateManifest.isRootfsQualified).mockImplementation(
+      (m, ref) => m.qualifiedRootfsDigests.includes(ref),
+    );
+  });
 
   it('builds the R10 P1-2 dup2 config: F_DUPFD_CLOEXEC temp ≥10 then adddup2 → fd3/fd4 (source≠target)', async () => {
     const nextH2G = fdPoolOrder([H2G_READ_SRC, H2G_WRITE_SRC]);
@@ -238,20 +343,20 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     const deps = makeDeps(binding, controlReadStream);
     // Wire the control stream: the fake child writes ready frames into
     // controlReadStream; the engine reads from it.
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    const inst = await engine.start(baseConfig() as any);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
 
     expect(recorded).toBeDefined();
     // Helper argv contract: [helperPath, helperSpecToken], length===2.
     // The nested bootstrapArgv is inside the base64url(JSON) spec at argv[1].
-    expect(recorded.argv[0]).toBe('/fake/helper');
+    expect(recorded.argv[0]).toBe(harness.helperPath);
     expect(recorded.argv.length).toBe(2);
     expect(typeof recorded.argv[1]).toBe('string');
     const spec = JSON.parse(Buffer.from(recorded.argv[1], 'base64url').toString('utf8'));
     expect(spec.helperPath).toBeUndefined();
     expect(spec.bootstrapPath).toBe('/usr/libexec/octopus-vm-init');
     expect(spec.bootstrapArgv).toEqual(['/usr/libexec/octopus-vm-init', 'PAYLOAD_BLOB']);
-    expect(spec.rootfsPath).toBe('/fake/rootfs.img');
+    expect(spec.rootfsPath).toBe(harness.rootfsArtifact.absolutePath);
     expect(spec.skillBlockPath).toBe('/fake/skill.img');
     expect(spec.caBlockPath).toBe('/fake/ca.img');
     expect(spec.vsockPort).toBe(1234);
@@ -308,7 +413,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       },
     };
     const deps = makeDeps(binding, controlReadStream, platform);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
+    const { engine, harness } = await makeStartEngine(deps);
 
     const hadPath = 'PATH' in process.env;
     const originalPath = process.env.PATH;
@@ -323,7 +428,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       process.env.GITHUB_TOKEN = 'secret-token';
       process.env.HOME = '/test/home';
 
-      const inst = await engine.start(baseConfig() as any);
+      const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
       await inst.close();
     } finally {
       if (hadPath) process.env.PATH = originalPath!;
@@ -398,8 +503,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       spawn: (_h, _a, _e, _f, _s, _p, crs) => makeFakeChild(['{"ready":true}\n'], crs),
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    const cfg = baseConfig();
+    const { engine, harness } = await makeStartEngine(deps);
+    const cfg = baseConfig(harness.rootfsArtifact);
     cfg.bootstrapArgv = ['/usr/libexec/octopus-vm-init', 'a', 'b']; // length 3
     await expect(engine.start(cfg as any)).rejects.toThrow(/bootstrapArgv/);
   });
@@ -412,8 +517,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       spawn: (_h, _a, _e, _f, _s, _p, crs) => makeFakeChild(['{"ready":true}\n'], crs),
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    const cfg = baseConfig();
+    const { engine, harness } = await makeStartEngine(deps);
+    const cfg = baseConfig(harness.rootfsArtifact);
     cfg.bootstrapArgv = ['/usr/libexec/SOMETHING-ELSE', 'blob'];
     await expect(engine.start(cfg as any)).rejects.toThrow(/bootstrapArgv/);
   });
@@ -426,8 +531,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       spawn: (_h, _a, _e, _f, _s, _p, crs) => makeFakeChild(['{"error":"bad launch spec"}\n'], crs),
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    await expect(engine.start(baseConfig() as any)).rejects.toThrow(/bad launch spec/);
+    const { engine, harness } = await makeStartEngine(deps);
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/bad launch spec/);
   });
 
   it('fails start when helper exits before ready', async () => {
@@ -438,8 +543,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       spawn: (_h, _a, _e, _f, _s, _p, crs) => makeFakeChild([], crs, { exitBeforeReady: true, exitCode: 1 }),
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    await expect(engine.start(baseConfig() as any)).rejects.toThrow(/ready|exited|before/i);
+    const { engine, harness } = await makeStartEngine(deps);
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/ready|exited|before/i);
   });
 
   it('fails start on readyTimeoutMs timeout with no frame', async () => {
@@ -457,8 +562,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       spawn: () => stalled,
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    await expect(engine.start(baseConfig() as any)).rejects.toThrow(/timed out|timeout/i);
+    const { engine, harness } = await makeStartEngine(deps);
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/timed out|timeout/i);
   });
 
   it('bridges helper exit code into VmInstance.exited', async () => {
@@ -474,8 +579,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       },
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    const inst = await engine.start(baseConfig() as any);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
     // Trigger a kill → exited resolves 137/timedOut.
     await inst.kill();
     const r = await inst.exited;
@@ -493,8 +598,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
         makeFakeChild(['stderr bleed\n', 'more garbage\n', 'third strike\n'], crs),
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    const cfg = { ...baseConfig(), readyTimeoutMs: 5000 };
+    const { engine, harness } = await makeStartEngine(deps);
+    const cfg = { ...baseConfig(harness.rootfsArtifact), readyTimeoutMs: 5000 };
     await expect(engine.start(cfg as any)).rejects.toThrow(/3 malformed control frames/);
   });
 
@@ -507,8 +612,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
         makeFakeChild(['stderr bleed\n', 'more garbage\n', '{"ready":true}\n'], crs),
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    const cfg = { ...baseConfig(), readyTimeoutMs: 5000 };
+    const { engine, harness } = await makeStartEngine(deps);
+    const cfg = { ...baseConfig(harness.rootfsArtifact), readyTimeoutMs: 5000 };
     const inst = await engine.start(cfg as any);
     expect(inst.stdin).toBeDefined();
     await inst.close();
@@ -523,8 +628,8 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
         makeFakeChild(['\n', '\n', 'bad\n', '\n', 'bad\n', '{"ready":true}\n'], crs),
     };
     const deps = makeDeps(binding, controlReadStream);
-    const engine = new VmEngineImpl({ helperPath: '/fake/helper', artifactsDir: '/fake' }, deps);
-    const cfg = { ...baseConfig(), readyTimeoutMs: 5000 };
+    const { engine, harness } = await makeStartEngine(deps);
+    const cfg = { ...baseConfig(harness.rootfsArtifact), readyTimeoutMs: 5000 };
     const inst = await engine.start(cfg as any);
     expect(inst.stdin).toBeDefined();
     await inst.close();
@@ -909,23 +1014,46 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     expect(r.releaseManifest).toBe('signature-invalid');
     expect(r.reason).toMatch(/not a valid gate manifest/i);
   });
+
+  // R4: a successful probe caches the verified TCB/gate state — the ONLY
+  // source resolveRootfs()/assertRootfsQualified()/start() may consult.
+  it('R4: a successful probe caches the verified TCB/gate state for prepare/start', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const engine = makeProbeEngine();
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(true);
+    const cached = (engine as unknown as { verifiedProbe?: {
+      gateManifest: unknown;
+      tcbPaths: { helper: string };
+      tcbManifest: { artifacts: { helper: { sha256: string } } };
+    } }).verifiedProbe;
+    expect(cached).toBeDefined();
+    expect(cached!.gateManifest).toBe(gateBody);
+    expect(cached!.tcbPaths.helper).toBe('/fake/helper');
+    expect(cached!.tcbManifest.artifacts.helper.sha256).toBe(hex('c'));
+  });
 });
 
 describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
   async function tempRootfs(content: Buffer) {
     const dir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-rootfs-'));
+    harnessDirs.push(dir);
     const ref = 'sha256:' + createHash('sha256').update(content).digest('hex');
     const absolutePath = path.join(dir, ref);
     await fsPromises.writeFile(absolutePath, content, { mode: 0o444 });
     return { dir, ref, absolutePath };
   }
 
-  function makeResolveEngine(gatePath: string, rootfsDir: string) {
-    return new VmEngineImpl(
+  function makeResolveEngine(harness: StartHarness, gatePath: string, rootfsDir: string) {
+    const engine = new VmEngineImpl(
       {
-        helperPath: '/fake/helper',
-        artifactsDir: '/fake/artifacts',
-        tcbManifestPath: '/fake/tcb.json',
+        helperPath: harness.helperPath,
+        artifactsDir: harness.artifactsDir,
+        tcbManifestPath: path.join(harness.dir, 'vm-tcb-manifest.json'),
         gateManifestPath: gatePath,
         rootfsDir,
       },
@@ -936,71 +1064,167 @@ describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
         spawn: () => ({}) as unknown as VmInstanceRaw,
       } as unknown as VmEngineDeps,
     );
+    // resolveRootfs consumes ONLY the probe()-cached gate/TCB state (seeded
+    // here) — it never re-reads the on-disk gate manifest.
+    harness.seed(engine);
+    return engine;
   }
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(gateManifest.isRootfsQualified).mockImplementation(
+      (m, ref) => m.qualifiedRootfsDigests.includes(ref),
+    );
   });
 
   it('hashes the rootfs with createReadStream instead of fs.readFile', async () => {
     const content = Buffer.from('hello streaming rootfs');
     const { dir, ref, absolutePath } = await tempRootfs(content);
+    const harness = await makeStartHarness([ref]);
+    // The on-disk gate file is IRRELEVANT post-probe — an empty file proves
+    // resolveRootfs never reads it (cached gate only).
     const gatePath = path.join(dir, 'gate.json');
-    const gateBody = {
-      platform: 'darwin-arm64' as const,
-      schemaVersion: 1 as const,
-      artifacts: {},
-      qualifiedRootfsDigests: [ref],
-      libkrunAbi: 'v1.19.4' as const,
-      blkFeatureRequired: true as const,
-      gates: { G1: 'GO' as const, G2: 'GO' as const },
-      gateReasons: [] as string[],
-      qualifiedAt: new Date().toISOString(),
-      manifestDigest: 'sha256:' + '0'.repeat(64),
-    };
-    await fsPromises.writeFile(gatePath, JSON.stringify(gateBody));
-    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
-    vi.mocked(gateManifest.isRootfsQualified).mockReturnValue(true);
+    await fsPromises.writeFile(gatePath, '{}');
 
     const createReadStreamSpy = fs.createReadStream;
 
-    const engine = makeResolveEngine(gatePath, dir);
+    const engine = makeResolveEngine(harness, gatePath, dir);
     const artifact = await engine.resolveRootfs(ref);
 
     expect(artifact.ref).toBe(ref);
     expect(artifact.absolutePath).toBe(absolutePath);
     expect(createReadStreamSpy).toHaveBeenCalledWith(absolutePath);
-
-    await fsPromises.rm(dir, { recursive: true, force: true });
   });
 
   it('matches the expected digest for a multi-chunk rootfs', async () => {
     // 256 KiB of deterministic data — large enough to exercise stream chunks.
     const content = Buffer.alloc(256 * 1024);
     for (let i = 0; i < content.length; i++) content[i] = i % 256;
-    const { dir, ref, absolutePath } = await tempRootfs(content);
-    const gatePath = path.join(dir, 'gate.json');
-    const gateBody = {
-      platform: 'darwin-arm64' as const,
-      schemaVersion: 1 as const,
-      artifacts: {},
-      qualifiedRootfsDigests: [ref],
-      libkrunAbi: 'v1.19.4' as const,
-      blkFeatureRequired: true as const,
-      gates: { G1: 'GO' as const, G2: 'GO' as const },
-      gateReasons: [] as string[],
-      qualifiedAt: new Date().toISOString(),
-      manifestDigest: 'sha256:' + '0'.repeat(64),
-    };
-    await fsPromises.writeFile(gatePath, JSON.stringify(gateBody));
-    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
-    vi.mocked(gateManifest.isRootfsQualified).mockReturnValue(true);
+    const { dir, ref } = await tempRootfs(content);
+    const harness = await makeStartHarness([ref]);
 
-    const engine = makeResolveEngine(gatePath, dir);
+    const engine = makeResolveEngine(harness, path.join(dir, 'gate.json'), dir);
     const artifact = await engine.resolveRootfs(ref);
     expect(artifact.ref).toBe(ref);
     expect(artifact.size).toBe(content.length);
+  });
 
-    await fsPromises.rm(dir, { recursive: true, force: true });
+  it('fails closed when probe() never succeeded (no cached verified state)', async () => {
+    const { dir, ref } = await tempRootfs(Buffer.from('x'));
+    const harness = await makeStartHarness([ref]);
+    const engine = new VmEngineImpl(
+      {
+        helperPath: harness.helperPath,
+        artifactsDir: harness.artifactsDir,
+        tcbManifestPath: path.join(harness.dir, 'vm-tcb-manifest.json'),
+        gateManifestPath: path.join(dir, 'gate.json'),
+        rootfsDir: dir,
+      },
+      {
+        platform: 'darwin-arm64',
+        pipe: () => [10, 11] as [number, number],
+        dupFdCloexec: distinctDups(),
+        spawn: () => ({}) as unknown as VmInstanceRaw,
+      } as unknown as VmEngineDeps,
+    );
+    // Deliberately NOT seeded — resolveRootfs must refuse without probe state.
+    await expect(engine.resolveRootfs(ref)).rejects.toThrow(/probe\(\) must succeed/);
+  });
+});
+
+// R4 (review round 4): probe() is the ONLY point that reads + verifies the
+// gate manifest (and binds the release signature to it). prepare()/start()
+// must consume the cached verified state and re-verify the TCB/rootfs files
+// at their consumption boundaries, so a file swapped after probe() fails
+// closed instead of being trusted.
+describe('VmEngineImpl post-probe TOCTOU hardening (R4)', () => {
+  function minimalDeps(): VmEngineDeps {
+    const crs = new PassThrough();
+    return makeDeps(
+      {
+        pipe: () => [10, 11],
+        dupFdCloexec: distinctDups(),
+        spawn: (_h, _a, _e, _f, _s, _p, c) => makeFakeChild(['{"ready":true}\n'], c),
+      },
+      crs,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(gateManifest.isRootfsQualified).mockImplementation(
+      (m, ref) => m.qualifiedRootfsDigests.includes(ref),
+    );
+  });
+
+  it('start() fails closed when probe() never succeeded', async () => {
+    const harness = await makeStartHarness();
+    const engine = new VmEngineImpl(
+      {
+        helperPath: harness.helperPath,
+        artifactsDir: harness.artifactsDir,
+        tcbManifestPath: path.join(harness.dir, 'vm-tcb-manifest.json'),
+        gateManifestPath: path.join(harness.dir, 'gate-manifest.json'),
+        rootfsDir: harness.dir,
+      },
+      minimalDeps(),
+    );
+    // Deliberately NOT seeded.
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/probe\(\) must succeed/);
+  });
+
+  it('a gate manifest swapped after probe() is INVISIBLE: only the cached gate qualifies refs', async () => {
+    const { engine, harness } = await makeStartEngine(minimalDeps());
+    // Attacker's self-consistent but UNSIGNED gate qualifying an evil ref,
+    // written over the on-disk file AFTER probe() (the seed).
+    const evilRef = 'sha256:' + '7'.repeat(64);
+    const swappedGate = { ...harness.gate, qualifiedRootfsDigests: [evilRef] };
+    await fsPromises.writeFile(path.join(harness.dir, 'gate-manifest.json'), JSON.stringify(swappedGate));
+
+    // The evil ref stays unqualified (cached gate consulted, not the file)…
+    await expect(engine.resolveRootfs(evilRef)).rejects.toThrow(/not in qualifiedRootfsDigests/);
+    // …and the probe-verified ref still resolves.
+    const artifact = await engine.resolveRootfs(harness.rootfsRef);
+    expect(artifact.ref).toBe(harness.rootfsRef);
+  });
+
+  // Simulate an attacker with host fs write access swapping a file post-probe:
+  // the verified files are 0555/0444, so restore a write bit before rewriting.
+  async function tamper(filePath: string, content: string, mode: number) {
+    await fsPromises.chmod(filePath, mode | 0o200);
+    await fsPromises.writeFile(filePath, content, { mode });
+  }
+
+  it('a helper binary swapped after probe() fails start() at the launch boundary', async () => {
+    const { engine, harness } = await makeStartEngine(minimalDeps());
+    await tamper(harness.helperPath, 'EVIL-HELPER', 0o555);
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/helper changed since probe/);
+  });
+
+  it('a libkrun library swapped after probe() fails start() at the launch boundary', async () => {
+    const { engine, harness } = await makeStartEngine(minimalDeps());
+    await tamper(harness.libkrunPath, 'EVIL-LIBKRUN', 0o555);
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/libkrun changed since probe/);
+  });
+
+  it('an image-builder swapped after probe() fails resolveRootfs() at the prepare boundary', async () => {
+    const { engine, harness } = await makeStartEngine(minimalDeps());
+    await tamper(harness.imageBuilderPath, 'EVIL-BUILDER', 0o555);
+    await expect(engine.resolveRootfs(harness.rootfsRef)).rejects.toThrow(/imageBuilder changed since probe/);
+  });
+
+  it('a rootfs image swapped after resolveRootfs fails start() at the launch boundary', async () => {
+    const { engine, harness } = await makeStartEngine(minimalDeps());
+    await engine.resolveRootfs(harness.rootfsRef); // prepare phase resolves fine
+    await tamper(harness.rootfsPath, 'EVIL-ROOTFS-BYTES', 0o444);
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/rootfs image changed since resolveRootfs/);
+  });
+
+  it('start() succeeds when nothing changed post-probe (happy path sanity)', async () => {
+    const { engine, harness } = await makeStartEngine(minimalDeps());
+    await engine.resolveRootfs(harness.rootfsRef);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    expect(inst.stdin).toBeDefined();
+    await inst.close();
   });
 });
