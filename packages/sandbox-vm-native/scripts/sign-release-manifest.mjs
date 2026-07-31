@@ -90,12 +90,10 @@ function loadPrivateKeyFromEnv() {
   try {
     const seed = Buffer.from(raw, 'base64');
     if (seed.length === 32) {
-      // Ed25519 raw seed → KeyObject via PKCS8 wrap is not directly supported
-      // by createPrivateKey; use generateKeyPairSync is not applicable. Node
-      // supports importing a raw Ed25519 seed via KeyObject.
-      // createPrivateKey({ key, format: 'jwk' }) needs the full JWK.
-      // The clean path: build a JWK from the seed.
-      const { publicKey, privateKey } = deriveEd25519FromSeed(seed);
+      // Ed25519 raw seed → KeyObject via a PKCS8 DER wrap (RFC 5208). Node has
+      // no direct seed import, and the d-only OKP JWK route is rejected with
+      // ERR_CRYPTO_INVALID_JWK — see deriveEd25519FromSeed.
+      const { privateKey } = deriveEd25519FromSeed(seed);
       return privateKey;
     }
   } catch { /* fall through */ }
@@ -108,17 +106,21 @@ function loadPrivateKeyFromEnv() {
   }
 }
 
-// Derive an Ed25519 keypair from a 32-byte seed. Node's crypto does not
-// expose a direct seed-import, so we use the JWK route: the JWK "d" member
-// is the base64url seed, and "x" is the base64url public point. We compute
-// x by generating a throwaway keypair? No — we use createPrivateKey with
-// the JWK containing only d, and Node derives x. (Node supports importing
-// Ed25519 from a JWK with d.)
+// Derive an Ed25519 keypair from a 32-byte seed. Node's crypto has no direct
+// seed import, and importing an OKP JWK carrying only `d` (no `x`) throws
+// ERR_CRYPTO_INVALID_JWK ("Invalid JWK OKP key") — Node requires both members.
+// The working route is a PKCS8 DER wrap (RFC 5208): the Ed25519 private key
+// is an OCTET STRING holding the 32-byte seed, nested in the PKCS8 structure.
+// Verified byte-identical to a canonical PKCS8 export of the same key.
 function deriveEd25519FromSeed(seed) {
   if (seed.length !== 32) throw new Error('seed must be 32 bytes');
-  const d = seed.toString('base64url');
-  // Node derives the public key from d on import.
-  const privateKey = createPrivateKey({ key: { kty: 'OKP', crv: 'Ed25519', d }, format: 'jwk' });
+  const pkcs8 = Buffer.concat([
+    Buffer.from([0x30, 0x2e]),                                // SEQUENCE (46 bytes)
+    Buffer.from([0x02, 0x01, 0x00]),                          // INTEGER 0 (version)
+    Buffer.from([0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70]),  // SEQUENCE { OID 1.3.101.112 (id-Ed25519) }
+    Buffer.from([0x04, 0x22, 0x04, 0x20]), seed,              // OCTET STRING { OCTET STRING { seed } }
+  ]);
+  const privateKey = createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' });
   const publicKey = createPublicKey(privateKey);
   return { publicKey, privateKey };
 }
