@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { SandboxConfigSchema, IMMUTABLE_IMAGE_RE } from '../../src/schema.js';
 import { SessionCa } from '../../src/proxy/ca.js';
-import { probeDocker } from './harness.js';
+import { probeDockerImages } from './harness.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -71,7 +71,13 @@ async function inspectImage(image: string): Promise<{ Config: { Entrypoint: stri
 
 let dockerAvailable = false;
 beforeAll(async () => {
-  dockerAvailable = (await probeDocker()).available;
+  // The image cases below exercise the REAL built images, so the refs this
+  // suite uses (env digests when injected, the `:test` tags otherwise) must
+  // exist locally (security:images built them). On a plain runner the daemon
+  // may be reachable via hello-world while the trusted images are absent —
+  // docker run would exit 125 spuriously. The two lock-ref cases don't need
+  // the daemon and are deliberately NOT gated.
+  dockerAvailable = (await probeDockerImages([runtimeImage, proxyImage])).available;
 });
 
 describe('image contract', () => {

@@ -110,9 +110,12 @@ export async function linuxLaneAvailability(): Promise<LinuxLaneAvailability> {
  * thrown in `beforeAll`, so a skip here always means "capability genuinely
  * absent on a non-mandatory host" (e.g. macOS dev).
  *
- * vitest v1 exposes `ctx.skip()` on the plain test context. Parameterized
- * `it.each` callbacks shift the context to the LAST argument, so callers use
- * `it.each([[v]])` tuple form and take `ctx` as the second parameter.
+ * vitest v1 exposes `ctx.skip()` on the PLAIN test context only. Parameterized
+ * `it.each` callbacks never receive the context — verified empirically on
+ * v1.6.1 that neither the value form nor the `[[v]]` tuple form passes it (the
+ * callback gets only the row value(s); `ctx` is `undefined`). Cases needing a
+ * per-test skip inside `it.each` must gate with `it.skipIf(flag)` on a
+ * module-level flag instead of `ctx.skip()`.
  */
 export function needPrivilegedLinux(ctx: unknown, available: boolean): boolean {
   if (!available) { (ctx as { skip: () => void }).skip(); return false; }

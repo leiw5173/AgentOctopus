@@ -6,6 +6,12 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { verifyVmTcb } from '../../src/vm/vm-helper-build.js';
 
+// verifyVmTcb resolves artifact names per-platform (vm-helper-build.ts):
+// libkrun.dylib / libkrunfw.dylib on darwin, libkrun.so / libkrunfw.so on
+// Linux. The fixtures must name the files the platform-under-test looks up.
+const LIBKRUN = process.platform === 'darwin' ? 'libkrun.dylib' : 'libkrun.so';
+const LIBKRUNFW = process.platform === 'darwin' ? 'libkrunfw.dylib' : 'libkrunfw.so';
+
 async function makeFile(dir: string, name: string, content: string, mode = 0o755) {
   const p = join(dir, name);
   await writeFile(p, content);
@@ -21,8 +27,8 @@ describe('vm TCB verification', () => {
 
   it('verifies all 4 artifacts when digests/size/mode match', async () => {
     const helper = await makeFile(dir, 'sandbox-vm-helper', 'HELPER');
-    const libkrun = await makeFile(dir, 'libkrun.dylib', 'LIBKRUN', 0o644);
-    const libkrunfw = await makeFile(dir, 'libkrunfw.dylib', 'KRUNFW', 0o644);
+    const libkrun = await makeFile(dir, LIBKRUN, 'LIBKRUN', 0o644);
+    const libkrunfw = await makeFile(dir, LIBKRUNFW, 'KRUNFW', 0o644);
     const imageBuilder = await makeFile(dir, 'vm-image-builder', 'BUILDER');
     const manifest = {
       schemaVersion: 1,
@@ -40,8 +46,8 @@ describe('vm TCB verification', () => {
 
   it('throws on a tampered artifact digest', async () => {
     await makeFile(dir, 'sandbox-vm-helper', 'TAMPERED');
-    await makeFile(dir, 'libkrun.dylib', 'LIBKRUN', 0o644);
-    await makeFile(dir, 'libkrunfw.dylib', 'KRUNFW', 0o644);
+    await makeFile(dir, LIBKRUN, 'LIBKRUN', 0o644);
+    await makeFile(dir, LIBKRUNFW, 'KRUNFW', 0o644);
     await makeFile(dir, 'vm-image-builder', 'BUILDER');
     const manifest = {
       schemaVersion: 1,
@@ -58,8 +64,8 @@ describe('vm TCB verification', () => {
 
   it('throws on group/world-writable artifact', async () => {
     const helper = await makeFile(dir, 'sandbox-vm-helper', 'HELPER', 0o777); // world-writable
-    await makeFile(dir, 'libkrun.dylib', 'LIBKRUN', 0o644);
-    await makeFile(dir, 'libkrunfw.dylib', 'KRUNFW', 0o644);
+    await makeFile(dir, LIBKRUN, 'LIBKRUN', 0o644);
+    await makeFile(dir, LIBKRUNFW, 'KRUNFW', 0o644);
     await makeFile(dir, 'vm-image-builder', 'BUILDER');
     const manifest = {
       schemaVersion: 1,

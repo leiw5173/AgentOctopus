@@ -20,15 +20,23 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { runDocker } from '../../src/docker/cli.js';
-import { probeDocker } from './harness.js';
+import { probeDockerImages, requirePinnedImageRef } from './harness.js';
 import { setupDockerSandbox, type DockerSandbox } from './docker-lane-setup.js';
-import { requirePinnedImageRef } from './harness.js';
 
 const RUN_TIMEOUT = 180_000;
 
 let dockerAvailable = false;
 beforeAll(async () => {
-  dockerAvailable = (await probeDocker()).available;
+  // Stricter than probeDocker: every case runs the actual runtime and proxy
+  // images. setupDockerSandbox REQUIRES immutable digest refs via env
+  // (requirePinnedImageRef — SandboxConfigSchema rejects mutable tags), so
+  // both env refs must be set AND the images present locally (security:images
+  // built them). On a plain runner the daemon may be reachable via hello-world
+  // while the trusted images are absent — docker run would exit 125 spuriously.
+  dockerAvailable = (await probeDockerImages([
+    process.env.OCTOPUS_TEST_RUNTIME_IMAGE!,
+    process.env.OCTOPUS_TEST_PROXY_IMAGE!,
+  ])).available;
 });
 
 function needDocker(ctx: unknown): boolean {

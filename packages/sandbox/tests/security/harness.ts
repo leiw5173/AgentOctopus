@@ -313,6 +313,38 @@ export async function probeDocker(): Promise<CapabilityResult> {
   return { available: true };
 }
 
+// ---- probeDockerImages ------------------------------------------------------
+
+/**
+ * probeDocker() PLUS the image refs a suite will actually run being present
+ * locally. Each caller passes the refs it uses:
+ *
+ *   - image-contract falls back to the local `:test` tags
+ *     (`agentoctopus/skill-runtime:test` / `agentoctopus/egress-proxy:test`),
+ *     so it probes those when OCTOPUS_TEST_*_IMAGE are unset.
+ *   - docker-lane/docker-topology REQUIRE immutable digest refs via env
+ *     (setupDockerSandbox → requirePinnedImageRef; SandboxConfigSchema rejects
+ *     mutable tags), so they probe the env refs and skip when unset.
+ *
+ * The suites exercise the ACTUAL runtime and egress-proxy images;
+ * `security:images` must have built them first (the hosted-docker-proxy lane
+ * does). On a plain runner (e.g. the ci.yml unit-test job) the daemon is
+ * reachable and probeDocker() passes via `hello-world`, but the trusted
+ * images do not exist — docker run then exits 125 and every case fails
+ * spuriously. Gate those suites on this stricter probe so they skip cleanly.
+ */
+export async function probeDockerImages(refs: string[]): Promise<CapabilityResult> {
+  const base = await probeDocker();
+  if (!base.available) return base;
+  for (const ref of refs) {
+    const inspect = await runArgv(['docker', 'image', 'inspect', '--format', '{{.Id}}', ref], 30_000);
+    if (inspect.code !== 0) {
+      return { available: false, reason: `docker image inspect ${ref} failed: ${inspect.stderr.trim() || inspect.stdout.trim()}` };
+    }
+  }
+  return { available: true };
+}
+
 // ---- probePrivilegedLinux --------------------------------------------------
 
 /**

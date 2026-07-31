@@ -653,25 +653,30 @@ describe('authorizeProxyEndpoint (injected fake exec)', () => {
 // ---------------------------------------------------------------------------
 
 const isLinux = process.platform === 'linux';
+// Real kernel operations need root: `ip netns add` writes /run/netns and the
+// os-helper asserts euid 0. A plain CI runner (ubuntu-latest) is Linux but
+// unprivileged — the real netns smoke must skip there, not fail spuriously
+// with `mkdir /run/netns failed: Permission denied`.
+const canRunOsSmoke = isLinux && typeof process.getuid === 'function' && process.getuid() === 0;
 const REQUIRE_OS = process.env.OCTOPUS_REQUIRE_OS_SANDBOX === '1';
 
 // Hard-fail guard: on the Plan 6 lane REQUIRE_OS=1 is set to convert any
 // capability skip into a hard failure. If the env is set but the test is
-// being collected on a non-Linux host, the whole Linux-gated block would
-// silently skip and the lane would appear green. This portable test forces
-// the lane to fail loudly instead.
+// being collected on a host that cannot run the real smoke (non-Linux or
+// unprivileged), the whole gated block would silently skip and the lane would
+// appear green. This portable test forces the lane to fail loudly instead.
 describe('OCTOPUS_REQUIRE_OS_SANDBOX contract (netns)', () => {
-  it('hard-fails when REQUIRE_OS=1 but the platform cannot run the real netns smoke', () => {
-    if (REQUIRE_OS && !isLinux) {
+  it('hard-fails when REQUIRE_OS=1 but the host cannot run the real netns smoke', () => {
+    if (REQUIRE_OS && !canRunOsSmoke) {
       throw new Error(
-        'OCTOPUS_REQUIRE_OS_SANDBOX=1 but platform is not linux — the netns smoke ' +
-        'test cannot run here, so the lane cannot silently regress',
+        'OCTOPUS_REQUIRE_OS_SANDBOX=1 but the netns smoke cannot run here ' +
+        '(platform or root capability missing) — the lane cannot silently regress',
       );
     }
   });
 });
 
-describe.skipIf(!isLinux)('setupNetns — real Linux netns smoke', () => {
+describe.skipIf(!canRunOsSmoke)('setupNetns — real Linux netns smoke', () => {
   it('creates a no-egress-window namespace, authorizes the proxy, and cleans up only its own objects', async () => {
     if (REQUIRE_OS) {
       // On the Plan 6 privileged lane this test MUST run end-to-end. Any

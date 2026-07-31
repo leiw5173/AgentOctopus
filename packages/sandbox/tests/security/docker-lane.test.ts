@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { runDocker } from '../../src/docker/cli.js';
-import { createHostCanary, probeDocker } from './harness.js';
+import { createHostCanary, probeDockerImages } from './harness.js';
 import { setupDockerSandbox, runProbe, type ProbeResult } from './docker-lane-setup.js';
 
 // Re-export so the shared helper is available from this module (per the brief,
@@ -37,7 +37,16 @@ const RUN_TIMEOUT = 120_000;
 
 let dockerAvailable = false;
 beforeAll(async () => {
-  dockerAvailable = (await probeDocker()).available;
+  // Stricter than probeDocker: every case here runs the actual runtime and
+  // proxy images. setupDockerSandbox REQUIRES immutable digest refs via env
+  // (requirePinnedImageRef — SandboxConfigSchema rejects mutable tags), so
+  // both env refs must be set AND the images present locally (security:images
+  // built them). On a plain runner the daemon may be reachable via hello-world
+  // while the trusted images are absent — docker run would exit 125 spuriously.
+  dockerAvailable = (await probeDockerImages([
+    process.env.OCTOPUS_TEST_RUNTIME_IMAGE!,
+    process.env.OCTOPUS_TEST_PROXY_IMAGE!,
+  ])).available;
 });
 
 /** Skip helper: every case requires a real daemon and both pinned images. */
@@ -147,8 +156,10 @@ describe('Docker lane — isolation', () => {
     }
   }, RUN_TIMEOUT);
 
-  it.each(['direct-internet', 'metadata'])('%s is unreachable without the proxy', async (action, ctx) => {
-    if (!needDocker(ctx)) return;
+  // vitest v1's it.each never passes the test context (neither value nor
+  // tuple form — verified empirically), so ctx.skip() in needDocker would
+  // crash. Gate with skipIf on the module-level dockerAvailable flag instead.
+  it.each([['direct-internet'], ['metadata']])('%s is unreachable without the proxy', { skip: !dockerAvailable }, async (action) => {
     const result = await runProbe(action);
     expect(result.json.ok).toBe(false);
   }, RUN_TIMEOUT);
