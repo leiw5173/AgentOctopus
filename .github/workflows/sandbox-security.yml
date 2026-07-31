@@ -17,9 +17,13 @@ on:
 permissions:
   contents: read
 
+# cancel-in-progress: true — a stuck `privileged-linux` job (no self-hosted
+# runner registered) would otherwise queue-block every subsequent push in this
+# ref group. New runs cancel the stale one instead of piling up behind it.
+# Matches the convention used by ci.yml / changeset-check.yml.
 concurrency:
   group: sandbox-security-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   hosted-docker-proxy:
