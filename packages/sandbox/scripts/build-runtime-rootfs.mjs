@@ -172,12 +172,30 @@ async function main() {
   //   - Root-level `proc`/`dev`/`sys`: runtime virtual-fs mount points created
   //     fresh by assembleRootfs (proc/dev/tmp) and mounted at chroot time by
   //     helper.c. `dev` may also hold device nodes that walk() must reject.
-  //   - Any symlink whose target escapes the rootfs (e.g. etc/mtab ->
-  //     /proc/mounts): these are dangling at verification time (/proc is not
-  //     mounted) and are a path-traversal vector if declared. Stripped by
-  //     generic escape-check, never by name — a name-based allowlist of "safe
-  //     absolute targets" would be a security regression.
+  //   - Any symlink whose target is a runtime-only path not present in the
+  //     static rootfs (e.g. etc/mtab -> /proc/mounts, where /proc is mounted
+  //     at runtime; zoneinfo/localtime -> /etc/localtime). These are dangling
+  //     at verification time and a path-traversal vector if declared.
+  //
+  // Absolute symlink targets are re-anchored under the rootfs root before the
+  // existence check, because the rootfs is chrooted at runtime — an absolute
+  // link like lib64/ld-linux-x86-64.so.2 -> /lib/x86_64-linux-gnu/ld-linux-...
+  // resolves to a real in-rootfs file (the ELF interpreter) and MUST be kept.
+  // Only links whose re-anchored target does not exist are runtime-only.
+  // Escapes above the rootfs root (genuine `..` traversal) are never reached
+  // here — walk() rejects them as defense-in-depth.
   const rootResolved = path.resolve(treeDir);
+  function resolveInRoot(linkAbs, target) {
+    const resolved = path.isAbsolute(target)
+      ? path.join(rootResolved, target)
+      : path.resolve(path.dirname(linkAbs), target);
+    if (resolved === rootResolved) return resolved;
+    if (resolved.startsWith(rootResolved + path.sep)) return resolved;
+    return null; // escapes above the rootfs root
+  }
+  async function pathExists(p) {
+    try { await fs.lstat(p); return true; } catch { return false; }
+  }
   async function stripRuntimeOnly(rel) {
     const abs = rel === '' ? treeDir : path.join(treeDir, rel);
     const st = await fs.lstat(abs);
@@ -190,9 +208,16 @@ async function main() {
     }
     if (st.isSymbolicLink()) {
       const target = await fs.readlink(abs);
-      const resolved = path.resolve(path.dirname(abs), target);
-      if (!resolved.startsWith(rootResolved + path.sep) && resolved !== rootResolved) {
-        console.error(`build-runtime-rootfs: stripping escaping symlink ${rel} -> ${target} (runtime-only; /proc is mounted at chroot time)`);
+      const resolved = resolveInRoot(abs, target);
+      if (resolved === null) {
+        console.error(`build-runtime-rootfs: stripping escaping symlink ${rel} -> ${target} (climbs above rootfs root)`);
+        await fs.rm(abs, { force: true });
+        return;
+      }
+      // Keep absolute/relative links whose target exists in the rootfs; strip
+      // only dangling runtime-only links (target absent from the static tree).
+      if (!(await pathExists(resolved))) {
+        console.error(`build-runtime-rootfs: stripping dangling symlink ${rel} -> ${target} (target absent from rootfs; runtime-only)`);
         await fs.rm(abs, { force: true });
       }
       return; // do not recurse into symlink targets
@@ -216,12 +241,11 @@ async function main() {
     }
     if (st.isSymbolicLink()) {
       const target = await fs.readlink(abs);
-      const resolved = path.resolve(path.dirname(abs), target);
-      const rootRes = path.resolve(treeDir);
+      const resolved = resolveInRoot(abs, target);
       // Defense-in-depth: the pre-pass should have stripped any escaper, but
       // walk() mirrors the verifier's walkTree() exactly — it throws on any
-      // symlink that escapes the rootfs rather than ever recording it.
-      if (!resolved.startsWith(rootRes + path.sep) && resolved !== rootRes) {
+      // symlink that escapes above the rootfs root rather than ever recording it.
+      if (resolved === null) {
         die(`exported tree contains an escaping symlink: ${rel} -> ${target} — the pre-pass should have stripped this`, 2);
       }
       entries.push({

@@ -64,4 +64,18 @@ unblocked the hosted lane past the image-build step.
    `linux-lane-setup.ts` comment claiming the image ships node at
    `/usr/bin/node` is corrected.
 
+6. The symlink escape check (#4) false-positive'd on absolute targets: it
+   resolved them against the host root, so a legitimate in-rootfs absolute
+   link — the x86_64 ELF interpreter
+   `lib64/ld-linux-x86-64.so.2 -> /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2`
+   — was stripped, and the closure then failed to find the interpreter.
+   A rootfs is chrooted at runtime, so absolute targets are confined to the
+   rootfs root. The check now re-anchors absolute targets under the rootfs
+   root and rejects only genuine `..` traversal above root. The producer
+   pre-pass additionally strips dangling absolute links whose re-anchored
+   target is absent from the static rootfs (e.g. `etc/mtab -> /proc/mounts`,
+   where `/proc` is mounted at runtime) — those are runtime-only and a
+   path-traversal vector if declared. Legitimate absolute links whose target
+   exists in the rootfs (the interpreter) are kept.
+
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>

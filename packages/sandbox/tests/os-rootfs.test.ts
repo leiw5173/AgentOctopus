@@ -720,21 +720,45 @@ describe('verifyRuntimeArtifact — symlinks', () => {
     expect(link?.linkTarget).toBe('libfoo.so.1.0');
   });
 
-  it('rejects an escaping absolute symlink (etc/mtab -> /proc/mounts)', async () => {
+  it('rejects a symlink that climbs above the rootfs root via ..', async () => {
     const treeDir = await tmp('oct-tree-sym2-');
     const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: [] });
-    // The verifier must reject this even if the manifest declares it honestly —
-    // a symlink escaping the rootfs is a path-traversal vector regardless.
+    // A symlink whose target resolves above the rootfs root is a path-traversal
+    // vector. The verifier rejects this regardless of whether the manifest
+    // declares it honestly — defense-in-depth.
     const { artifactPath, manifest } = await buildArtifact(treeDir, [
       { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
       { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
     ], {
       nodePath: '/usr/bin/node',
-      symlinks: [{ rel: 'etc/mtab', target: '/proc/mounts' }],
+      symlinks: [{ rel: 'etc/escape', target: '../../etc/shadow' }],
     });
     const manifestPath = await writeManifest(path.dirname(artifactPath), manifest);
     await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
       .rejects.toThrow(/escapes rootfs/i);
+  });
+
+  it('accepts an absolute in-rootfs symlink (interpreter pattern)', async () => {
+    // The x86_64 runtime image's ELF interpreter is an absolute symlink
+    // lib64/ld-linux-x86-64.so.2 -> /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2.
+    // The rootfs is chrooted at runtime, so the absolute target resolves to a
+    // real in-rootfs file. The verifier must accept it (the producer keeps it
+    // because the re-anchored target exists in the tree).
+    const treeDir = await tmp('oct-tree-sym-abs-');
+    const realLoader = buildElf64({ interp: undefined, needed: [] });
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: [] });
+    const { artifactPath, manifest } = await buildArtifact(treeDir, [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib/x86_64-linux-gnu/ld-linux-x86-64.so.2', content: realLoader, mode: 0o755 },
+    ], {
+      nodePath: '/usr/bin/node',
+      symlinks: [{ rel: 'lib64/ld-linux-x86-64.so.2', target: '/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2' }],
+    });
+    const manifestPath = await writeManifest(path.dirname(artifactPath), manifest);
+    const got = await verifyRuntimeArtifact({ artifactPath, manifestPath });
+    const link = got.files.find((f) => f.path === 'lib64/ld-linux-x86-64.so.2');
+    expect(link?.kind).toBe('symlink');
+    expect(link?.linkTarget).toBe('/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2');
   });
 
   it('rejects a symlink whose on-disk linkTarget was tampered', async () => {

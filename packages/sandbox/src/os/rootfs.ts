@@ -400,17 +400,34 @@ interface WalkEntry {
 async function walkTree(root: string): Promise<WalkEntry[]> {
   const out: WalkEntry[] = [];
   const rootResolved = path.resolve(root);
+  // Resolve a symlink target as the runtime chroot would: absolute targets
+  // are re-anchored under the rootfs root (a chroot confines them there), and
+  // relative targets resolve against the link's parent directory. Returns the
+  // resolved absolute path, or null if the target escapes above the rootfs
+  // root (a genuine path-traversal vector). This mirrors snapshot.ts walk()
+  // but handles absolute targets correctly for a chrooted rootfs — a bare
+  // `path.resolve(parent, target)` would anchor absolute targets against the
+  // host root and false-positive on legitimate in-rootfs absolute links such
+  // as lib64/ld-linux-x86-64.so.2 -> /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2.
+  function resolveInRoot(linkAbs: string, target: string): string | null {
+    const resolved = path.isAbsolute(target)
+      ? path.join(rootResolved, target)
+      : path.resolve(path.dirname(linkAbs), target);
+    if (resolved === rootResolved) return resolved;
+    if (resolved.startsWith(rootResolved + path.sep)) return resolved;
+    return null; // escapes above the rootfs root
+  }
   async function walk(rel: string): Promise<void> {
     const abs = rel === '' ? root : path.join(root, rel);
     const st = await lstat(abs);
     if (st.isSymbolicLink()) {
       const target = await readlink(abs);
-      // Defense-in-depth: reject any symlink whose target resolves outside the
-      // rootfs (mirrors snapshot.ts walk()). The producer pre-pass strips the
-      // known runtime-only escapers (etc/mtab -> /proc/mounts), but a tampered
-      // artifact could still carry one; never let it into the manifest.
-      const resolved = path.resolve(path.dirname(abs), target);
-      if (!resolved.startsWith(rootResolved + path.sep) && resolved !== rootResolved) {
+      // Defense-in-depth: reject any symlink whose target resolves above the
+      // rootfs root (path-traversal vector). The producer pre-pass strips the
+      // known runtime-only dangling links (etc/mtab -> /proc/mounts), but a
+      // tampered artifact could still carry one; never let it into the manifest.
+      const resolved = resolveInRoot(abs, target);
+      if (resolved === null) {
         throw new RootfsError(`symlink escapes rootfs: ${rel} -> ${target}`);
       }
       out.push({
