@@ -88,6 +88,8 @@ export interface SandboxVmHelpers {
   verifyOuterReleaseManifest: (outerBytes: Buffer, signature: Buffer) =>
     | { ok: true; reason: 'ok' }
     | { ok: false; reason: 'no-key' | 'bad-signature' };
+  /** Canonical digest of a gate manifest body (sha256, minus manifestDigest). */
+  computeManifestDigest: (m: GateManifest) => string;
   GateManifestSchema: { parse: (u: unknown) => GateManifest };
   verifyVmTcb: (input: { artifactsDir: string; manifestPath: string }) =>
     Promise<VmTcbArtifacts>;
@@ -96,7 +98,7 @@ export interface SandboxVmHelpers {
 async function loadSandboxVm(): Promise<SandboxVmHelpers> {
   const gate = await import(/* @vite-ignore */ SANDBOX_DIST + '/gate-manifest.js') as Pick<
     SandboxVmHelpers,
-    'verifyGateManifest' | 'isRootfsQualified' | 'verifyOuterReleaseManifest' | 'GateManifestSchema'
+    'verifyGateManifest' | 'isRootfsQualified' | 'verifyOuterReleaseManifest' | 'computeManifestDigest' | 'GateManifestSchema'
   >;
   const tcb = await import(/* @vite-ignore */ SANDBOX_DIST + '/vm-helper-build.js') as Pick<
     SandboxVmHelpers,
@@ -167,6 +169,17 @@ export interface VmEngineOptions {
   releaseManifestPath?: string;
   /** Path to the outer release manifest Ed25519 signature (detached, base64). */
   releaseManifestSignaturePath?: string;
+  /**
+   * Fail closed when the signed release-manifest pair is ABSENT. Default
+   * false: an absent pair degrades softly to releaseManifest:'missing' so
+   * dev boxes and fork-PR CI lanes (no signing secret) stay usable.
+   * Production assembly (core's buildEngineOpts) sets this TRUE — a shipped
+   * native package IS a release build, so a missing signature pair is a
+   * tampered install, not a dev box. This compiled-in requirement is the
+   * "this is a release build" marker: deleting both files from an install
+   * cannot roll it back to unsigned dev mode.
+   */
+  requireReleaseSignature?: boolean;
   /** Directory holding the resolved rootfs artifact files (named by digest). */
   rootfsDir: string;
 }
@@ -275,64 +288,114 @@ export class VmEngineImpl implements VmEnginePort {
           gateReasons: gate.reasons,
         };
       }
-      // (3) Outer release-manifest signature (Ed25519), if both manifest +
-      //     signature paths are wired. Distinguish four states:
-      //       - both files absent → 'missing' (dev box capability probe stays soft)
-      //       - both present, key unavailable ('no-key') → fail-closed
-      //         'signature-invalid' + available:false. A present-but-unverifiable
-      //         signature is NOT a capability probe — it means a release manifest
-      //         shipped but the trust root (release-key.ts) was never committed.
-      //         The empty-placeholder bootstrap must fail loud on any real release
-      //         attempt until RELEASE_PUBLIC_KEY_BASE64 is committed.
-      //       - both present, signature invalid ('bad-signature') → fail-closed
-      //         with 'signature-invalid' and available:false
-      //       - both present, signature valid → 'verified', available true
+      // (3) Outer release-manifest signature (Ed25519) — a fail-closed state
+      //     machine over the detached pair (release-manifest.json + .sig):
+      //       - EXACTLY ONE file present → fail closed ('signature-invalid').
+      //         A half-pair only exists through deletion or a half-shipped
+      //         release — the producer writes both atomically and the pack job
+      //         enforces both — so deleting the .sig must never degrade a
+      //         signed build to unsigned mode.
+      //       - BOTH present → read + verify + BIND. Any failure — a TOCTOU
+      //         read error (file deleted between existsSync and read), an
+      //         unparseable signed body, 'bad-signature', 'no-key', or a
+      //         signed body that does not match the gate manifest loaded in
+      //         step (2) — fails closed.
+      //       - NEITHER present → soft 'missing' (dev box / fork-PR lane with
+      //         no signing secret) UNLESS opts.requireReleaseSignature is set
+      //         → fail closed. Production assembly (core's buildEngineOpts)
+      //         sets it, so deleting BOTH files from an installed release
+      //         cannot roll it back to unsigned dev mode.
       let releaseManifest: 'verified' | 'missing' | 'signature-invalid' = 'missing';
-      // File-EXISTENCE check, not a truthy-path check: buildEngineOpts always
-      // fills both paths with prebuilds defaults, so a path being set says
-      // nothing about whether a signed manifest actually shipped. Absent files
-      // (dev box, unsigned dev build, fork-PR lane with no signing secret) are
-      // the soft 'missing' case — the capability probe stays up. Treating the
-      // paths as a promise and letting readFile throw ENOENT would fail-closed
-      // to unavailable here, defeating the documented soft path.
-      const haveReleaseManifest =
-        !!this.opts.releaseManifestPath && !!this.opts.releaseManifestSignaturePath &&
-        existsSync(this.opts.releaseManifestPath) &&
-        existsSync(this.opts.releaseManifestSignaturePath);
-      if (haveReleaseManifest) {
-        let outerBytes: Buffer | undefined;
-        let sigB64: string | undefined;
+      const releasePairWired =
+        !!this.opts.releaseManifestPath && !!this.opts.releaseManifestSignaturePath;
+      const manifestExists = releasePairWired && existsSync(this.opts.releaseManifestPath!);
+      const sigExists = releasePairWired && existsSync(this.opts.releaseManifestSignaturePath!);
+      if (releasePairWired && manifestExists !== sigExists) {
+        return {
+          available: false,
+          platform: this.deps.platform,
+          reason: 'release manifest pair incomplete: exactly one of release-manifest.json / release-manifest.json.sig is present (deletion or half-shipped release)',
+          gateManifest: 'verified',
+          releaseManifest: 'signature-invalid',
+        };
+      }
+      if (manifestExists && sigExists) {
+        let outerBytes: Buffer;
+        let sigB64: string;
         try {
           [outerBytes, sigB64] = await Promise.all([
             readFile(this.opts.releaseManifestPath!),
             readFile(this.opts.releaseManifestSignaturePath!, 'utf8'),
           ]);
         } catch (err) {
-          // TOCTOU defense: a file removed between the existsSync gate and the
-          // read degrades to 'missing' (soft) rather than failing the probe.
-          // Any other read error is a real fault and rethrows to the envelope.
-          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+          // TOCTOU: a file removed between the existsSync gate and the read is
+          // the same deletion attack as the half-pair case — fail CLOSED,
+          // never soft-degrade to 'missing'.
+          return {
+            available: false,
+            platform: this.deps.platform,
+            reason: `release manifest unreadable during probe: ${err instanceof Error ? err.message : String(err)}`,
+            gateManifest: 'verified',
+            releaseManifest: 'signature-invalid',
+          };
         }
-        if (outerBytes !== undefined && sigB64 !== undefined) {
-          const signature = Buffer.from(sigB64.trim(), 'base64');
-          const verifyResult = sv.verifyOuterReleaseManifest(outerBytes, signature);
-          if (verifyResult.ok) {
-            releaseManifest = 'verified';
-          } else if (verifyResult.reason === 'bad-signature' || verifyResult.reason === 'no-key') {
-            // Both reasons are fail-closed when a release manifest is PRESENT:
-            // bad-signature = tampered/wrong-key; no-key = trust root never
-            // committed. Neither is acceptable for a claimed signed release.
-            return {
-              available: false,
-              platform: this.deps.platform,
-              reason: verifyResult.reason === 'no-key'
-                ? 'release manifest present but trust root key not committed (release-key.ts placeholder)'
-                : 'outer release manifest signature invalid',
-              gateManifest: 'verified',
-              releaseManifest: 'signature-invalid',
-            };
-          }
+        const signature = Buffer.from(sigB64.trim(), 'base64');
+        const verifyResult = sv.verifyOuterReleaseManifest(outerBytes, signature);
+        if (!verifyResult.ok) {
+          // bad-signature = tampered/wrong-key; no-key = trust root never
+          // committed. Neither is acceptable for a claimed signed release.
+          return {
+            available: false,
+            platform: this.deps.platform,
+            reason: verifyResult.reason === 'no-key'
+              ? 'release manifest present but trust root key not committed (release-key.ts placeholder)'
+              : 'outer release manifest signature invalid',
+            gateManifest: 'verified',
+            releaseManifest: 'signature-invalid',
+          };
         }
+        // BINDING: the Ed25519 signature covers the release-manifest BYTES
+        // alone. Without binding those bytes to the gate manifest actually
+        // loaded + verified in step (2), an attacker keeps a legitimately-
+        // signed OLD release-manifest.json while replacing gate-manifest.json
+        // + the TCB manifest + the binaries: the gate self-hash still passes
+        // (self-consistent) and the signature verifies an unrelated file.
+        // Parse the signed body and require canonical-digest equality with
+        // the loaded gate manifest. Byte-comparing the files is impossible
+        // (the producer signs compact JSON.stringify output; the on-disk
+        // gate-manifest.json is pretty-printed), so compare
+        // computeManifestDigest — sha256 over the canonical JSON body minus
+        // the manifestDigest field.
+        let signedManifest: GateManifest;
+        try {
+          signedManifest = sv.GateManifestSchema.parse(JSON.parse(outerBytes.toString('utf8')));
+        } catch (err) {
+          return {
+            available: false,
+            platform: this.deps.platform,
+            reason: `signed release manifest body is not a valid gate manifest: ${err instanceof Error ? err.message : String(err)}`,
+            gateManifest: 'verified',
+            releaseManifest: 'signature-invalid',
+          };
+        }
+        if (sv.computeManifestDigest(signedManifest) !== sv.computeManifestDigest(gateManifest)) {
+          return {
+            available: false,
+            platform: this.deps.platform,
+            reason: 'signed release manifest does not bind to the loaded gate manifest (canonical digest mismatch)',
+            gateManifest: 'verified',
+            releaseManifest: 'signature-invalid',
+          };
+        }
+        releaseManifest = 'verified';
+      } else if (this.opts.requireReleaseSignature) {
+        return {
+          available: false,
+          platform: this.deps.platform,
+          reason: 'release manifest required (requireReleaseSignature) but no signed release-manifest pair is present',
+          gateManifest: 'verified',
+          releaseManifest: 'missing',
+        };
       }
       // (4) Real BLK feature probe via the TCB-verified helper. Fail-closed:
       //     if libkrun was not built with KRUN_FEATURE_BLK, the helper exits 1.

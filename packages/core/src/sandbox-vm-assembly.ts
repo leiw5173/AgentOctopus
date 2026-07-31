@@ -108,9 +108,12 @@ function buildEngineOpts(config: SandboxConfig): VmEngineOptions {
   // Default the detached release-manifest pair to the prebuilds dir so a
   // shipped native package is verified end-to-end with no extra config. The
   // producer (sign-release-manifest.mjs) writes exactly these two filenames.
-  // The paths are always set; engine.probe() checks file EXISTENCE itself —
-  // when neither file is present (dev box, unsigned dev build) it degrades to
-  // releaseManifest:'missing' (soft, capability probe stays up).
+  // requireReleaseSignature:true makes ABSENCE fail closed — production
+  // assembly is a release build, so a missing signature pair means a tampered
+  // install, not a dev box. This compiled-in flag is the unremovable "release
+  // build" marker: deleting both files cannot roll an install back to unsigned
+  // dev mode. The soft 'missing' degradation survives only where engine opts
+  // are built WITHOUT the flag (dev boxes, the vm-lane CI harness).
   const releaseManifestPath = vm?.releaseManifestPath ?? path.join(prebuilds, 'release-manifest.json');
   const releaseManifestSignaturePath = vm?.releaseManifestSignaturePath ?? path.join(prebuilds, 'release-manifest.json.sig');
   const rootfsDir = vm?.rootfsDir ?? path.join(prebuilds, 'rootfs');
@@ -121,6 +124,7 @@ function buildEngineOpts(config: SandboxConfig): VmEngineOptions {
     gateManifestPath,
     releaseManifestPath,
     releaseManifestSignaturePath,
+    requireReleaseSignature: true,
     rootfsDir,
   };
 }

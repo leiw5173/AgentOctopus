@@ -76,8 +76,25 @@ Fail-closed semantics:
 - **Manifest present, signature invalid or key missing** → `probe()` returns
   `available:false` + `releaseManifest:'signature-invalid'`. The VM backend is
   unavailable rather than running on an unverified TCB.
-- **Manifest absent** (dev box, unsigned dev build) → soft
-  `releaseManifest:'missing'`; the capability probe stays up.
+- **Signed body does not bind to the loaded gate manifest** → after the
+  signature verifies, `probe()` parses the signed body and requires
+  canonical-digest (`computeManifestDigest`) equality with the
+  gate-manifest.json actually loaded and verified. This closes the mixed-state
+  attack: a legitimately-signed OLD release manifest cannot authorize a swapped
+  gate manifest, TCB manifest, or binaries.
+- **Half pair — only one of `release-manifest.json` / `.sig` present** → fail
+  closed unconditionally (`signature-invalid`). The producer writes both
+  atomically and pack enforces both, so a half pair means deletion or a
+  half-shipped release — deleting the `.sig` never degrades a signed build to
+  unsigned mode. A file deleted between the existence check and the read
+  (TOCTOU) also fails closed.
+- **Pair absent** → fail closed when the engine is built with
+  `requireReleaseSignature` — which production assembly (core's
+  `buildEngineOpts`) compiles in: a shipped native package is a release build,
+  so a missing signature pair is a tampered install, and deleting both files
+  cannot roll it back to dev mode. Without the flag (dev boxes, the vm-lane CI
+  harness) an absent pair degrades softly to `releaseManifest:'missing'` and
+  the capability probe stays up.
 
 Release infrastructure:
 

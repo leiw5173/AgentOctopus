@@ -31,6 +31,7 @@ vi.mock('@agentoctopus/sandbox/dist/vm/gate-manifest.js', () => ({
   isRootfsQualified: vi.fn(),
   GateManifestSchema: { parse: vi.fn() },
   verifyOuterReleaseManifest: vi.fn(),
+  computeManifestDigest: vi.fn(),
 }));
 
 vi.mock('@agentoctopus/sandbox/dist/vm/vm-helper-build.js', () => ({
@@ -581,6 +582,15 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // Probe-time binding check (R3-F1) compares canonical digests of the
+    // loaded gate manifest and the signed release-manifest body. Mirror the
+    // real algorithm's observable behavior for these fixtures: the digest is
+    // a pure function of the body, and validGateBody() is self-consistent, so
+    // keying on the manifestDigest field gives equality for identical bodies
+    // and inequality for distinct ones — which is all the binding test needs.
+    vi.mocked(gateManifest.computeManifestDigest).mockImplementation(
+      (m) => (m as { manifestDigest?: string }).manifestDigest ?? '',
+    );
     vi.mocked(tcbManifest.verifyVmTcb).mockResolvedValue({
       helper: '/fake/helper',
       libkrun: '/fake/libkrun.dylib',
@@ -724,12 +734,14 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
   });
 
-  // F4: buildEngineOpts ALWAYS fills both release-manifest paths with prebuilds
-  // defaults, so the production wiring is indistinguishable from a dev box with
-  // no signed manifest by the paths alone. probe() must existence-check the
-  // files and soft-degrade to 'missing' — NOT let readFile's ENOENT fall into
-  // the outer catch as available:false (which made every unsigned dev-box /
-  // fork-PR probe fail closed instead of degrading).
+  // F4/R3-F2: buildEngineOpts ALWAYS fills both release-manifest paths with
+  // prebuilds defaults, so the production wiring is indistinguishable from a
+  // dev box with no signed manifest by the paths alone. probe() must
+  // existence-check the files; when NEITHER is present and the engine is not
+  // built with requireReleaseSignature (dev box, vm-lane CI harness), it
+  // soft-degrades to 'missing' — NOT readFile ENOENT in the outer catch.
+  // (requireReleaseSignature:true — production assembly — fails closed on the
+  // same absent pair; see the R3-F2 test below.)
   it('F4: paths wired but both files absent → soft missing, probe stays available', async () => {
     const gateBody = validGateBody();
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
@@ -747,14 +759,19 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
   });
 
-  it('F4: only one of the pair present → treated as absent (soft missing)', async () => {
+  // R3-F2 (reverses the old F4 half-pair test): a half-pair — exactly one of
+  // release-manifest.json / .sig present — must FAIL CLOSED. The producer
+  // writes both files atomically and the pack job enforces both, so a
+  // half-pair only exists through deletion or a half-shipped release; letting
+  // it soft-degrade to 'missing' let an attacker bypass the release trust
+  // root by deleting the .sig.
+  it('R3-F2: only the manifest present (sig deleted) → fails closed', async () => {
     const gateBody = validGateBody();
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
     vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
     const releaseManifest = path.join(tempDir, 'release-manifest.json');
     await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
-    // Signature file deliberately absent — a half-shipped pair degrades to
-    // 'missing' (the pack-time TCB enforcement catches half-pairs in CI).
+    // Signature file deliberately absent.
     const engine = makeProbeEngine({
       releaseManifestPath: releaseManifest,
       releaseManifestSignaturePath: path.join(tempDir, 'release-manifest.json.sig'),
@@ -762,9 +779,123 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
-    expect(r.available).toBe(true);
-    expect(r.releaseManifest).toBe('missing');
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('signature-invalid');
+    expect(r.reason).toMatch(/pair incomplete/i);
     expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
+  });
+
+  it('R3-F2: only the signature present (manifest deleted) → fails closed', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
+    await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
+    // Manifest file deliberately absent.
+    const engine = makeProbeEngine({
+      releaseManifestPath: path.join(tempDir, 'release-manifest.json'),
+      releaseManifestSignaturePath: releaseSig,
+    });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('signature-invalid');
+    expect(r.reason).toMatch(/pair incomplete/i);
+  });
+
+  it('R3-F2: a read failure between existsSync and readFile (TOCTOU deletion) fails closed', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    // A DIRECTORY at the manifest path passes existsSync but makes readFile
+    // throw EISDIR — standing in for a file deleted mid-probe. The old code
+    // soft-degraded on ENOENT here; any read error must now fail closed.
+    const releaseManifest = path.join(tempDir, 'release-manifest.json');
+    await fsPromises.mkdir(releaseManifest);
+    await fsPromises.writeFile(releaseManifest + '.sig', Buffer.alloc(64, 0).toString('base64') + '\n');
+    const engine = makeProbeEngine({
+      releaseManifestPath: releaseManifest,
+      releaseManifestSignaturePath: releaseManifest + '.sig',
+    });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('signature-invalid');
+    expect(r.reason).toMatch(/unreadable during probe/i);
+  });
+
+  it('R3-F2: requireReleaseSignature + absent pair → fails closed (release build marker)', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    // Production assembly (core buildEngineOpts) sets requireReleaseSignature;
+    // deleting BOTH files from an installed release must not roll it back to
+    // the soft 'missing' dev-box path.
+    const engine = makeProbeEngine({
+      releaseManifestPath: path.join(tempDir, 'release-manifest.json'),
+      releaseManifestSignaturePath: path.join(tempDir, 'release-manifest.json.sig'),
+      requireReleaseSignature: true,
+    });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('missing');
+    expect(r.gateManifest).toBe('verified');
+    expect(r.reason).toMatch(/requireReleaseSignature|required/i);
+    expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
+  });
+
+  // R3-F1: the Ed25519 signature covers the release-manifest bytes alone;
+  // probe() must BIND those bytes to the gate manifest it actually loaded and
+  // verified. Otherwise an attacker keeps a legitimately-signed OLD release
+  // manifest while swapping gate-manifest.json + TCB manifest + binaries: the
+  // gate self-hash passes and the signature verifies an unrelated file.
+  it('R3-F1: a valid signature over a DIFFERENT gate manifest fails closed (binding)', async () => {
+    const gateBody = validGateBody();
+    // Same shape, different canonical digest — an attacker's swapped-in gate
+    // manifest that is self-consistent with replaced binaries.
+    const swappedBody = { ...validGateBody(), manifestDigest: sha('y'), qualifiedAt: '2020-01-01T00:00:00.000Z' };
+    vi.mocked(gateManifest.GateManifestSchema.parse)
+      .mockReturnValueOnce(gateBody)     // step (2): loading gate-manifest.json
+      .mockReturnValueOnce(swappedBody); // step (3): parsing the signed body
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: true, reason: 'ok' });
+    const releaseManifest = path.join(tempDir, 'release-manifest.json');
+    const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
+    await fsPromises.writeFile(releaseManifest, JSON.stringify(swappedBody));
+    await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
+    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('signature-invalid');
+    expect(r.reason).toMatch(/does not bind|digest mismatch/i);
+  });
+
+  it('R3-F1: a signed body that fails schema parse fails closed', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse)
+      .mockReturnValueOnce(gateBody) // step (2): gate-manifest.json loads fine
+      .mockImplementationOnce(() => {
+        throw new Error('strict schema reject');
+      });
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: true, reason: 'ok' });
+    const releaseManifest = path.join(tempDir, 'release-manifest.json');
+    const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
+    await fsPromises.writeFile(releaseManifest, '{"not":"a gate manifest"}');
+    await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
+    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('signature-invalid');
+    expect(r.reason).toMatch(/not a valid gate manifest/i);
   });
 });
 
