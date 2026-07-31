@@ -36,7 +36,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pnpm --filter @agentoctopus/sandbox build
+          # Build core AND its workspace deps (skills, registry, adapters, sandbox,
+          # sandbox-vm-native): the MCP stdio e2e step runs vitest in packages/core,
+          # which transitively imports @agentoctopus/skills (main: ./dist/index.js).
+          # Building only sandbox leaves skills/registry/adapters unbuilt, so Vite
+          # fails to resolve @agentoctopus/skills' entry on CI. The dependency
+          # suffix (`...`) builds core plus everything it depends on, in topo order.
+          pnpm --filter "@agentoctopus/core..." build
           env_file="$(mktemp)"
           pnpm --silent --filter @agentoctopus/sandbox security:images -- --print-env > "$env_file"
 
