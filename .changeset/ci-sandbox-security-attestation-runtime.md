@@ -78,4 +78,20 @@ unblocked the hosted lane past the image-build step.
    path-traversal vector if declared. Legitimate absolute links whose target
    exists in the rootfs (the interpreter) are kept.
 
+7. The `hosted-docker-proxy` lane failed the "uses the exact command argv
+   with no image entrypoint mangling" test: `runProbe('argv', { command:
+   ['node', '/skill/probe.js', 'alpha', 'two words'] })` returned
+   `result.json.argv === undefined` despite `exitCode === 0`. Root cause:
+   commit `dc6eeec` (privileged-Linux lane) flipped the probe's action
+   resolution from env-only to `process.argv[2] ?? process.env.PROBE_ACTION`
+   so the env-stripped OS lane could pass the action as argv. But the Docker
+   `argv` test places a payload (`'alpha'`) at argv[2] AND sets
+   `PROBE_ACTION='argv'` — so argv[2] shadowed the action, the `argv`
+   branch never fired, no JSON was emitted, and `parseProbeJson` returned
+   `{}`. The probe now resolves env-first
+   (`process.env.PROBE_ACTION ?? process.argv[2]`): the Docker lane always
+   sets `PROBE_ACTION`, so argv is free to hold test payloads; the OS/VM
+   lanes strip env (`PROBE_ACTION` is not on their allowlist), so they fall
+   through to argv[2] unchanged — a no-op for the env-stripped lanes.
+
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>

@@ -14,8 +14,13 @@
  * clears the environment and installs only a tiny SAFE allowlist), so the
  * action is passed as the SECOND argv element after the script path
  * (`node /skill/probe.js <action>`). The Docker backend passes it via the
- * `PROBE_ACTION` env var. The probe accepts BOTH (`process.argv[2] ??
- * process.env.PROBE_ACTION`) so one script serves both lanes.
+ * `PROBE_ACTION` env var. The probe accepts BOTH, env-first
+ * (`process.env.PROBE_ACTION ?? process.argv[2]`) so one script serves both
+ * lanes: the env-stripped OS/VM lanes fall through to argv[2], while the
+ * Docker lane — which always sets PROBE_ACTION — lets argv hold a test
+ * payload (e.g. the argv-mangling test's 'alpha') without shadowing the
+ * action. Env-first is safe because PROBE_ACTION is not on the OS/VM env
+ * allowlist (it is stripped), so it is only ever set on the Docker lane.
  *
  * Actions:
  *   argv              — { argv: process.argv.slice(2) }  (exact argv, no entrypoint mangling)
@@ -39,7 +44,13 @@ export const LANE_PROBE_SCRIPT = `import { readFileSync, writeFileSync, statSync
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
 
-const action = process.argv[2] ?? process.env.PROBE_ACTION;
+// Env-first so a probe action never collides with argv-payload test cases:
+// the Docker lane always sets PROBE_ACTION (and may also place a payload arg at
+// argv[2], e.g. the argv-mangling test's 'alpha'); the OS/VM lanes strip env
+// and pass the action as argv[2]. Env-first lets Docker tests put payloads in
+// argv without shadowing the action, while the env-stripped lanes fall through
+// to argv[2] unchanged.
+const action = process.env.PROBE_ACTION ?? process.argv[2];
 const emit = (obj) => { process.stdout.write(JSON.stringify(obj) + '\\n'); };
 
 function tcpOk(host, port, ms) {
