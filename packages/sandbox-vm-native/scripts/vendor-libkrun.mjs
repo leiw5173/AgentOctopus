@@ -307,7 +307,8 @@ async function writeArtifactManifest(libPath, manifestPath, pin) {
     source: pin,
   };
   await writeAtomic(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
-  return { sha256: sha, size: st.size, mode: st.mode & 0o777 };
+  // Return the full manifest (callers read `.artifact.sha256`/`.artifact.size`).
+  return manifest;
 }
 
 // ---------------------------------------------------------------------------
