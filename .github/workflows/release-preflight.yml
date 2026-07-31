@@ -17,6 +17,13 @@ jobs:
   sandbox-security:
     name: Sandbox Security
     uses: ./.github/workflows/sandbox-security.yml
+    # Reusable workflows do NOT receive the caller's secrets automatically
+    # (GitHub requires jobs.<id>.secrets or `secrets: inherit`). The vm-lane
+    # and privileged-linux signing steps need OCTOPUS_VM_RELEASE_PRIVATE_KEY;
+    # without this, both fail under workflow_call and the security gate can
+    # never pass on a master push. Preflight triggers only on push:master
+    # (never fork PRs), so inheriting secrets crosses no trust boundary.
+    secrets: inherit
 
   validate-version:
     name: 🔍 Validate Version
