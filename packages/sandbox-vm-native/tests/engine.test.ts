@@ -649,6 +649,80 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     expect(r.blkFeature).toBe('absent');
     expect(r.reason).toMatch(/BLK|probe/i);
   });
+
+  // F3: when a release manifest is PRESENT (both files wired), the verifier's
+  // 'bad-signature' and 'no-key' results must BOTH fail closed with
+  // releaseManifest:'signature-invalid' + available:false. A present-but-
+  // unverifiable signature is not a capability probe — it means a signed
+  // release shipped but the trust root (release-key.ts) was never committed
+  // (no-key), or the signature is wrong/tampered (bad-signature). The empty
+  // placeholder bootstrap must fail loud until RELEASE_PUBLIC_KEY_BASE64 is set.
+  it('F3: a present release manifest with a bad signature fails closed', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const releaseManifest = path.join(tempDir, 'release-manifest.json');
+    const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
+    await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
+    await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
+    vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: false, reason: 'bad-signature' });
+    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('signature-invalid');
+    expect(r.reason).toMatch(/signature invalid/i);
+  });
+
+  it('F3: a present release manifest with no committed trust root (no-key) fails closed', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const releaseManifest = path.join(tempDir, 'release-manifest.json');
+    const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
+    await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
+    await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
+    vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: false, reason: 'no-key' });
+    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.releaseManifest).toBe('signature-invalid');
+    expect(r.reason).toMatch(/trust root key not committed|no-key/i);
+  });
+
+  it('F3: a present release manifest with a valid signature verifies (releaseManifest:verified)', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const releaseManifest = path.join(tempDir, 'release-manifest.json');
+    const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
+    await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
+    await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
+    vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: true, reason: 'ok' });
+    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(true);
+    expect(r.releaseManifest).toBe('verified');
+  });
+
+  it('F3: with NO release manifest files wired, releaseManifest stays missing (soft dev-box path)', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    // No releaseManifestPath / releaseManifestSignaturePath in opts.
+    const engine = makeProbeEngine();
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(true);
+    expect(r.releaseManifest).toBe('missing');
+    expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
+  });
 });
 
 describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {

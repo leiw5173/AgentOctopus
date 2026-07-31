@@ -276,10 +276,14 @@ export class VmEngineImpl implements VmEnginePort {
         };
       }
       // (3) Outer release-manifest signature (Ed25519), if both manifest +
-      //     signature paths are wired. Distinguish three states:
+      //     signature paths are wired. Distinguish four states:
       //       - both files absent → 'missing' (dev box capability probe stays soft)
-      //       - both present, key unavailable ('no-key') → 'missing' (still a
-      //         capability probe, because we have not claimed a signed release)
+      //       - both present, key unavailable ('no-key') → fail-closed
+      //         'signature-invalid' + available:false. A present-but-unverifiable
+      //         signature is NOT a capability probe — it means a release manifest
+      //         shipped but the trust root (release-key.ts) was never committed.
+      //         The empty-placeholder bootstrap must fail loud on any real release
+      //         attempt until RELEASE_PUBLIC_KEY_BASE64 is committed.
       //       - both present, signature invalid ('bad-signature') → fail-closed
       //         with 'signature-invalid' and available:false
       //       - both present, signature valid → 'verified', available true
@@ -295,16 +299,20 @@ export class VmEngineImpl implements VmEnginePort {
         const verifyResult = sv.verifyOuterReleaseManifest(outerBytes, signature);
         if (verifyResult.ok) {
           releaseManifest = 'verified';
-        } else if (verifyResult.reason === 'bad-signature') {
+        } else if (verifyResult.reason === 'bad-signature' || verifyResult.reason === 'no-key') {
+          // Both reasons are fail-closed when a release manifest is PRESENT:
+          // bad-signature = tampered/wrong-key; no-key = trust root never
+          // committed. Neither is acceptable for a claimed signed release.
           return {
             available: false,
             platform: this.deps.platform,
-            reason: 'outer release manifest signature invalid',
+            reason: verifyResult.reason === 'no-key'
+              ? 'release manifest present but trust root key not committed (release-key.ts placeholder)'
+              : 'outer release manifest signature invalid',
             gateManifest: 'verified',
             releaseManifest: 'signature-invalid',
           };
         }
-        // 'no-key' falls through to 'missing' (capability probe, not a failure).
       }
       // (4) Real BLK feature probe via the TCB-verified helper. Fail-closed:
       //     if libkrun was not built with KRUN_FEATURE_BLK, the helper exits 1.

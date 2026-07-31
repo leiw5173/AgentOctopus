@@ -25,8 +25,20 @@
  * parsed object so key order is stable). The signature is base64.
  *
  * Output:
- *   prebuilds/<platform>/outer-release-manifest.json
- *     { manifest: <gate-manifest body>, signature: <base64 ed25519> }
+ *   prebuilds/<platform>/release-manifest.json       — the raw canonical gate-manifest body
+ *                                                       (the EXACT bytes the signature covers).
+ *   prebuilds/<platform>/release-manifest.json.sig   — base64 Ed25519 signature over those bytes.
+ *   prebuilds/<platform>/outer-release-manifest.json — enveloped bundle
+ *                                                       { manifest, signature, signedBy, signedAt }
+ *                                                       for human inspection; NOT what the
+ *                                                       verifier reads.
+ *
+ * The verifier (gate-manifest.ts:verifyOuterReleaseManifest) reads TWO files
+ * (release-manifest.json + release-manifest.json.sig) and verifies the signature
+ * over the raw body bytes. The enveloped outer-*.json is a readable artifact
+ * only — feeding it as releaseManifestPath would verify the signature over the
+ * ENVELOPE json (which includes signature/signedAt), not the body, and always
+ * fail. The detached pair is the producer↔verifier contract.
  *
  * Fail-closed everywhere: missing private key on a non-bootstrap run, missing
  * gate-manifest.json, or signature verification failure exits non-zero.
@@ -125,16 +137,11 @@ function publicKeyToBase64Spki(pubKey) {
 function signManifest(manifestBody, privateKey) {
   // Canonical JSON: JSON.stringify of the parsed object (stable key order
   // for a given object shape). This matches computeManifestDigest's
-  // canonicalization (gate-manifest.ts:30).
+  // canonicalization (gate-manifest.ts:30). The verifier reads these exact
+  // bytes from release-manifest.json, so what we sign here is what verifies.
   const canonical = Buffer.from(JSON.stringify(manifestBody), 'utf8');
   const signature = sign(null, canonical, privateKey);
   return { canonical, signature: signature.toString('base64') };
-}
-
-function verifySignature(manifestBody, signatureB64, publicKey) {
-  const canonical = Buffer.from(JSON.stringify(manifestBody), 'utf8');
-  const sig = Buffer.from(signatureB64, 'base64');
-  return verify(null, canonical, publicKey, sig);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,14 +196,32 @@ const gateManifest = JSON.parse(await fs.readFile(gateManifestPath, 'utf8'));
 // manifestDigest — the signature covers the digest, so any tampering with
 // the body that changes the digest is caught by BOTH the digest check AND
 // the signature).
-const { signature } = signManifest(gateManifest, privateKey);
+const { canonical, signature } = signManifest(gateManifest, privateKey);
 
 // Self-verify: prove the signature validates against the derived public key
-// before writing it. This catches a malformed private key early.
+// before writing it. This catches a malformed private key early. Verify over
+// the SAME canonical bytes the verifier will read from release-manifest.json.
 const publicKey = createPublicKey(privateKey);
-const ok = verifySignature(gateManifest, signature, publicKey);
+const ok = verify(null, canonical, publicKey, Buffer.from(signature, 'base64'));
 if (!ok) die('internal error: signature failed self-verification — the private key is malformed.');
 
+// Detached pair (producer↔verifier contract): write the raw canonical body the
+// signature covers, plus the base64 signature. The verifier reads both files
+// and verifies over the body bytes. Atomic per-file (tmp+rename) so a crash
+// never leaves a half-written manifest that verifies against stale bytes.
+const detachedManifestPath = path.join(targetDir, 'release-manifest.json');
+const detachedSigPath = path.join(targetDir, 'release-manifest.json.sig');
+
+async function writeAtomic(filePath, contents) {
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(tmp, contents);
+  await fs.rename(tmp, filePath);
+}
+await writeAtomic(detachedManifestPath, canonical);
+await writeAtomic(detachedSigPath, signature + '\n');
+
+// Enveloped bundle (human-readable only — NOT read by the verifier). Kept so an
+// operator can inspect manifest + signature + signer in one file.
 const outer = {
   schemaVersion: 1,
   manifest: gateManifest,
@@ -204,13 +229,12 @@ const outer = {
   signedBy: 'octopus-vm-release',
   signedAt: new Date().toISOString(),
 };
-
-const tmp = outerManifestPath + `.tmp-${process.pid}-${Date.now()}`;
-await fs.writeFile(tmp, JSON.stringify(outer, null, 2) + '\n');
-await fs.rename(tmp, outerManifestPath);
+await writeAtomic(outerManifestPath, JSON.stringify(outer, null, 2) + '\n');
 
 console.log('sign-release-manifest: OK');
-console.log(`  outer:     ${outerManifestPath}`);
+console.log(`  detached manifest: ${detachedManifestPath}`);
+console.log(`  detached signature: ${detachedSigPath}`);
+console.log(`  enveloped bundle:  ${outerManifestPath} (readable only)`);
 console.log(`  signature: ${signature.slice(0, 32)}...`);
 console.log(`  pubkey:    ${publicKeyToBase64Spki(publicKey).slice(0, 32)}...`);
 console.log('  Verify with verifyOuterReleaseManifest() (gate-manifest.ts) at launch time.');

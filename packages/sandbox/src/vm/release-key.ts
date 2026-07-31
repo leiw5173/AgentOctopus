@@ -5,9 +5,12 @@
 //
 // TODO: replace this placeholder with the real base64 DER SPKI Ed25519 public key
 // produced by `sign-release-manifest.mjs --bootstrap` (or the release CI task)
-// before the first production release that exercises VM release signing. Until
-// then the VM backend treats a present-but-unsigned release manifest as an
-// invalid signature and fails closed.
+// before the first production release that ships a signed release manifest. Until
+// then: a PRESENT release-manifest.json + .sig pair with this empty trust root
+// makes engine.probe() return available:false + releaseManifest:'signature-invalid'
+// (the 'no-key' result is fail-closed when a manifest is present — a present-but-
+// unverifiable signature is not a capability probe). When no release manifest is
+// present (dev box), probe() stays soft with releaseManifest:'missing'.
 export const RELEASE_PUBLIC_KEY_BASE64 = '';
 
 // EXPLICIT TEST SEAM ONLY. Tests and pre-release CI may inject a throwaway
