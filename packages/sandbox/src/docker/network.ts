@@ -11,9 +11,21 @@ export async function createInternalNetwork(name: string): Promise<string> {
   return res.stdout.trim();
 }
 
+/**
+ * Fixed subnet for the egress bridge. Docker only honors a user-specified
+ * `--ip` on container attach when the network was created with an explicit
+ * `--subnet` ("user specified IP address is supported only when connecting to
+ * networks with user configured subnets"). The topology tests attach the
+ * upstream fixture with a static `.200` IP, so the egress network must carry
+ * a user-configured subnet. 10.201.0.0/24 is a private range outside Docker's
+ * default 172.17-172.29 auto-allocation pool, avoiding overlap with the
+ * default bridge and other auto-created user networks.
+ */
+const EGRESS_SUBNET = '10.201.0.0/24';
+
 /** Create the trusted ordinary bridge used only by the proxy sidecar for upstream egress (NOT --internal). Returns network id. */
 export async function createEgressNetwork(name: string): Promise<string> {
-  const res = await runDocker(['network', 'create', name]);
+  const res = await runDocker(['network', 'create', '--subnet', EGRESS_SUBNET, name]);
   if (res.code !== 0) throw new NetworkError(`failed to create egress network ${name}: ${res.stderr.trim()}`);
   return res.stdout.trim();
 }

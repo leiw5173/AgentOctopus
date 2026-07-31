@@ -101,6 +101,10 @@ jobs:
           while IFS='=' read -r name value; do
             case "$name" in
               OCTOPUS_TEST_RUNTIME_IMAGE) runtime_digest="$value" ;;
+              # security:images also emits OCTOPUS_TEST_PROXY_IMAGE; the producer
+              # exports only the runtime rootfs, so ignore the proxy line rather
+              # than fail on an expected output name.
+              OCTOPUS_TEST_PROXY_IMAGE) ;;
               '') ;;
               *) echo "ERROR: unexpected security image output name: $name" >&2; exit 1 ;;
             esac
