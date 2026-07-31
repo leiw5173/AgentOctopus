@@ -11,7 +11,13 @@
  *   2. Render the Dockerfiles with those EXACT refs into a staging context.
  *      Never accepts an arbitrary `--build-arg BASE_IMAGE`.
  *   3. Run bundle-egress-proxy.mjs.
- *   4. Build both local tags with --pull=false and BuildKit provenance+SBOM.
+ *   4. Build both local tags with --pull=false. Provenance/SBOM attestations
+ *      are intentionally NOT requested: the default `docker` driver rejects
+ *      them ("Attestation is not supported for the docker driver"), and the
+ *      attestations only persist in a registry anyway — these :test images
+ *      are local-only, consumed by the security lane via their immutable image
+ *      ID. image-contract.test.ts asserts that ID is a digest, not any
+ *      attestation metadata.
  *   5. Print shell assignments with the immutable LOCAL image IDs:
  *        OCTOPUS_TEST_RUNTIME_IMAGE=sha256:...
  *        OCTOPUS_TEST_PROXY_IMAGE=sha256:...
@@ -119,11 +125,12 @@ ENTRYPOINT ["/usr/local/bin/node", "/app/egress-proxy-server.mjs"]
 }
 
 async function dockerBuild({ contextDir, dockerfile, tag }) {
+  // --pull=false: build only from the rendered Dockerfile refs; never pull a
+  // mutable tag. No provenance/SBOM: the default `docker` driver does not
+  // support attestations and they don't persist for local images (see header).
   const args = [
     'build',
     '--pull=false',
-    '--provenance=true',
-    '--sbom=true',
     '-f', dockerfile,
     '-t', tag,
     contextDir,

@@ -84,6 +84,34 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zstd tar gcc libc6-dev
+      - name: Build package and capture the immutable runtime image ID
+        id: images
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --filter @agentoctopus/sandbox build
+          # build-runtime-rootfs.mjs fail-closed-exits unless OCTOPUS_RUNTIME_IMAGE
+          # is an immutable digest. The hosted lane builds the same :test images
+          # via security:images and captures their local image IDs; reuse that
+          # here so the producer exports the exact reviewed runtime image.
+          env_file="$(mktemp)"
+          pnpm --silent --filter @agentoctopus/sandbox security:images -- --print-env > "$env_file"
+
+          runtime_digest=''
+          while IFS='=' read -r name value; do
+            case "$name" in
+              OCTOPUS_TEST_RUNTIME_IMAGE) runtime_digest="$value" ;;
+              '') ;;
+              *) echo "ERROR: unexpected security image output name: $name" >&2; exit 1 ;;
+            esac
+          done < "$env_file"
+          rm -f "$env_file"
+
+          digest_re='^sha256:[0-9a-f]{64}$'
+          [[ "$runtime_digest" =~ $digest_re ]] || { echo 'ERROR: runtime image ID is not immutable' >&2; exit 1; }
+
+          # Export for build-runtime-rootfs.mjs (consumed as OCTOPUS_RUNTIME_IMAGE).
+          echo "OCTOPUS_RUNTIME_IMAGE=$runtime_digest" >> "$GITHUB_ENV"
       - name: Build the reviewed Linux runtime rootfs and OS helper
         run: |
           set -euo pipefail
