@@ -41,11 +41,11 @@ For skill PRs, a maintainer will also run the smoke-test command locally after C
 
 Pushes to `master` trigger `release-preflight.yml` automatically:
 validates the version is not already on npm, runs full audit (lint + build + test),
-packs all 7 package tarballs, and uploads them as a preflight artifact.
+packs all 8 package tarballs, and uploads them as a preflight artifact.
 
 To actually publish, a maintainer manually dispatches `release-publish.yml` from the
-Actions tab, providing the preflight run ID. This publishes all 7 packages in
-dependency order (skills → registry → adapters → core → gateway → cli → agentoctopus)
+Actions tab, providing the preflight run ID. This publishes all 8 packages in
+dependency order (sandbox → sandbox-vm-native → skills → registry → adapters → core → gateway → cli → agentoctopus)
 with retry, then creates a GitHub Release from the changelog.
 
 See also: [Adding Skills](adding-skills.md) | [Conventions](conventions.md)

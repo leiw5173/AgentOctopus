@@ -252,11 +252,11 @@ Embedding and re-ranking can use a different provider/endpoint than the main LLM
 
 ### Versioning & Publishing
 
-All 7 packages share a single version managed by [changesets](https://github.com/changesets/changesets) with fixed versioning (`.changeset/config.json`). The umbrella `agentoctopus` package re-exports everything. To release:
+All 8 packages share a single version managed by [changesets](https://github.com/changesets/changesets) with fixed versioning (`.changeset/config.json`). The umbrella `agentoctopus` package re-exports everything. To release:
 
 1. **PR must include a changeset** — run `pnpm changeset` to create a `.changeset/*.md` file describing the change. CI enforces this via `changeset-check.yml` (skipped for docs/CI-only changes, dependabot PRs, or `skip-changeset` label).
-2. **Merge PR to master** — triggers `release-preflight.yml` automatically: validates version is not already on npm, runs full lint+build+test, packs all 7 tarballs, uploads as preflight artifact.
-3. **Manual dispatch** — maintainer triggers `release-publish.yml` via Actions UI, providing the preflight run ID. Downloads the artifact, verifies provenance, publishes in dependency order (skills → registry → adapters → core → gateway → cli → agentoctopus) with 3x retry, creates GitHub Release from changelog.
+2. **Merge PR to master** — triggers `release-preflight.yml` automatically: validates version is not already on npm, runs full lint+build+test, packs all 8 tarballs, uploads as preflight artifact.
+3. **Manual dispatch** — maintainer triggers `release-publish.yml` via Actions UI, providing the preflight run ID. Downloads the artifact, verifies provenance, publishes in dependency order (sandbox → sandbox-vm-native → skills → registry → adapters → core → gateway → cli → agentoctopus) with 3x retry, creates GitHub Release from changelog.
 4. **npm dist-tags** — choose `latest` or `beta` when dispatching. Use `beta` for pre-releases.
 
-The `agentoctopus` umbrella package tarball uses `agentoctopus-[0-9]*.tgz` glob to avoid matching scoped packages (e.g., `agentoctopus-skills-X.Y.Z.tgz`).
+The `agentoctopus` umbrella package tarball uses `agentoctopus-[0-9]*.tgz` glob to avoid matching scoped packages (e.g., `agentoctopus-skills-X.Y.Z.tgz`, `agentoctopus-sandbox-vm-native-X.Y.Z.tgz`).

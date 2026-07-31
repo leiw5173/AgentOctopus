@@ -137,7 +137,7 @@ jobs:
           writeFileSync('/tmp/preflight/security-metadata.json', JSON.stringify(metadata, null, 2) + '\n');
           NODE
 
-          PACKAGES="sandbox skills registry adapters core gateway cli agentoctopus"
+          PACKAGES="sandbox sandbox-vm-native skills registry adapters core gateway cli agentoctopus"
           for pkg in $PACKAGES; do
             case "$pkg" in
               cli)       cd apps/cli && pnpm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
