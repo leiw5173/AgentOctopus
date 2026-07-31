@@ -33,6 +33,13 @@ import {
   IMAGE_BUILDER_MANIFEST_NAME,
 } from '../scripts/tcb-manifest.mjs';
 
+// verifyVmTcb (sandbox/src/vm/vm-helper-build.ts) resolves artifact names
+// per-platform: libkrun.dylib / libkrunfw.dylib on darwin, libkrun.so /
+// libkrunfw.so on Linux. The fixtures must name the files the platform-under-
+// test looks up — hardcoding .dylib breaks the Linux lane.
+const LIBKRUN = process.platform === 'darwin' ? 'libkrun.dylib' : 'libkrun.so';
+const LIBKRUNFW = process.platform === 'darwin' ? 'libkrunfw.dylib' : 'libkrunfw.so';
+
 // Resolve the sandbox dist path relative to this test file.
 // tests/tcb-manifest.test.ts -> ../../sandbox/dist/vm/vm-helper-build.js
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -84,16 +91,16 @@ describe('unified vm-tcb-manifest (HI-3)', () => {
     const imageBuilderContent = 'BUILDER';
 
     await makeFile(dir, 'sandbox-vm-helper', helperContent, 0o755);
-    await makeFile(dir, 'libkrun.dylib', libkrunContent, 0o644);
-    await makeFile(dir, 'libkrunfw.dylib', libkrunfwContent, 0o644);
+    await makeFile(dir, LIBKRUN, libkrunContent, 0o644);
+    await makeFile(dir, LIBKRUNFW, libkrunfwContent, 0o644);
     await makeFile(dir, 'vm-image-builder', imageBuilderContent, 0o755);
 
     // Write the imageBuilder per-artifact manifest (produced by its build step).
-    const libkrunSha = await sha256File(join(dir, 'libkrun.dylib'));
-    const libkrunfwSha = await sha256File(join(dir, 'libkrunfw.dylib'));
+    const libkrunSha = await sha256File(join(dir, LIBKRUN));
+    const libkrunfwSha = await sha256File(join(dir, LIBKRUNFW));
     const imageBuilderSha = await sha256File(join(dir, 'vm-image-builder'));
-    const libkrunSt = await stat(join(dir, 'libkrun.dylib'));
-    const libkrunfwSt = await stat(join(dir, 'libkrunfw.dylib'));
+    const libkrunSt = await stat(join(dir, LIBKRUN));
+    const libkrunfwSt = await stat(join(dir, LIBKRUNFW));
     const imageBuilderSt = await stat(join(dir, 'vm-image-builder'));
 
     await makePerArtifactManifest(dir, IMAGE_BUILDER_MANIFEST_NAME, imageBuilderSha, imageBuilderSt.size, imageBuilderSt.mode & 0o777);
@@ -143,17 +150,17 @@ describe('unified vm-tcb-manifest (HI-3)', () => {
     }
 
     await makeFile(dir, 'sandbox-vm-helper', 'HELPER', 0o755);
-    await makeFile(dir, 'libkrun.dylib', 'LIBKRUN', 0o644);
-    await makeFile(dir, 'libkrunfw.dylib', 'KRUNFW', 0o644);
+    await makeFile(dir, LIBKRUN, 'LIBKRUN', 0o644);
+    await makeFile(dir, LIBKRUNFW, 'KRUNFW', 0o644);
     await makeFile(dir, 'vm-image-builder', 'BUILDER', 0o755);
 
     const helperSha = await sha256File(join(dir, 'sandbox-vm-helper'));
     const helperSt = await stat(join(dir, 'sandbox-vm-helper'));
-    const libkrunSha = await sha256File(join(dir, 'libkrun.dylib'));
-    const libkrunfwSha = await sha256File(join(dir, 'libkrunfw.dylib'));
+    const libkrunSha = await sha256File(join(dir, LIBKRUN));
+    const libkrunfwSha = await sha256File(join(dir, LIBKRUNFW));
     const imageBuilderSha = await sha256File(join(dir, 'vm-image-builder'));
-    const libkrunSt = await stat(join(dir, 'libkrun.dylib'));
-    const libkrunfwSt = await stat(join(dir, 'libkrunfw.dylib'));
+    const libkrunSt = await stat(join(dir, LIBKRUN));
+    const libkrunfwSt = await stat(join(dir, LIBKRUNFW));
     const imageBuilderSt = await stat(join(dir, 'vm-image-builder'));
 
     await makePerArtifactManifest(dir, IMAGE_BUILDER_MANIFEST_NAME, imageBuilderSha, imageBuilderSt.size, imageBuilderSt.mode & 0o777);
@@ -172,14 +179,14 @@ describe('unified vm-tcb-manifest (HI-3)', () => {
 
   it('FAIL-CLOSED: buildTcbManifest throws when imageBuilder per-artifact manifest is absent', async () => {
     await makeFile(dir, 'sandbox-vm-helper', 'HELPER', 0o755);
-    await makeFile(dir, 'libkrun.dylib', 'LIBKRUN', 0o644);
-    await makeFile(dir, 'libkrunfw.dylib', 'KRUNFW', 0o644);
+    await makeFile(dir, LIBKRUN, 'LIBKRUN', 0o644);
+    await makeFile(dir, LIBKRUNFW, 'KRUNFW', 0o644);
     // vm-image-builder binary + manifest intentionally ABSENT.
 
-    const libkrunSha = await sha256File(join(dir, 'libkrun.dylib'));
-    const libkrunfwSha = await sha256File(join(dir, 'libkrunfw.dylib'));
-    const libkrunSt = await stat(join(dir, 'libkrun.dylib'));
-    const libkrunfwSt = await stat(join(dir, 'libkrunfw.dylib'));
+    const libkrunSha = await sha256File(join(dir, LIBKRUN));
+    const libkrunfwSha = await sha256File(join(dir, LIBKRUNFW));
+    const libkrunSt = await stat(join(dir, LIBKRUN));
+    const libkrunfwSt = await stat(join(dir, LIBKRUNFW));
     const helperSha = await sha256File(join(dir, 'sandbox-vm-helper'));
     const helperSt = await stat(join(dir, 'sandbox-vm-helper'));
 
@@ -198,17 +205,17 @@ describe('unified vm-tcb-manifest (HI-3)', () => {
 
   it('readArtifactRefsFromTcbManifest extracts 4 sha256 refs from the combined manifest', async () => {
     await makeFile(dir, 'sandbox-vm-helper', 'HELPER', 0o755);
-    await makeFile(dir, 'libkrun.dylib', 'LIBKRUN', 0o644);
-    await makeFile(dir, 'libkrunfw.dylib', 'KRUNFW', 0o644);
+    await makeFile(dir, LIBKRUN, 'LIBKRUN', 0o644);
+    await makeFile(dir, LIBKRUNFW, 'KRUNFW', 0o644);
     await makeFile(dir, 'vm-image-builder', 'BUILDER', 0o755);
 
     const helperSha = await sha256File(join(dir, 'sandbox-vm-helper'));
     const helperSt = await stat(join(dir, 'sandbox-vm-helper'));
-    const libkrunSha = await sha256File(join(dir, 'libkrun.dylib'));
-    const libkrunfwSha = await sha256File(join(dir, 'libkrunfw.dylib'));
+    const libkrunSha = await sha256File(join(dir, LIBKRUN));
+    const libkrunfwSha = await sha256File(join(dir, LIBKRUNFW));
     const imageBuilderSha = await sha256File(join(dir, 'vm-image-builder'));
-    const libkrunSt = await stat(join(dir, 'libkrun.dylib'));
-    const libkrunfwSt = await stat(join(dir, 'libkrunfw.dylib'));
+    const libkrunSt = await stat(join(dir, LIBKRUN));
+    const libkrunfwSt = await stat(join(dir, LIBKRUNFW));
     const imageBuilderSt = await stat(join(dir, 'vm-image-builder'));
 
     await makePerArtifactManifest(dir, IMAGE_BUILDER_MANIFEST_NAME, imageBuilderSha, imageBuilderSt.size, imageBuilderSt.mode & 0o777);

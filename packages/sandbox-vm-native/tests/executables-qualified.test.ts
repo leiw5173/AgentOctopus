@@ -98,19 +98,36 @@ describe('assertExecutablesQualified — R10 P1-1 + R9 mount-shadow', () => {
 //
 // These tests build a tiny ext4 image with mke2fs, mount it read-only via
 // `mount -o loop,ro`, and run assertExecutablesQualified against the REAL
-// createLoopbackStatRootfsFile() factory. They need CAP_SYS_ADMIN + mke2fs,
-// which exist on the privileged-Linux CI lane (linux-x64) but NOT on macOS —
-// so they are skipIf-gated to Linux AND further skipIf when mke2fs/mount are
-// absent (dev hosts without the toolchain).
+// createLoopbackStatRootfsFile() factory. They need CAP_SYS_ADMIN + a loop
+// device + mke2fs, which exist on the privileged-Linux CI lane (linux-x64)
+// but NOT on macOS, plain ubuntu-latest (unprivileged), or even a rootful
+// Docker container (no loop device by default). Gate on a REAL capability
+// probe (probeLoopbackMount) — uid-0 is necessary but not sufficient.
 // ---------------------------------------------------------------------------
 const isLinux = process.platform === 'linux';
 
-async function hasBin(bin: string): Promise<boolean> {
+/**
+ * Try to build + loop-mount a minimal ext4 and unmount it. Returns true only
+ * when the full toolchain (mke2fs + mount + a working loop device + the
+ * CAP_SYS_ADMIN privilege) is present on this host. uid-0 is necessary but
+ * NOT sufficient — a rootful Docker container still can't `mount -o loop`
+ * without the loop device, so we probe the real capability rather than infer
+ * it from platform/uid.
+ */
+async function probeLoopbackMount(): Promise<boolean> {
+  const probeDir = await mkdtemp(path.join(tmpdir(), 'oct-loop-probe-'));
   try {
-    await execFileAsync('which', [bin]);
+    const img = path.join(probeDir, 'probe.ext4');
+    const mnt = path.join(probeDir, 'mnt');
+    await mkdir(mnt, { recursive: true });
+    await execFileAsync('mke2fs', ['-t', 'ext4', '-q', '-b', '1024', img, '256k']);
+    await execFileAsync('mount', ['-o', 'loop,ro', img, mnt]);
+    await execFileAsync('umount', [mnt]).catch(() => {});
     return true;
   } catch {
     return false;
+  } finally {
+    await rm(probeDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -140,10 +157,10 @@ async function buildExt4Fixture(imgPath: string, stagingDir: string): Promise<vo
 }
 
 describe.skipIf(!isLinux)('real statRootfsFile via ro loopback mount (HI-2, Linux lane)', () => {
-  let mke2fsAvailable = false;
+  let loopbackAvailable = false;
 
   beforeAll(async () => {
-    mke2fsAvailable = await hasBin('mke2fs');
+    loopbackAvailable = await probeLoopbackMount();
   });
 
   // A fresh rootfs image + its digest-based ref per test (the cache keys on ref).
@@ -160,7 +177,7 @@ describe.skipIf(!isLinux)('real statRootfsFile via ro loopback mount (HI-2, Linu
   });
 
   it('succeeds when the rootfs is mounted ro and executables exist + are exec', async () => {
-    if (!mke2fsAvailable) return; // soft skip: mke2fs absent on this host
+    if (!loopbackAvailable) return; // soft skip: no loop-mount capability on this host
     const imgPath = path.join(imgDir, 'rootfs.ext4');
     await buildExt4Fixture(imgPath, stagingDir);
     const ref = 'sha256:' + 'b'.repeat(64); // distinct ref per test (cache key)
@@ -173,7 +190,7 @@ describe.skipIf(!isLinux)('real statRootfsFile via ro loopback mount (HI-2, Linu
   });
 
   it('fails when an executable path is missing in the image', async () => {
-    if (!mke2fsAvailable) return;
+    if (!loopbackAvailable) return;
     const imgPath = path.join(imgDir, 'rootfs.ext4');
     await buildExt4Fixture(imgPath, stagingDir);
     const ref = 'sha256:' + 'c'.repeat(64);
@@ -186,7 +203,7 @@ describe.skipIf(!isLinux)('real statRootfsFile via ro loopback mount (HI-2, Linu
   });
 
   it('fails when an executable is not in the bins allowlist', async () => {
-    if (!mke2fsAvailable) return;
+    if (!loopbackAvailable) return;
     const imgPath = path.join(imgDir, 'rootfs.ext4');
     await buildExt4Fixture(imgPath, stagingDir);
     const ref = 'sha256:' + 'd'.repeat(64);
@@ -199,7 +216,7 @@ describe.skipIf(!isLinux)('real statRootfsFile via ro loopback mount (HI-2, Linu
   });
 
   it('fails when a guest path exists but is not executable', async () => {
-    if (!mke2fsAvailable) return;
+    if (!loopbackAvailable) return;
     const imgPath = path.join(imgDir, 'rootfs.ext4');
     await buildExt4Fixture(imgPath, stagingDir);
     const ref = 'sha256:' + 'e'.repeat(64);
@@ -212,7 +229,7 @@ describe.skipIf(!isLinux)('real statRootfsFile via ro loopback mount (HI-2, Linu
   });
 
   it('rejects a symlink at the guest path against the real mount (review #2/#5)', async () => {
-    if (!mke2fsAvailable) return;
+    if (!loopbackAvailable) return;
     const imgPath = path.join(imgDir, 'rootfs.ext4');
     // Build a fixture where /usr/bin/linker is a SYMLINK → /usr/bin/node.
     // This is the security-sensitive case from review Finding #2: the stat

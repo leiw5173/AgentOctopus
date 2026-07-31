@@ -69,14 +69,22 @@ function libcPath(): string {
 // with a 2048-byte blob and pass it by pointer; the C functions treat it as
 // opaque storage. This avoids needing platform-specific struct layouts.
 //
-// Struct identity (review Important #3): koffi marshals a plain JS object `{}`
-// passed to an `_Out_` pointer arg by attaching a backing buffer to the SAME
-// object instance (verified: `actions.bytes` is populated after `_init` and
-// survives to the subsequent `_adddup2` / `posix_spawn` calls). Reusing the
-// same object instance across init → adddup2 → posix_spawn therefore shares
-// one backing buffer. The spawn integration test (`spawn bridges real
-// stdout via dup2 file action`) is the load-bearing proof that the actions
-// actually take effect end-to-end.
+// Struct identity (review Important #3) — the load-bearing subtlety: koffi
+// marshals a plain JS object passed to a struct-pointer arg by COPYING the
+// struct bytes through the object per call. `_Out_` allocates a fresh buffer
+// and copies OUT (to the object) after the call; `_In_` copies IN (from the
+// object) and discards the buffer. State therefore survives across calls ONLY
+// if every call that MUTATES the struct is declared `_Inout_` (copy-in,
+// mutate, copy-out), so the next call's copy-in sees it.
+//
+// This is invisible on macOS, where posix_spawn_file_actions_t is a POINTER
+// to heap state (the struct bytes only hold the pointer, so even a copied
+// struct refers to the same heap list). glibc's posix_spawn_file_actions_t /
+// posix_spawnattr_t are INLINE — the actions ARE the struct bytes — so an
+// `_Out_`-init + `_In_`-adddup2 chain silently drops the adddup2 (the buffer
+// with the mutation is discarded) and posix_spawn sees an empty action list.
+// The spawn integration test (`spawn bridges real stdout via dup2 file
+// action`) is the load-bearing proof end-to-end on both platforms.
 const FileActions = koffi.struct('FileActions', { bytes: koffi.array('uint8_t', 2048) });
 const SpawnAttr = koffi.struct('SpawnAttr', { bytes: koffi.array('uint8_t', 2048) });
 const pid_t = koffi.alias('pid_t', 'int');
@@ -146,8 +154,8 @@ function loadLibc(): LoadedLibc {
     posix_spawn: resolve('posix_spawn', 'int', [
       koffi.out(koffi.pointer(pid_t)),
       'str',
-      koffi.pointer(FileActions),
-      koffi.pointer(SpawnAttr),
+      koffi.inout(koffi.pointer(FileActions)),
+      koffi.inout(koffi.pointer(SpawnAttr)),
       'void *',
       'void *',
     ]) as (
@@ -159,28 +167,37 @@ function loadLibc(): LoadedLibc {
       envp: unknown,
     ) => number,
     posix_spawn_file_actions_init: resolve('posix_spawn_file_actions_init', 'int', [
-      koffi.out(koffi.pointer(FileActions)),
+      // _Inout_, NOT _Out_: init MUTATES the struct bytes (the resulting
+      // action list must survive to the subsequent adddup2/addclose calls).
+      // _Out_ copies out to a fresh buffer and the mutation would be lost —
+      // fatal on glibc where the actions are inline struct bytes.
+      koffi.inout(koffi.pointer(FileActions)),
     ]) as (actions: unknown) => number,
     posix_spawn_file_actions_destroy: resolve('posix_spawn_file_actions_destroy', 'int', [
-      koffi.pointer(FileActions),
+      koffi.inout(koffi.pointer(FileActions)),
     ]) as (actions: unknown) => number,
     posix_spawn_file_actions_adddup2: resolve('posix_spawn_file_actions_adddup2', 'int', [
-      koffi.pointer(FileActions),
+      // _Inout_, NOT _In_: the adddup2 mutation must be copied back into the
+      // JS object so the NEXT call (the final posix_spawn) copies it IN again.
+      // With _In_ the mutation is discarded after the call — silently dropping
+      // the dup2 on glibc (inline struct state). macOS masks this because its
+      // file_actions_t is a heap pointer.
+      koffi.inout(koffi.pointer(FileActions)),
       'int',
       'int',
     ]) as (actions: unknown, src: number, target: number) => number,
     posix_spawn_file_actions_addclose: resolve('posix_spawn_file_actions_addclose', 'int', [
-      koffi.pointer(FileActions),
+      koffi.inout(koffi.pointer(FileActions)),
       'int',
     ]) as (actions: unknown, fd: number) => number,
     posix_spawnattr_init: resolve('posix_spawnattr_init', 'int', [
-      koffi.out(koffi.pointer(SpawnAttr)),
+      koffi.inout(koffi.pointer(SpawnAttr)),
     ]) as (attr: unknown) => number,
     posix_spawnattr_destroy: resolve('posix_spawnattr_destroy', 'int', [
-      koffi.pointer(SpawnAttr),
+      koffi.inout(koffi.pointer(SpawnAttr)),
     ]) as (attr: unknown) => number,
     posix_spawnattr_setflags: resolve('posix_spawnattr_setflags', 'int', [
-      koffi.pointer(SpawnAttr),
+      koffi.inout(koffi.pointer(SpawnAttr)),
       'short',
     ]) as (attr: unknown, flags: number) => number,
     waitpid: resolve('waitpid', 'pid_t', ['pid_t', '_Out_ int *', 'int']) as (
