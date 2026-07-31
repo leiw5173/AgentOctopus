@@ -11,6 +11,7 @@ import type {
 import { ContainmentCleanupError } from '../backend.js';
 import type { SandboxConfig } from '../schema.js';
 import { SNAPSHOT_DIGEST_RE } from '../schema.js';
+import { stripIpv6Brackets } from '../host-match.js';
 import type { VmEnginePort, VmImageBuilderPort, VmInstance, VmStartConfig } from './ports.js';
 import type { VmWorkloadSpec } from './types.js';
 import { encodeLaunchSpec } from './launch-spec.js';
@@ -76,7 +77,7 @@ export class VmSandboxBackend implements SandboxBackend {
     if (url.protocol !== 'http:') {
       throw new Error(`VmSandboxBackend: proxyAddr protocol must be http:, got ${url.protocol}`);
     }
-    const host = url.hostname;
+    const host = stripIpv6Brackets(url.hostname);
     const port = parseInt(url.port, 10);
     if (!host || Number.isNaN(port) || port <= 0 || port > 65535) {
       throw new Error(`VmSandboxBackend: proxyAddr must be http://<host>:<port>, got ${proxyAddr}`);
@@ -84,7 +85,10 @@ export class VmSandboxBackend implements SandboxBackend {
     // The contract is the in-process egress proxy loopback. Enforce it: a
     // non-loopback host would bridge the guest's sole egress path to an
     // arbitrary/attacker-controlled address, breaking containment.
-    // url.hostname strips IPv6 brackets, so '::1' arrives bare.
+    // F6: Node's URL.hostname PRESERVES IPv6 brackets
+    // (`new URL('http://[::1]:8').hostname` === `"[::1]"`), so strip them
+    // before the loopback set lookup — otherwise the explicitly-allowed
+    // `::1` is rejected.
     if (!LOOPBACK_HOSTS.has(host)) {
       throw new Error(`VmSandboxBackend: proxyAddr host must be loopback (127.0.0.1, ::1, localhost), got ${host}`);
     }
@@ -231,7 +235,7 @@ export class VmSandboxBackend implements SandboxBackend {
   }
 }
 
-function collectBoundedVmResult(
+export function collectBoundedVmResult(
   vm: VmInstance,
   timeoutMs: number,
   outputMaxBytes: number,
@@ -242,10 +246,34 @@ function collectBoundedVmResult(
   vm.stderr.pipe(stderr);
   const outChunks: Buffer[] = []; const errChunks: Buffer[] = [];
   let outBytes = 0; let errBytes = 0; let timedOut = false; let overflow = false; let settled = false;
+  // F5: the output cap must be a real memory bound. Previously the chunk was
+  // pushed BEFORE the cap check and there was no early return after overflow,
+  // so a flooding process could keep pushing chunks (and Buffer.concat would
+  // realize all of them) until the kill actually landed — memory use ran far
+  // past outputMaxBytes. Now: once overflow is set we drop further chunks, and
+  // the chunk that crosses the cap is trimmed so the combined buffer never
+  // exceeds outputMaxBytes.
   const onData = (which: 'out' | 'err') => (c: Buffer) => {
-    if (which === 'out') { outChunks.push(c); outBytes += c.length; }
-    else { errChunks.push(c); errBytes += c.length; }
-    if (outBytes + errBytes > outputMaxBytes && !overflow) { overflow = true; vm.kill().catch(() => {}); }
+    if (overflow) return; // already over cap: stop buffering, the kill is in flight
+    if (which === 'out') {
+      const before = outBytes + errBytes;
+      if (before + c.length > outputMaxBytes) {
+        const remaining = outputMaxBytes - before;
+        if (remaining > 0) { outChunks.push(c.subarray(0, remaining)); outBytes += remaining; }
+        overflow = true; vm.kill().catch(() => {});
+        return;
+      }
+      outChunks.push(c); outBytes += c.length;
+    } else {
+      const before = outBytes + errBytes;
+      if (before + c.length > outputMaxBytes) {
+        const remaining = outputMaxBytes - before;
+        if (remaining > 0) { errChunks.push(c.subarray(0, remaining)); errBytes += remaining; }
+        overflow = true; vm.kill().catch(() => {});
+        return;
+      }
+      errChunks.push(c); errBytes += c.length;
+    }
   };
   stdout.on('data', onData('out')); stderr.on('data', onData('err'));
   const timer = setTimeout(() => { if (!settled && !overflow) { timedOut = true; vm.kill().catch(() => {}); } }, timeoutMs);

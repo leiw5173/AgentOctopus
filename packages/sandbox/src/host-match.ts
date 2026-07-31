@@ -7,14 +7,31 @@ import { getDomain, getPublicSuffix } from 'tldts';
  * wildcards are rejected.
  */
 
+/**
+ * Strip the square brackets Node's URL leaves on an IPv6 hostname.
+ * `new URL('http://[::1]:8080').hostname` returns `"[::1]"` (WITH brackets)
+ * on every supported Node version — the WHATWG URL spec preserves them on
+ * `.hostname`. normalizeHost and the loopback check must compare against the
+ * bare `::1`, so strip first. Idempotent for non-IPv6 / already-bare hosts.
+ */
+export function stripIpv6Brackets(host: string): string {
+  if (host.length >= 2 && host.startsWith('[') && host.endsWith(']')) {
+    return host.slice(1, -1);
+  }
+  return host;
+}
+
 /** Lowercase, strip a single trailing dot, convert IDNA to A-labels. */
 export function normalizeHost(host: string): string {
-  let h = host.trim().toLowerCase();
+  let h = stripIpv6Brackets(host).trim().toLowerCase();
   if (h.endsWith('.')) h = h.slice(0, -1);
   if (h.startsWith('*.')) {
     const suffix = domainToASCII(h.slice(2));
     return suffix ? `*.${suffix}` : h;
   }
+  // IPv6 literals (e.g. "::1") are not domain names — domainToASCII would
+  // mangle them. Pass them through after bracket-stripping + lowercasing.
+  if (h.includes(':')) return h;
   const ascii = domainToASCII(h);
   return ascii || h;
 }

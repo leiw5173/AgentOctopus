@@ -3,7 +3,9 @@ import { describe, it, expect } from 'vitest';
 import { mkdtemp, writeFile, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { VmSandboxBackend } from '../../src/vm/vm-backend.js';
+import { PassThrough } from 'node:stream';
+import { VmSandboxBackend, collectBoundedVmResult } from '../../src/vm/vm-backend.js';
+import type { VmInstance } from '../../src/vm/types.js';
 import { FakeVmEngine, FakeVmImageBuilder } from './fakes.js';
 import { ContainmentCleanupError } from '../../src/backend.js';
 import { ExecutablesUnqualifiedError } from '../../src/vm/errors.js';
@@ -68,6 +70,15 @@ describe('VmSandboxBackend', () => {
     const opts = await makeOpts();
     opts.proxyAddr = 'http://attacker.example.com:18080';
     await expect(be.prepare(opts)).rejects.toThrow(/loopback/);
+  });
+
+  // F6: Node's URL.hostname preserves IPv6 brackets, so http://[::1]:PORT must
+  // still be accepted as a loopback proxyAddr (it's an explicitly-allowed host).
+  it('prepare accepts an IPv6 loopback proxyAddr http://[::1]:PORT (F6)', async () => {
+    const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-prep-v6-')));
+    const opts = await makeOpts();
+    opts.proxyAddr = 'http://[::1]:18080';
+    await expect(be.prepare(opts)).resolves.toBeUndefined();
   });
 
   it('prepare resolves rootfs + asserts qualified + builds both block images', async () => {
@@ -186,5 +197,107 @@ describe('VmSandboxBackend', () => {
     }
     const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-bsfail-')), new FailingEngine());
     await expect(be.prepare(await makeOpts())).rejects.toBeInstanceOf(ExecutablesUnqualifiedError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F5: output cap must be a real memory bound.
+// collectBoundedVmResult previously pushed every chunk before the cap check and
+// kept pushing after overflow was set, so a flooding process could push the
+// buffer far past outputMaxBytes before the kill landed. These tests assert the
+// captured stdout never exceeds the cap, even when a single chunk is larger
+// than the cap and when further chunks arrive after the overflow.
+// ---------------------------------------------------------------------------
+// `state` is a holder object (not a bare primitive): collectBoundedVmResult's
+// `vm.kill()` is async, so `state.killed` is flipped on a later microtask. A
+// destructured `let killed = false` boolean would be captured by VALUE at
+// return time and never observe the async mutation — property access on a
+// shared holder is the only way for the caller to see the post-kill state.
+function makeFakeVm(stdoutChunks: Buffer[], stderrChunks: Buffer[] = []): { vm: VmInstance; state: { killed: boolean } } {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const state = { killed: false };
+  // Emit chunks on next tick so 'data' listeners attach first.
+  setImmediate(() => {
+    for (const c of stdoutChunks) stdout.write(c);
+    stdout.end();
+    for (const c of stderrChunks) stderr.write(c);
+    stderr.end();
+  });
+  // exited mirrors the real VM semantics: the helper subprocess exits AFTER
+  // its stdout/stderr hit EOF. Resolve on both streams' 'end' so the test does
+  // not race the async pipe delivery against an arbitrary timer (which would
+  // resolve before all chunks are observed).
+  const exited = new Promise<{ exitCode: number; timedOut: boolean }>((resolve) => {
+    let outDone = stdoutChunks.length === 0;
+    let errDone = stderrChunks.length === 0;
+    const check = () => { if (outDone && errDone) resolve({ exitCode: 0, timedOut: false }); };
+    stdout.on('end', () => { outDone = true; check(); });
+    stderr.on('end', () => { errDone = true; check(); });
+  });
+  const vm: VmInstance = {
+    stdin: new PassThrough(),
+    stdout,
+    stderr,
+    exited,
+    kill: async () => { state.killed = true; },
+    close: async () => { stdout.destroy(); stderr.destroy(); },
+  };
+  return { vm, state };
+}
+
+describe('collectBoundedVmResult — F5 output cap memory bound', () => {
+  it('caps a single chunk larger than outputMaxBytes to exactly the cap', async () => {
+    const cap = 1024;
+    const big = Buffer.alloc(cap * 4, 0x41); // 4× the cap in ONE chunk
+    const { vm } = makeFakeVm([big]);
+    const proc = collectBoundedVmResult(vm, 5000, cap);
+    const result = await proc.exited;
+    expect(result.stdout.length).toBeLessThanOrEqual(cap);
+    expect(result.stdout.length).toBe(cap); // trimmed to exactly the cap
+    expect(Buffer.byteLength(result.stdout)).toBe(cap);
+  });
+
+  it('stops buffering after overflow even as more chunks arrive', async () => {
+    const cap = 64;
+    // First chunk fills exactly to the cap, then several more large chunks arrive.
+    // The old code would have buffered all of them; the cap must hold.
+    const fill = Buffer.alloc(cap, 0x42);
+    const flood = [Buffer.alloc(2048, 0x43), Buffer.alloc(2048, 0x44), Buffer.alloc(2048, 0x45)];
+    const { vm, state } = makeFakeVm([fill, ...flood]);
+    const proc = collectBoundedVmResult(vm, 5000, cap);
+    const result = await proc.exited;
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(cap);
+    // `state` is a holder so we observe the async kill()'s mutation; a bare
+    // boolean would be captured by value and stay false.
+    expect(state.killed).toBe(true); // overflow triggered the kill
+  });
+
+  it('does not cap when output is under the limit', async () => {
+    const cap = 1024;
+    const small = Buffer.from('hello-world\n', 'utf8');
+    const { vm } = makeFakeVm([small]);
+    const proc = collectBoundedVmResult(vm, 5000, cap);
+    const result = await proc.exited;
+    expect(result.stdout).toBe('hello-world\n');
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('applies the COMBINED stdout+stderr cap across both streams', async () => {
+    const cap = 128;
+    const out = Buffer.alloc(100, 0x41);
+    const err = Buffer.alloc(200, 0x42); // pushes combined total past cap
+    const { vm, state } = makeFakeVm([out], [err]);
+    const proc = collectBoundedVmResult(vm, 5000, cap);
+    const result = await proc.exited;
+    // The memory bound covers the RAW captured output (what Buffer.concat
+    // realizes). result.stderr appends a fixed diagnostic suffix when overflow
+    // fires, so strip it before measuring the bound — otherwise a passing cap
+    // would look like a 41-byte overage.
+    const stderrRaw = result.stderr.split('\noutput cap exceeded')[0];
+    const combined = Buffer.byteLength(result.stdout) + Buffer.byteLength(stderrRaw);
+    expect(combined).toBeLessThanOrEqual(cap);
+    expect(state.killed).toBe(true); // overflow fired on the stderr chunk
+    expect(result.stderr).toContain('output cap exceeded'); // diagnostic present
   });
 });

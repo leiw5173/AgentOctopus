@@ -694,14 +694,29 @@ export class OsSandboxBackend implements SandboxBackend {
         }
       };
 
+      // F5: the output cap must be a real memory bound. Previously the chunk was
+      // pushed BEFORE the cap check and there was no early return after overflow,
+      // so a flooding workload could keep pushing chunks (Buffer.concat would
+      // realize all of them) until the cgroup kill landed — memory use ran far
+      // past outputMaxBytes. Now: once overflow is set we drop further chunks,
+      // and the chunk that crosses the cap is trimmed so the combined buffer
+      // never exceeds outputMaxBytes.
       const onData = (which: 'out' | 'err') => (chunk: Buffer) => {
-        if (which === 'out') { outChunks.push(chunk); outBytes += chunk.length; }
-        else { errChunks.push(chunk); errBytes += chunk.length; }
-        // COMBINED stdout+stderr cap.
-        if (outBytes + errBytes > outputMaxBytes && !outputOverflow) {
+        if (outputOverflow) return; // already over cap: stop buffering, kill is in flight
+        const before = outBytes + errBytes;
+        if (before + chunk.length > outputMaxBytes) {
+          const remaining = outputMaxBytes - before;
+          if (remaining > 0) {
+            if (which === 'out') { outChunks.push(chunk.subarray(0, remaining)); outBytes += remaining; }
+            else { errChunks.push(chunk.subarray(0, remaining)); errBytes += remaining; }
+          }
+          // COMBINED stdout+stderr cap.
           outputOverflow = true;
           void doCgroupKill();
+          return;
         }
+        if (which === 'out') { outChunks.push(chunk); outBytes += chunk.length; }
+        else { errChunks.push(chunk); errBytes += chunk.length; }
       };
       stdout.on('data', onData('out'));
       stderr.on('data', onData('err'));
