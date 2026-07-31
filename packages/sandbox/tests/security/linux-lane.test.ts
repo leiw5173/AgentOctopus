@@ -180,9 +180,15 @@ async function startBlockingProbe(): Promise<RunningLinuxProbe> {
 describe('Linux lane — isolation', () => {
   it('uses the exact command argv with no helper-side mangling', async (ctx) => {
     if (!needLinux(ctx)) return;
-    const result = await runLinuxProbe('argv', { command: ['/usr/bin/node', '/skill/probe.js', 'alpha', 'two words'] });
+    // OS lane strips env, so the action MUST ride argv[2] (see lane-probe.ts:
+    // `action = process.env.PROBE_ACTION ?? process.argv[2]`, and the OS helper
+    // clears env). The Docker lane passes the action via PROBE_ACTION env and
+    // puts only the payload in argv; the OS lane cannot, so the action token
+    // 'argv' is part of the emitted slice(2). This is the documented contract,
+    // not mangling: process.argv.slice(2) reports EVERY arg including the action.
+    const result = await runLinuxProbe('argv', { command: ['/usr/bin/node', '/skill/probe.js', 'argv', 'alpha', 'two words'] });
     expect(result.exitCode).toBe(0);
-    expect(result.json.argv).toEqual(['alpha', 'two words']);
+    expect(result.json.argv).toEqual(['argv', 'alpha', 'two words']);
   }, RUN_TIMEOUT);
 
   it('cannot read or overwrite a unique host canary that was not mounted', async (ctx) => {
