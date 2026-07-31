@@ -177,6 +177,18 @@ jobs:
           tar -xJf /tmp/node-arm64.tar.xz -C /tmp/node-arm64 --strip-components=1
           test -x /tmp/node-arm64/bin/node
           echo "OCTOPUS_ROOTFS_NODE_ARM64=/tmp/node-arm64/bin/node" >> "$GITHUB_ENV"
+      - name: Provision libclang for the libkrun source build
+        # vendor-libkrun.mjs builds libkrun.so from pinned source via `make`
+        # (which drives cargo). libkrun's kvm-bindings crate runs bindgen, whose
+        # clang-sys build script must locate libclang: it runs
+        # `llvm-config --libdir` or falls back to searching the multiarch
+        # libdir. ubuntu-latest ships rustc/cargo/make/gcc but NOT libclang, so
+        # the build died with `failed to run custom build command for clang-sys`
+        # (`couldn't execute llvm-config`). Install the bindgen prereqs: clang +
+        # libclang-dev (the .so) + llvm-dev (llvm-config so clang-sys locates it
+        # deterministically). This is lane provisioning, kept out of the
+        # portable script (which also runs on the macOS vm-lane + locally).
+        run: sudo apt-get install -y --no-install-recommends clang libclang-dev llvm-dev
       - name: Build the full linux-x64 VM TCB + both-arch guest rootfs
         run: |
           pnpm --filter @agentoctopus/sandbox-vm-native build
