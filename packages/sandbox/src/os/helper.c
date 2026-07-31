@@ -478,6 +478,12 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
 
     /* Create the sandboxed namespaces. NEVER an anonymous `unshare --net`:
      * the net namespace is always the named one provided by the launcher. */
+    /* Capture the real (pre-pivot) uid/gid BEFORE unshare: inside the fresh
+     * user namespace getuid()/getgid() return the overflow id (65534) because
+     * no uid_map exists yet, which would build an invalid "0 65534 1" map and
+     * fail the uid_map write with EPERM. */
+    uid_t ruid = getuid();
+    gid_t rgid = getgid();
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
         die_errno("unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
@@ -485,8 +491,6 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
      * verified runtime root) remain accessible. setgroups must be denied
      * before writing gid_map. */
     char map[64];
-    uid_t ruid = getuid();
-    gid_t rgid = getgid();
     xwrite_file("/proc/self/setgroups", "deny");
     snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
     xwrite_file("/proc/self/uid_map", map);
@@ -718,14 +722,18 @@ static char *read_file(const char *path, size_t *outLen) {
  * chrooting. On any failure it die()s non-zero so the probe reads it as
  * "capability absent" (fail-closed). It must run as root, like main(). */
 static void probe_namespaces(void) {
+    /* Capture the real (pre-pivot) uid/gid BEFORE unshare: inside the fresh
+     * user namespace getuid()/getgid() return the overflow id (65534) because
+     * no uid_map exists yet, which would build an invalid "0 65534 1" map and
+     * fail the uid_map write with EPERM. */
+    uid_t ruid = getuid();
+    gid_t rgid = getgid();
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
         die_errno("probe unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
     /* Mirror phase-1 mapping so the probe exercises the same privileged
      * writes the real launch needs. */
     char map[64];
-    uid_t ruid = getuid();
-    gid_t rgid = getgid();
     xwrite_file("/proc/self/setgroups", "deny");
     snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
     xwrite_file("/proc/self/uid_map", map);
