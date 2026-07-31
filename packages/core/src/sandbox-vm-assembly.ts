@@ -108,8 +108,9 @@ function buildEngineOpts(config: SandboxConfig): VmEngineOptions {
   // Default the detached release-manifest pair to the prebuilds dir so a
   // shipped native package is verified end-to-end with no extra config. The
   // producer (sign-release-manifest.mjs) writes exactly these two filenames.
-  // If neither exists (dev box, unsigned dev build), engine.probe() sees
-  // haveReleaseManifest=false → 'missing' (soft, capability probe stays up).
+  // The paths are always set; engine.probe() checks file EXISTENCE itself —
+  // when neither file is present (dev box, unsigned dev build) it degrades to
+  // releaseManifest:'missing' (soft, capability probe stays up).
   const releaseManifestPath = vm?.releaseManifestPath ?? path.join(prebuilds, 'release-manifest.json');
   const releaseManifestSignaturePath = vm?.releaseManifestSignaturePath ?? path.join(prebuilds, 'release-manifest.json.sig');
   const rootfsDir = vm?.rootfsDir ?? path.join(prebuilds, 'rootfs');

@@ -723,6 +723,49 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     expect(r.releaseManifest).toBe('missing');
     expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
   });
+
+  // F4: buildEngineOpts ALWAYS fills both release-manifest paths with prebuilds
+  // defaults, so the production wiring is indistinguishable from a dev box with
+  // no signed manifest by the paths alone. probe() must existence-check the
+  // files and soft-degrade to 'missing' — NOT let readFile's ENOENT fall into
+  // the outer catch as available:false (which made every unsigned dev-box /
+  // fork-PR probe fail closed instead of degrading).
+  it('F4: paths wired but both files absent → soft missing, probe stays available', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const engine = makeProbeEngine({
+      releaseManifestPath: path.join(tempDir, 'release-manifest.json'),
+      releaseManifestSignaturePath: path.join(tempDir, 'release-manifest.json.sig'),
+    });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(true);
+    expect(r.releaseManifest).toBe('missing');
+    expect(r.gateManifest).toBe('verified');
+    expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
+  });
+
+  it('F4: only one of the pair present → treated as absent (soft missing)', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    const releaseManifest = path.join(tempDir, 'release-manifest.json');
+    await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
+    // Signature file deliberately absent — a half-shipped pair degrades to
+    // 'missing' (the pack-time TCB enforcement catches half-pairs in CI).
+    const engine = makeProbeEngine({
+      releaseManifestPath: releaseManifest,
+      releaseManifestSignaturePath: path.join(tempDir, 'release-manifest.json.sig'),
+    });
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(true);
+    expect(r.releaseManifest).toBe('missing');
+    expect(gateManifest.verifyOuterReleaseManifest).not.toHaveBeenCalled();
+  });
 });
 
 describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {

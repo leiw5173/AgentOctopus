@@ -36,7 +36,7 @@
 //   dup'd copies, independent of what Node does to the originals.
 import { PassThrough } from 'node:stream';
 import { execFile } from 'node:child_process';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -288,30 +288,50 @@ export class VmEngineImpl implements VmEnginePort {
       //         with 'signature-invalid' and available:false
       //       - both present, signature valid → 'verified', available true
       let releaseManifest: 'verified' | 'missing' | 'signature-invalid' = 'missing';
+      // File-EXISTENCE check, not a truthy-path check: buildEngineOpts always
+      // fills both paths with prebuilds defaults, so a path being set says
+      // nothing about whether a signed manifest actually shipped. Absent files
+      // (dev box, unsigned dev build, fork-PR lane with no signing secret) are
+      // the soft 'missing' case — the capability probe stays up. Treating the
+      // paths as a promise and letting readFile throw ENOENT would fail-closed
+      // to unavailable here, defeating the documented soft path.
       const haveReleaseManifest =
-        this.opts.releaseManifestPath && this.opts.releaseManifestSignaturePath;
+        !!this.opts.releaseManifestPath && !!this.opts.releaseManifestSignaturePath &&
+        existsSync(this.opts.releaseManifestPath) &&
+        existsSync(this.opts.releaseManifestSignaturePath);
       if (haveReleaseManifest) {
-        const [outerBytes, sigB64] = await Promise.all([
-          readFile(this.opts.releaseManifestPath!),
-          readFile(this.opts.releaseManifestSignaturePath!, 'utf8'),
-        ]);
-        const signature = Buffer.from(sigB64.trim(), 'base64');
-        const verifyResult = sv.verifyOuterReleaseManifest(outerBytes, signature);
-        if (verifyResult.ok) {
-          releaseManifest = 'verified';
-        } else if (verifyResult.reason === 'bad-signature' || verifyResult.reason === 'no-key') {
-          // Both reasons are fail-closed when a release manifest is PRESENT:
-          // bad-signature = tampered/wrong-key; no-key = trust root never
-          // committed. Neither is acceptable for a claimed signed release.
-          return {
-            available: false,
-            platform: this.deps.platform,
-            reason: verifyResult.reason === 'no-key'
-              ? 'release manifest present but trust root key not committed (release-key.ts placeholder)'
-              : 'outer release manifest signature invalid',
-            gateManifest: 'verified',
-            releaseManifest: 'signature-invalid',
-          };
+        let outerBytes: Buffer | undefined;
+        let sigB64: string | undefined;
+        try {
+          [outerBytes, sigB64] = await Promise.all([
+            readFile(this.opts.releaseManifestPath!),
+            readFile(this.opts.releaseManifestSignaturePath!, 'utf8'),
+          ]);
+        } catch (err) {
+          // TOCTOU defense: a file removed between the existsSync gate and the
+          // read degrades to 'missing' (soft) rather than failing the probe.
+          // Any other read error is a real fault and rethrows to the envelope.
+          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+        }
+        if (outerBytes !== undefined && sigB64 !== undefined) {
+          const signature = Buffer.from(sigB64.trim(), 'base64');
+          const verifyResult = sv.verifyOuterReleaseManifest(outerBytes, signature);
+          if (verifyResult.ok) {
+            releaseManifest = 'verified';
+          } else if (verifyResult.reason === 'bad-signature' || verifyResult.reason === 'no-key') {
+            // Both reasons are fail-closed when a release manifest is PRESENT:
+            // bad-signature = tampered/wrong-key; no-key = trust root never
+            // committed. Neither is acceptable for a claimed signed release.
+            return {
+              available: false,
+              platform: this.deps.platform,
+              reason: verifyResult.reason === 'no-key'
+                ? 'release manifest present but trust root key not committed (release-key.ts placeholder)'
+                : 'outer release manifest signature invalid',
+              gateManifest: 'verified',
+              releaseManifest: 'signature-invalid',
+            };
+          }
         }
       }
       // (4) Real BLK feature probe via the TCB-verified helper. Fail-closed:
