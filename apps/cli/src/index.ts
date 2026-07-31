@@ -1156,7 +1156,7 @@ agentCmd
   .description('Create a new agent')
   .option('--name <name>', 'Agent display name')
   .option('--dm-policy <policy>', 'DM policy (pairing or open)', 'pairing')
-  .option('--sandbox <backend>', 'Sandbox backend (docker, ssh, openshell, none)', 'none')
+  .option('--sandbox <backend>', 'Sandbox backend (auto, docker, os, vm, ssh, none)', 'none')
   .option('--model <model>', 'Per-agent LLM model override')
   .action(async (id: string, options: { name?: string; dmPolicy?: string; sandbox?: string; model?: string }) => {
     const onboarded = await ensureOnboarded();

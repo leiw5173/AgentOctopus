@@ -115,7 +115,11 @@ export const AgentConfigSchema = z.object({
   dmPolicy: z.enum(['pairing', 'open']).default('pairing'),
   sandbox: z.object({
     enabled: z.boolean().default(false),
-    backend: z.enum(['docker', 'ssh', 'openshell', 'none']).default('none'),
+    // Aligned to the canonical SandboxConfigSchema.defaultBackend enum
+    // (packages/sandbox/src/schema.ts). 'openshell' was removed by feat/sandbox's
+    // fail-closed rewrite; restricted OS execution is now opt-in via 'os' +
+    // minIsolationLevel:'restricted', never a free local pass-through.
+    backend: z.enum(['auto', 'docker', 'os', 'vm', 'subprocess', 'ssh', 'none']).default('none'),
     image: z.string().optional(),
     memory: z.string().optional(),
     timeout: z.number().int().optional(),

@@ -107,14 +107,16 @@ sandbox:
 ---
 ```
 
-Sandbox backends:
+Sandbox backends (fail-closed — the selected backend must meet `minIsolationLevel`, default `full`; there is no local pass-through fallback):
 
 | Backend | Isolation level | Use case |
 |---|---|---|
-| `docker` | Container (network-off, memory-limited) | Untrusted or resource-heavy skills |
+| `auto` | Best available (fail-closed) | Default — picks the strongest enforceable isolation |
+| `docker` | Container (egress-proxy network, memory/CPU-limited) | Untrusted or resource-heavy skills |
+| `os` | Restricted local execution | Opt-in restricted floor |
+| `vm` | MicroVM (libkrun) | Strongest local isolation; macOS/Linux |
 | `ssh` | Remote host execution | Offload to dedicated compute |
-| `openshell` | Local pass-through | Fallback / trusted environment |
-| `none` | No isolation | Default |
+| `none` | No isolation | Opt-out |
 
 ## Bundled skills
 
