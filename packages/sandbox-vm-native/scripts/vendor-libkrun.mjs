@@ -254,14 +254,23 @@ async function extractLibkrunfwPrebuilt(workDir, targetDir, tarballPin, libName)
     die(`libkrunfw tarball extract failed: ${err.stderr ?? err.message}`);
   }
 
-  // Find the .dylib/.so inside the extracted tree.
+  // Find the .dylib/.so inside the extracted tree. The Linux prebuilt tarball
+  // ships the standard versioned layout (lib64/libkrunfw.so -> .so.5 ->
+  // .so.5.5.0): the only REGULAR file is the versioned `.so.5.5.0`, so an
+  // exact `-type f -name libkrunfw.so` matches nothing (the unversioned name
+  // is a symlink). The darwin prebuilt ships a plain libkrunfw.dylib regular
+  // file. Try the exact name first (darwin), then a versioned glob (linux).
+  // Trust is already established by downloadVerified()'s tarball SHA-256 check;
+  // this only locates the verified payload within the extracted tree.
   let builtLib = null;
-  try {
-    const { stdout } = await execFileAsync('find', [
-      extractDir, '-type', 'f', '-name', libName, '-print', '-quit',
-    ]);
-    builtLib = stdout.trim();
-  } catch { /* fall through */ }
+  for (const pattern of [libName, `${libName}*`]) {
+    try {
+      const { stdout } = await execFileAsync('find', [
+        extractDir, '-type', 'f', '-name', pattern, '-print', '-quit',
+      ]);
+      if (stdout.trim()) { builtLib = stdout.trim(); break; }
+    } catch { /* fall through */ }
+  }
   if (!builtLib || !existsSync(builtLib)) {
     die(`libkrunfw prebuilt ${libName} not found inside extracted tarball ${tarPath}.`);
   }
