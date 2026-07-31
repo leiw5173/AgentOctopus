@@ -103,10 +103,13 @@ describe('image contract', () => {
     expect(JSON.parse(out.stdout.trim())).toEqual(['two words']);
   }, DOCKER_TIMEOUT);
 
+  // vitest v1's it.each never passes the test context (verified empirically),
+  // so ctx.skip() would crash when dockerAvailable is false — gate with
+  // skipIf on the module-level flag instead.
   it.each(['/bin/sh', '/bin/bash', '/usr/bin/curl', '/usr/bin/wget', '/usr/bin/npm', '/usr/bin/npx'])(
     'runtime omits untrusted convenience tool %s',
-    async (tool, ctx) => {
-      if (!dockerAvailable) return ctx.skip();
+    { skip: !dockerAvailable },
+    async (tool) => {
       const out = await dockerRun(runtimeImage, [
         'node', '-e', `require('fs').accessSync(${JSON.stringify(tool)})`,
       ]);

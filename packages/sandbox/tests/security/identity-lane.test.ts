@@ -186,11 +186,13 @@ describe('identity and snapshot integrity lane', () => {
     await expect(build(fixture.sourceDir, fixture.storeDir)).rejects.toThrow(/hard link/i);
   });
 
-  it.each(['escaping-symlink', 'fifo', 'unix-socket'] as const)('rejects %s at build time', async (kind, context) => {
-    if (process.platform === 'win32' && kind !== 'escaping-symlink') {
-      context.skip();
-      return;
-    }
+  // vitest v1's it.each never passes a test context, so `context.skip()`
+  // below would crash on undefined — use the function-form skip option
+  // (verified working in v1.6.1) instead of the dead win32 ctx.skip branch.
+  it.each(['escaping-symlink', 'fifo', 'unix-socket'] as const)(
+    'rejects %s at build time',
+    { skip: (kind: string) => process.platform === 'win32' && kind !== 'escaping-symlink' },
+    async (kind) => {
 
     const fixture = sourceTree();
     if (kind === 'escaping-symlink') {
