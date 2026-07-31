@@ -148,44 +148,65 @@ jobs:
             packages/sandbox/runtime/os-helper.manifest.json
           if-no-files-found: error
           retention-days: 7
-      # F2c: cross-produce the VM rootfs on the Linux lane. build-vm-rootfs.mjs
+      # F2c/F3: cross-produce the VM TCB on the Linux lane. build-vm-rootfs.mjs
       # is Linux-only (mke2fs + a Linux guest node binary), but the macOS
-      # vm-lane runs a Linux guest under libkrun/HVF and needs this rootfs.
-      # The darwin-arm64 host-side helper + libkrun/libkrunfw are built in the
-      # macOS vm-lane itself (build-vm-helper.mjs + vendor-libkrun.mjs work on
-      # macOS); only the rootfs is cross-produced here. This matches the release
-      # shipping model: linux-produced rootfs, darwin runtime.
+      # vm-lane runs a Linux guest under libkrun/HVF and needs the linux-ARM64
+      # rootfs (guest arch = host arch). security:build-vm (vendor-libkrun +
+      # build-vm-helper + build-vm-rootfs) produces the full linux-x64 TCB
+      # (helper + libs + image builder + vm-tcb-manifest.json) plus BOTH guest
+      # rootfs arches; the ARM64 guest node is the pinned download below. The
+      # darwin-arm64 host-side helper + libkrun/libkrunfw are built in the
+      # macOS vm-lane itself. This matches the release shipping model:
+      # linux-produced rootfs, darwin runtime.
       - name: Install e2fsprogs for VM rootfs build
         run: sudo apt-get install -y --no-install-recommends e2fsprogs
-      - name: Build VM rootfs (Linux guest image, cross-consumed by macOS vm-lane)
-        run: pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/build-vm-rootfs.mjs
-      - name: Verify VM rootfs artifact present
+      - name: Fetch pinned ARM64 Linux guest node (for the linux-arm64 rootfs)
         shell: bash
         run: |
           set -euo pipefail
-          # build-vm-rootfs.mjs writes prebuilds/linux-<arch>/rootfs.{img,manifest.json}.
-          # The macOS arm64 lane consumes the linux-arm64 rootfs (guest arch =
-          # host arch under libkrun); the linux-x64 rootfs is also produced when
-          # the cross-toolchain is available.
-          found=0
-          for arch in linux-arm64 linux-x64; do
-            if [ -f "packages/sandbox-vm-native/prebuilds/$arch/rootfs.img" ]; then
-              found=1
-              echo "VM rootfs present for $arch"
-            fi
+          # build-vm-rootfs.mjs COPIES this binary into the guest rootfs (it is
+          # never executed on the host), so its ELF arch must match the guest
+          # arch. Pin URL + SHA256 from the nodejs.org dist, verify, extract —
+          # same download-verify pattern as vendor-libkrun.mjs. Version tracks
+          # CI's Node 22 (setup-node-env default).
+          url='https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz'
+          sha='fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8'
+          curl -fsSL --retry 3 -o /tmp/node-arm64.tar.xz "$url"
+          echo "$sha  /tmp/node-arm64.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/node-arm64
+          tar -xJf /tmp/node-arm64.tar.xz -C /tmp/node-arm64 --strip-components=1
+          test -x /tmp/node-arm64/bin/node
+          echo "OCTOPUS_ROOTFS_NODE_ARM64=/tmp/node-arm64/bin/node" >> "$GITHUB_ENV"
+      - name: Build the full linux-x64 VM TCB + both-arch guest rootfs
+        run: |
+          pnpm --filter @agentoctopus/sandbox-vm-native build
+          pnpm --filter @agentoctopus/sandbox-vm-native security:build-vm
+      - name: Verify VM TCB artifacts present (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=packages/sandbox-vm-native/prebuilds
+          # Full linux-x64 host TCB (consumed by the privileged-linux qualifier
+          # and by the release pack job).
+          for f in sandbox-vm-helper libkrun.so libkrunfw.so vm-image-builder vm-tcb-manifest.json; do
+            test -f "$base/linux-x64/$f" || { echo "ERROR: missing $base/linux-x64/$f" >&2; exit 1; }
           done
-          if [ "$found" -ne 1 ]; then
-            echo "ERROR: no VM rootfs.img produced under prebuilds/linux-*/" >&2
-            exit 1
-          fi
+          # Both guest arches: the top-level img + manifest (run-vm-gates.mjs
+          # qualification) AND the runtime rootfs/<ref> placement consumed by
+          # engine.resolveRootfs at launch.
+          for arch in linux-arm64 linux-x64; do
+            test -f "$base/$arch/rootfs.img" || { echo "ERROR: missing $base/$arch/rootfs.img — OCTOPUS_ROOTFS_NODE_ARM64 provisioning broken" >&2; exit 1; }
+            test -f "$base/$arch/rootfs.manifest.json" || { echo "ERROR: missing $base/$arch/rootfs.manifest.json" >&2; exit 1; }
+            ref=$(node -p "JSON.parse(require('fs').readFileSync('$base/$arch/rootfs.manifest.json','utf8')).ref")
+            test -f "$base/$arch/rootfs/$ref" || { echo "ERROR: missing runtime placement $base/$arch/rootfs/$ref" >&2; exit 1; }
+            echo "VM rootfs present for $arch (ref $ref)"
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: vm-rootfs-artifacts
+          name: vm-tcb-linux-x64
           path: |
-            packages/sandbox-vm-native/prebuilds/linux-arm64/rootfs.img
-            packages/sandbox-vm-native/prebuilds/linux-arm64/rootfs.manifest.json
-            packages/sandbox-vm-native/prebuilds/linux-x64/rootfs.img
-            packages/sandbox-vm-native/prebuilds/linux-x64/rootfs.manifest.json
+            packages/sandbox-vm-native/prebuilds/linux-x64/
+            packages/sandbox-vm-native/prebuilds/linux-arm64/
           if-no-files-found: error
           retention-days: 7
 
@@ -337,49 +358,72 @@ jobs:
         run: |
           pnpm --filter @agentoctopus/sandbox build
           pnpm --filter @agentoctopus/sandbox-vm-native build
-      # F2c: download the Linux-produced VM rootfs (cross-TCB provisioning).
-      # build-vm-rootfs.mjs is Linux-only (mke2fs + Linux guest node), so the
-      # macOS lane downloads the linux-arm64 rootfs (guest arch = host arch
-      # under libkrun/HVF) produced by produce-linux-artifacts. The mac-side
-      # helper + libkrun/libkrunfw are built locally next (those scripts work
-      # on macOS); only the rootfs is cross-produced.
-      - name: Download VM rootfs from Linux producer
+      # F2c/F3: download the Linux-produced VM TCB. build-vm-rootfs.mjs is
+      # Linux-only (mke2fs + a Linux guest node), so produce-linux-artifacts
+      # builds the full linux-x64 TCB + both-arch guest rootfs and this lane
+      # consumes the linux-arm64 rootfs (guest arch = host arch under
+      # libkrun/HVF). The mac-side helper + libkrun/libkrunfw are built locally
+      # next (those scripts work on macOS).
+      - name: Download VM TCB from the Linux producer
         uses: actions/download-artifact@v4
         with:
-          name: vm-rootfs-artifacts
+          name: vm-tcb-linux-x64
           path: packages/sandbox-vm-native/prebuilds
-      - name: Place rootfs under the darwin-arm64 prebuilds dir
+      - name: Place the linux-arm64 rootfs under the darwin-arm64 prebuilds dir
         shell: bash
         run: |
           set -euo pipefail
-          # The lane runs as darwin-arm64; place the linux-arm64 guest rootfs
-          # where buildLaneVmEngine resolves it (prebuilds/darwin-arm64/rootfs.*
-          # — the host-side helper dir; the rootfs is a Linux guest image but
-          # is consumed by the darwin-arm64 host lane).
-          mkdir -p packages/sandbox-vm-native/prebuilds/darwin-arm64/rootfs
-          if [ -f packages/sandbox-vm-native/prebuilds/linux-arm64/rootfs.img ]; then
-            cp packages/sandbox-vm-native/prebuilds/linux-arm64/rootfs.img packages/sandbox-vm-native/prebuilds/darwin-arm64/
-            cp packages/sandbox-vm-native/prebuilds/linux-arm64/rootfs.manifest.json packages/sandbox-vm-native/prebuilds/darwin-arm64/
-          elif [ -f packages/sandbox-vm-native/prebuilds/linux-x64/rootfs.img ]; then
-            cp packages/sandbox-vm-native/prebuilds/linux-x64/rootfs.img packages/sandbox-vm-native/prebuilds/darwin-arm64/
-            cp packages/sandbox-vm-native/prebuilds/linux-x64/rootfs.manifest.json packages/sandbox-vm-native/prebuilds/darwin-arm64/
-          else
-            echo "ERROR: no VM rootfs in the downloaded artifact — produce-linux-artifacts did not produce one" >&2
-            exit 1
-          fi
+          # The guest arch equals the host arch under libkrun/HVF: this
+          # darwin-arm64 lane boots a linux-ARM64 guest. Consume ONLY the
+          # linux-arm64 rootfs — an x64 guest image cannot run in the ARM VM
+          # (the guest node binary is copied into the rootfs, never executed
+          # at build time, so its ELF arch must match the guest). Fail closed
+          # if the producer did not provide it (no x64 fallback).
+          src=packages/sandbox-vm-native/prebuilds/linux-arm64
+          dst=packages/sandbox-vm-native/prebuilds/darwin-arm64
+          test -f "$src/rootfs.img" || { echo "ERROR: linux-arm64 rootfs missing from vm-tcb-linux-x64 — produce-linux-artifacts must set OCTOPUS_ROOTFS_NODE_ARM64" >&2; exit 1; }
+          mkdir -p "$dst/rootfs"
+          cp "$src/rootfs.img" "$dst/rootfs.img"                 # run-vm-gates.mjs qualification image
+          cp "$src/rootfs.manifest.json" "$dst/rootfs.manifest.json"
+          cp -R "$src/rootfs/." "$dst/rootfs/"                   # rootfs/<ref> for engine.resolveRootfs
+          ref=$(node -p "JSON.parse(require('fs').readFileSync('$dst/rootfs.manifest.json','utf8')).ref")
+          test -f "$dst/rootfs/$ref" || { echo "ERROR: runtime rootfs placement $dst/rootfs/$ref missing" >&2; exit 1; }
+          # Consumed by vm-lane-setup.ts as runtimeProfile.vmRuntime.rootfs —
+          # without it the tests would default to an all-zero digest that
+          # qualifies nothing and resolves no file.
+          echo "OCTOPUS_VM_ROOTFS_REF=$ref" >> "$GITHUB_ENV"
+          echo "Placed linux-arm64 rootfs for the darwin-arm64 lane (ref $ref)"
       - name: Build mac-side VM helper + vendor libkrun/libkrunfw
         run: |
           pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/vendor-libkrun.mjs
           pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/build-vm-helper.mjs
-      # The VM lane requires the full TCB (libkrun + libkrunfw + rootfs + helper)
-      # to be vendored/produced via security:build-vm. F2b: the lane is FAIL-
-      # CLOSED on a missing/skipped TCB — the L3/L4 tests emit a JSON report
-      # and assert-no-skipped-tests.mjs exits non-zero if ANY test is
-      # skipped/pending/todo/failed. So a missing TCB (probe() returns false →
-      # every test skipIf's) now FAILS the vm-lane job → security-gate fails,
-      # rather than silently passing with zero tests executed. The TCB is
-      # cross-produced on the Linux release lane + macOS in-run (see the
-      # download step below); when provisioned, the tests run for real.
+      # ORDERING (F1): the G1/G2 gates + release-manifest signature MUST run
+      # BEFORE the L3/L4 tests. The tests' engine.probe() reads
+      # prebuilds/darwin-arm64/gate-manifest.json (+ release-manifest pair);
+      # producing them only AFTER the tests made every test skip, and the
+      # zero-skip gate then failed the lane. Now the manifests exist before
+      # the tests run, and the lane is FAIL-CLOSED end to end: a NO-GO (rc=2)
+      # or any skipped test fails the job, so security-gate can never pass on
+      # a lane that executed zero L3/L4 tests.
+      - name: Run G1/G2 gates (fail closed on NO-GO)
+        run: pnpm --filter @agentoctopus/sandbox-vm-native security:probe-vm
+      # Sign the outer release manifest. Fork PRs cannot access repository
+      # secrets, so signing is skipped there — the lane still runs the L3/L4
+      # tests against the unsigned TCB (probe() soft-degrades to
+      # releaseManifest:'missing'). On same-repo events (and every master push
+      # that drives Release Preflight) signing is REQUIRED and fails closed if
+      # the secret is absent.
+      - name: Sign release manifest (same-repo events, fail closed)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          set -euo pipefail
+          if [ -z "${OCTOPUS_VM_RELEASE_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: OCTOPUS_VM_RELEASE_PRIVATE_KEY is not set — cannot sign the release manifest on a same-repo event." >&2
+            exit 1
+          fi
+          pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/sign-release-manifest.mjs
+        env:
+          OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
       - name: Run VM L3 + L4 (fail-closed on any skip)
         run: |
           pnpm --filter @agentoctopus/sandbox exec vitest run \
@@ -387,23 +431,16 @@ jobs:
             tests/security/vm-escape-matrix.test.ts \
             --reporter=json --outputFile=/tmp/vm-security.json
           node packages/sandbox/scripts/assert-no-skipped-tests.mjs /tmp/vm-security.json
-      # When the full TCB is present, produce/refresh the gate manifest + sign
-      # the outer release manifest. These are no-ops (exit 0) if probe() fails.
-      - name: Run G1/G2 gates + sign release manifest (if TCB present)
-        run: |
-          set +e
-          pnpm --filter @agentoctopus/sandbox-vm-native security:probe-vm
-          probe_rc=$?
-          if [ "$probe_rc" -eq 2 ]; then
-            echo "VM gates NO-GO — lane not qualified. The gate manifest records the failure."
-            exit 1
-          fi
-          # probe_rc=0 → qualified; sign the manifest (needs OCTOPUS_VM_RELEASE_PRIVATE_KEY).
-          if [ "$probe_rc" -eq 0 ] && [ -n "${OCTOPUS_VM_RELEASE_PRIVATE_KEY:-}" ]; then
-            pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/sign-release-manifest.mjs
-          fi
-        env:
-          OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
+      # F3: upload the qualified + tested darwin-arm64 TCB (helper, libs, image
+      # builder, TCB/gate/release manifests, sealed rootfs). Release Preflight's
+      # pack job merges this with the linux-x64 qualified TCB into the published
+      # native tarball — and fails closed if either platform is incomplete.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm-tcb-darwin-arm64
+          path: packages/sandbox-vm-native/prebuilds/darwin-arm64/
+          if-no-files-found: error
+          retention-days: 7
 
   security-gate:
     name: security-gate
