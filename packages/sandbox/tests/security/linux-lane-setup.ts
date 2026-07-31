@@ -211,9 +211,11 @@ export interface LinuxSandbox {
  * with the exact canonical options. Returns a handle owning full teardown.
  *
  * The runtimeProfile.osRuntime.nodePath mirrors the reviewed runtime manifest
- * (`linux-node22` ships node at /usr/bin/node). The artifactPath/manifestPath
- * are informational here — the backend resolves+verifies the real artifacts
- * itself via resolveOsArtifacts() and rejects any mismatch fail-closed.
+ * (`linux-node22` ships node at /usr/local/bin/node — see the Dockerfile in
+ * build-security-images.mjs, which copies node there from the upstream image).
+ * The artifactPath/manifestPath are informational here — the backend
+ * resolves+verifies the real artifacts itself via resolveOsArtifacts() and
+ * rejects any mismatch fail-closed.
  */
 export async function setupLinuxSandbox(opts: LinuxSandboxOptions = {}): Promise<LinuxSandbox> {
   wireArtifactEnv();
@@ -322,11 +324,11 @@ export async function setupLinuxSandbox(opts: LinuxSandboxOptions = {}): Promise
   const runtimeProfile: ResolvedRuntimeProfile = {
     id: 'linux-lane',
     bins: ['node'],
-    path: '/usr/bin',
+    path: '/usr/local/bin',
     osRuntime: {
       artifactPath: process.env.OCTOPUS_SANDBOX_OS_RUNTIME_ARTIFACT ?? '',
       manifestPath: process.env.OCTOPUS_SANDBOX_OS_RUNTIME_MANIFEST ?? '',
-      nodePath: '/usr/bin/node',
+      nodePath: '/usr/local/bin/node',
     },
   };
 

@@ -59,22 +59,37 @@ function sha256(buf: Buffer): string {
 }
 
 interface FileSpec { rel: string; content: Buffer; mode: number }
+interface SymlinkSpec { rel: string; target: string }
 
 /**
  * Write files into `dir`, build a tar.zst of the tree, return
  * { tarPath, manifest } — the manifest faithfully records every entry.
+ *
+ * Symlinks (optional `opts.symlinks`) are recorded as kind:'symlink' with
+ * mode:0, size:0, sha256=sha256(linkTarget), and a linkTarget field — the same
+ * shape the producer (build-runtime-rootfs.mjs) emits and the verifier
+ * (walkTree) accepts.
  */
 async function buildArtifact(
   dir: string,
   files: FileSpec[],
-  opts: { nodePath?: '/usr/bin/node' | '/bin/node'; compress?: boolean } = {},
+  opts: {
+    nodePath?: '/usr/bin/node' | '/bin/node' | '/usr/local/bin/node';
+    compress?: boolean;
+    symlinks?: SymlinkSpec[];
+  } = {},
 ): Promise<{ artifactPath: string; manifest: RuntimeArtifactManifest }> {
   const entries: RuntimeArtifactManifest['files'] = [];
+  const symlinks = opts.symlinks ?? [];
 
-  // Directories first (sorted), then files.
+  // Directories first (sorted), then files, then symlinks.
   const dirs = new Set<string>();
   for (const f of files) {
     const parts = f.rel.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+  }
+  for (const s of symlinks) {
+    const parts = s.rel.split('/');
     for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
   }
   for (const d of [...dirs].sort()) {
@@ -88,6 +103,19 @@ async function buildArtifact(
     await fs.writeFile(full, f.content, { mode: f.mode });
     await fs.chmod(full, f.mode);
     entries.push({ path: f.rel, sha256: sha256(f.content), size: f.content.length, mode: f.mode, kind: 'file' });
+  }
+  for (const s of [...symlinks].sort((a, b) => a.rel.localeCompare(b.rel))) {
+    const full = path.join(dir, s.rel);
+    await fs.mkdir(path.dirname(full), { recursive: true });
+    await fs.symlink(s.target, full);
+    entries.push({
+      path: s.rel,
+      sha256: sha256(Buffer.from(s.target, 'utf8')),
+      size: 0,
+      mode: 0,
+      kind: 'symlink',
+      linkTarget: s.target,
+    });
   }
 
   const artifactPath = path.join(dir, '..', `artifact-${crypto.randomBytes(4).toString('hex')}.tar${opts.compress === false ? '' : '.zst'}`);
@@ -403,6 +431,28 @@ describe('verifyRuntimeArtifact — manifest schema', () => {
       .rejects.toThrow(RootfsError);
   });
 
+  it('rejects a symlink entry missing linkTarget', async () => {
+    const { artifactPath, manifest } = await makeValidRuntime();
+    const bad = {
+      ...manifest,
+      files: [...manifest.files, { path: 'usr/lib/libfoo.so.1', sha256: sha256(Buffer.alloc(0)), size: 0, mode: 0, kind: 'symlink' }],
+    };
+    const manifestPath = await writeManifest(await tmp('oct-m-'), bad);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
+      .rejects.toThrow(/linkTarget/i);
+  });
+
+  it('rejects a non-symlink entry carrying linkTarget', async () => {
+    const { artifactPath, manifest } = await makeValidRuntime();
+    const bad = {
+      ...manifest,
+      files: manifest.files.map((f) => f.path === 'lib64/ld-linux-x86-64.so.2' ? { ...f, linkTarget: 'evil' } : f),
+    };
+    const manifestPath = await writeManifest(await tmp('oct-m-'), bad);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
+      .rejects.toThrow(/linkTarget/i);
+  });
+
   it('rejects a manifest with unknown top-level fields (strict)', async () => {
     const { artifactPath, manifest } = await makeValidRuntime();
     const bad = { ...manifest, evil: true };
@@ -413,10 +463,25 @@ describe('verifyRuntimeArtifact — manifest schema', () => {
 
   it('rejects a nodePath outside the allowed enum', async () => {
     const { artifactPath, manifest } = await makeValidRuntime();
-    const bad = { ...manifest, nodePath: '/usr/local/bin/node' };
+    const bad = { ...manifest, nodePath: '/usr/sbin/node' };
     const manifestPath = await writeManifest(await tmp('oct-m-'), bad);
     await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
       .rejects.toThrow(RootfsError);
+  });
+
+  it('accepts /usr/local/bin/node (distroless node image layout)', async () => {
+    // The reviewed runtime image copies node to /usr/local/bin/node (see
+    // build-security-images.mjs Dockerfile), and schema.ts/backend.ts already
+    // allow it. The verifier must accept a manifest declaring it.
+    const treeDir = await tmp('oct-tree-np-');
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: [] });
+    const { artifactPath, manifest } = await buildArtifact(treeDir, [
+      { rel: 'usr/local/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+    ], { nodePath: '/usr/local/bin/node' });
+    const manifestPath = await writeManifest(path.dirname(artifactPath), manifest);
+    const got = await verifyRuntimeArtifact({ artifactPath, manifestPath });
+    expect(got.nodePath).toBe('/usr/local/bin/node');
   });
 });
 
@@ -627,6 +692,112 @@ describe('verifyRuntimeArtifact — ELF dependency closure', () => {
     const manifestPath = await writeManifest(await tmp('oct-m-'), fixed);
     await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
       .rejects.toThrow(/PT_LOAD/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Symlink handling — in-rootfs links pass, escaping links reject (defense-in-
+// depth), linkTarget tampering rejects, symlinked DT_NEEDED sonames resolve.
+// Mirrors the snapshot.ts walk() precedent (record + escape-check).
+// ---------------------------------------------------------------------------
+
+describe('verifyRuntimeArtifact — symlinks', () => {
+  it('accepts an in-rootfs relative symlink', async () => {
+    const treeDir = await tmp('oct-tree-sym1-');
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: [] });
+    const { artifactPath, manifest } = await buildArtifact(treeDir, [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libfoo.so.1.0', content: Buffer.from('libfoo'), mode: 0o755 },
+    ], {
+      nodePath: '/usr/bin/node',
+      symlinks: [{ rel: 'usr/lib/libfoo.so.1', target: 'libfoo.so.1.0' }],
+    });
+    const manifestPath = await writeManifest(path.dirname(artifactPath), manifest);
+    const got = await verifyRuntimeArtifact({ artifactPath, manifestPath });
+    const link = got.files.find((f) => f.path === 'usr/lib/libfoo.so.1');
+    expect(link?.kind).toBe('symlink');
+    expect(link?.linkTarget).toBe('libfoo.so.1.0');
+  });
+
+  it('rejects an escaping absolute symlink (etc/mtab -> /proc/mounts)', async () => {
+    const treeDir = await tmp('oct-tree-sym2-');
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: [] });
+    // The verifier must reject this even if the manifest declares it honestly —
+    // a symlink escaping the rootfs is a path-traversal vector regardless.
+    const { artifactPath, manifest } = await buildArtifact(treeDir, [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+    ], {
+      nodePath: '/usr/bin/node',
+      symlinks: [{ rel: 'etc/mtab', target: '/proc/mounts' }],
+    });
+    const manifestPath = await writeManifest(path.dirname(artifactPath), manifest);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
+      .rejects.toThrow(/escapes rootfs/i);
+  });
+
+  it('rejects a symlink whose on-disk linkTarget was tampered', async () => {
+    const treeDir = await tmp('oct-tree-sym3-');
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: [] });
+    const { artifactPath, manifest } = await buildArtifact(treeDir, [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libfoo.so.1.0', content: Buffer.from('libfoo'), mode: 0o755 },
+    ], {
+      nodePath: '/usr/bin/node',
+      symlinks: [{ rel: 'usr/lib/libfoo.so.1', target: 'libfoo.so.1.0' }],
+    });
+    // Rewrite the on-disk tarball: retarget the symlink to a different target
+    // while leaving the manifest's linkTarget unchanged.
+    await fs.rm(path.join(treeDir, 'usr/lib/libfoo.so.1'));
+    await fs.symlink('libfoo.so.1.0.TAMPERED', path.join(treeDir, 'usr/lib/libfoo.so.1'));
+    // Rebuild the tar.zst from the tampered tree, preserving the original
+    // manifest's linkTarget so the mismatch is detected at verify time.
+    const tamperedTar = artifactPath.replace(/\.zst$/, '') + '.tampered.tar';
+    await execFileAsync('tar', ['-cf', tamperedTar, '-C', treeDir,
+      ...manifest.files.map((f) => f.path)]);
+    await execFileAsync('zstd', ['-q', '-f', '-o', artifactPath, tamperedTar]);
+    const artifactBuf = await fs.readFile(artifactPath);
+    const fixed = { ...manifest, artifactSha256: sha256(artifactBuf) };
+    const manifestPath = await writeManifest(await tmp('oct-m-'), fixed);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
+      .rejects.toThrow(/linkTarget mismatch/i);
+  });
+
+  it('resolves a DT_NEEDED soname provided as a symlink', async () => {
+    // node needs libfoo.so.1; the rootfs provides it as a symlink -> the real
+    // libfoo.so.1.0 file. The dynamic loader follows symlinks, so the soname
+    // is present iff the symlink exists. Excluding symlinks from the basename
+    // map would falsely reject this closure.
+    const treeDir = await tmp('oct-tree-sym4-');
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: ['libfoo.so.1'] });
+    const { artifactPath, manifest } = await buildArtifact(treeDir, [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+      { rel: 'usr/lib/libfoo.so.1.0', content: Buffer.from('libfoo'), mode: 0o755 },
+    ], {
+      nodePath: '/usr/bin/node',
+      symlinks: [{ rel: 'usr/lib/libfoo.so.1', target: 'libfoo.so.1.0' }],
+    });
+    const manifestPath = await writeManifest(path.dirname(artifactPath), manifest);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
+      .resolves.toBeDefined();
+  });
+
+  it('accepts a symlink that resolves to the rootfs root (foo -> .)', async () => {
+    const treeDir = await tmp('oct-tree-sym5-');
+    const nodeElf = buildElf64({ interp: '/lib64/ld-linux-x86-64.so.2', needed: [] });
+    const { artifactPath, manifest } = await buildArtifact(treeDir, [
+      { rel: 'usr/bin/node', content: nodeElf, mode: 0o755 },
+      { rel: 'lib64/ld-linux-x86-64.so.2', content: Buffer.from('loader'), mode: 0o755 },
+    ], {
+      nodePath: '/usr/bin/node',
+      symlinks: [{ rel: 'self', target: '.' }],
+    });
+    const manifestPath = await writeManifest(path.dirname(artifactPath), manifest);
+    await expect(verifyRuntimeArtifact({ artifactPath, manifestPath }))
+      .resolves.toBeDefined();
   });
 });
 
@@ -863,7 +1034,7 @@ describe.skipIf(!isLinux)('runtime rootfs — real artifact (Linux lane)', () =>
       return; // soft skip
     }
     const manifest = await verifyRuntimeArtifact({ artifactPath: realArtifact, manifestPath: realManifest });
-    expect(['/usr/bin/node', '/bin/node']).toContain(manifest.nodePath);
+    expect(['/usr/bin/node', '/bin/node', '/usr/local/bin/node']).toContain(manifest.nodePath);
     expect(manifest.files.some((f) => f.path === manifest.nodePath.slice(1) && (f.mode & 0o111) !== 0)).toBe(true);
     expect(manifest.files.some((f) => /ld-linux|ld-musl/.test(f.path))).toBe(true);
   });

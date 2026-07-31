@@ -36,6 +36,7 @@ import {
   readFile,
   rm,
   lstat,
+  readlink,
   chmod,
   open,
 } from 'node:fs/promises';
@@ -60,13 +61,15 @@ export interface RuntimeArtifactManifest {
   schemaVersion: 1;
   artifactSha256: string;
   rootfsTreeSha256: string;
-  nodePath: '/usr/bin/node' | '/bin/node';
+  nodePath: '/usr/bin/node' | '/bin/node' | '/usr/local/bin/node';
   files: Array<{
     path: string;
     sha256: string;
     size: number;
     mode: number;
-    kind: 'file' | 'directory';
+    kind: 'file' | 'directory' | 'symlink';
+    /** Raw readlink() target. Required for kind:'symlink', forbidden otherwise. */
+    linkTarget?: string;
   }>;
 }
 
@@ -108,16 +111,26 @@ const ManifestFileSchema = z
     sha256: z.string().regex(SHA256_RE, 'sha256 must be 64 lowercase hex'),
     size: z.number().int().nonnegative(),
     mode: z.number().int().nonnegative(),
-    kind: z.enum(['file', 'directory']),
+    kind: z.enum(['file', 'directory', 'symlink']),
+    linkTarget: z.string().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((f, ctx) => {
+    if (f.kind === 'symlink') {
+      if (f.linkTarget === undefined || f.linkTarget.length === 0) {
+        ctx.addIssue({ code: 'custom', message: `symlink entry ${f.path} requires a non-empty linkTarget` });
+      }
+    } else if (f.linkTarget !== undefined) {
+      ctx.addIssue({ code: 'custom', message: `non-symlink entry ${f.path} must not carry linkTarget` });
+    }
+  });
 
 const RuntimeArtifactManifestSchema = z
   .object({
     schemaVersion: z.literal(1),
     artifactSha256: z.string().regex(SHA256_RE),
     rootfsTreeSha256: z.string().regex(SHA256_RE),
-    nodePath: z.enum(['/usr/bin/node', '/bin/node']),
+    nodePath: z.enum(['/usr/bin/node', '/bin/node', '/usr/local/bin/node']),
     files: z.array(ManifestFileSchema).nonempty(),
   })
   .strict()
@@ -377,19 +390,38 @@ async function extractArtifact(opts: ExtractOptions): Promise<void> {
 
 interface WalkEntry {
   rel: string;
-  kind: 'file' | 'directory';
+  kind: 'file' | 'directory' | 'symlink';
   mode: number;
   size: number;
   sha256: string;
+  linkTarget?: string;
 }
 
 async function walkTree(root: string): Promise<WalkEntry[]> {
   const out: WalkEntry[] = [];
+  const rootResolved = path.resolve(root);
   async function walk(rel: string): Promise<void> {
     const abs = rel === '' ? root : path.join(root, rel);
     const st = await lstat(abs);
     if (st.isSymbolicLink()) {
-      throw new RootfsError(`extracted tree contains a symlink: ${rel}`);
+      const target = await readlink(abs);
+      // Defense-in-depth: reject any symlink whose target resolves outside the
+      // rootfs (mirrors snapshot.ts walk()). The producer pre-pass strips the
+      // known runtime-only escapers (etc/mtab -> /proc/mounts), but a tampered
+      // artifact could still carry one; never let it into the manifest.
+      const resolved = path.resolve(path.dirname(abs), target);
+      if (!resolved.startsWith(rootResolved + path.sep) && resolved !== rootResolved) {
+        throw new RootfsError(`symlink escapes rootfs: ${rel} -> ${target}`);
+      }
+      out.push({
+        rel,
+        kind: 'symlink',
+        mode: 0,
+        size: 0,
+        sha256: await sha256Buffer(Buffer.from(target, 'utf8')),
+        linkTarget: target,
+      });
+      return;
     }
     if (st.isDirectory()) {
       if (rel !== '') {
@@ -426,7 +458,11 @@ async function verifyTree(root: string, manifest: RuntimeArtifactManifest): Prom
   const walked = await walkTree(root);
   const byRel = new Map(walked.map((w) => [w.rel, w]));
 
-  // Every declared entry must exist with matching kind/mode/size/sha256.
+  // Every declared entry must exist with matching kind, and (for files) matching
+  // size/sha256, (for symlinks) matching linkTarget. Mode comparison is skipped
+  // for symlinks: the manifest records mode 0 (the on-disk lstat mode of a
+  // symlink is 0o777 on Linux and not portable/meaningful), and the linkTarget
+  // check IS the content check for a symlink.
   for (const f of manifest.files) {
     const w = byRel.get(f.path);
     if (!w) throw new RootfsError(`extracted tree missing declared entry: ${f.path}`);
@@ -434,10 +470,18 @@ async function verifyTree(root: string, manifest: RuntimeArtifactManifest): Prom
     if (f.kind === 'file') {
       if (w.size !== f.size) throw new RootfsError(`extracted entry ${f.path} size mismatch`);
       if (w.sha256 !== f.sha256) throw new RootfsError(`extracted entry ${f.path} sha256 mismatch`);
-    }
-    // Mode comparison: allow the extractor to tighten permissions but never loosen.
-    if ((w.mode & ~f.mode) !== 0) {
-      throw new RootfsError(`extracted entry ${f.path} mode has extra bits: expected ${f.mode.toString(8)}, got ${w.mode.toString(8)}`);
+      if ((w.mode & ~f.mode) !== 0) {
+        throw new RootfsError(`extracted entry ${f.path} mode has extra bits: expected ${f.mode.toString(8)}, got ${w.mode.toString(8)}`);
+      }
+    } else if (f.kind === 'symlink') {
+      if (w.linkTarget !== f.linkTarget) {
+        throw new RootfsError(`extracted symlink ${f.path} linkTarget mismatch: expected ${f.linkTarget}, got ${w.linkTarget}`);
+      }
+    } else {
+      // directory: mode check only (extractor may tighten, never loosen).
+      if ((w.mode & ~f.mode) !== 0) {
+        throw new RootfsError(`extracted entry ${f.path} mode has extra bits: expected ${f.mode.toString(8)}, got ${w.mode.toString(8)}`);
+      }
     }
   }
 
@@ -483,10 +527,13 @@ async function verifyElfClosure(root: string, manifest: RuntimeArtifactManifest)
 
   // Every DT_NEEDED soname must resolve to a manifest entry. We search the
   // manifest for a file whose basename matches the soname (standard linker
-  // behaviour for a flat rootfs layout).
+  // behaviour for a flat rootfs layout). Symlinks are valid resolutions: the
+  // dynamic loader follows them (e.g. libstdc++.so.6 -> libstdc++.so.6.0.30),
+  // and a symlink's target is itself a verified in-rootfs file (the walkTree
+  // escape check guarantees this), so accepting it is sound.
   const basenames = new Map<string, string>();
   for (const f of manifest.files) {
-    if (f.kind !== 'file') continue;
+    if (f.kind === 'directory') continue;
     const base = f.path.split('/').pop()!;
     if (!basenames.has(base)) basenames.set(base, f.path);
   }

@@ -161,14 +161,78 @@ async function main() {
   await execFileAsync('tar', ['-xf', exportTar, '-C', treeDir, '--no-same-owner', '--no-same-permissions'])
     .catch((err) => die(`tar extraction of exported rootfs failed: ${err.stderr ?? err.message}`));
 
+  // Step 2.5: pre-pass to strip runtime-only entries that have no static
+  // representation in the rootfs and would either fail verification or be
+  // unsafe to declare. This keeps walk() structurally identical to the
+  // verifier's walkTree() (both pure allowlist enforcers that record in-rootfs
+  // symlinks and throw on escapers). The pre-pass is the one place the
+  // producer diverges: it *removes* runtime-only entries rather than failing.
+  //
+  // Two cases are stripped:
+  //   - Root-level `proc`/`dev`/`sys`: runtime virtual-fs mount points created
+  //     fresh by assembleRootfs (proc/dev/tmp) and mounted at chroot time by
+  //     helper.c. `dev` may also hold device nodes that walk() must reject.
+  //   - Any symlink whose target escapes the rootfs (e.g. etc/mtab ->
+  //     /proc/mounts): these are dangling at verification time (/proc is not
+  //     mounted) and are a path-traversal vector if declared. Stripped by
+  //     generic escape-check, never by name — a name-based allowlist of "safe
+  //     absolute targets" would be a security regression.
+  const rootResolved = path.resolve(treeDir);
+  async function stripRuntimeOnly(rel) {
+    const abs = rel === '' ? treeDir : path.join(treeDir, rel);
+    const st = await fs.lstat(abs);
+    if (rel === 'proc' || rel === 'dev' || rel === 'sys') {
+      if (st.isDirectory() || st.isSymbolicLink()) {
+        console.error(`build-runtime-rootfs: stripping runtime VFS placeholder ${rel}/`);
+        await fs.rm(abs, { recursive: true, force: true });
+      }
+      return;
+    }
+    if (st.isSymbolicLink()) {
+      const target = await fs.readlink(abs);
+      const resolved = path.resolve(path.dirname(abs), target);
+      if (!resolved.startsWith(rootResolved + path.sep) && resolved !== rootResolved) {
+        console.error(`build-runtime-rootfs: stripping escaping symlink ${rel} -> ${target} (runtime-only; /proc is mounted at chroot time)`);
+        await fs.rm(abs, { force: true });
+      }
+      return; // do not recurse into symlink targets
+    }
+    if (st.isDirectory()) {
+      for (const c of await fs.readdir(abs)) {
+        await stripRuntimeOnly(rel === '' ? c : `${rel}/${c}`);
+      }
+    }
+    // files/devices elsewhere: leave to walk() to enforce
+  }
+  await stripRuntimeOnly('');
+
   // Step 3: walk the tree with the same allowlist rules as verifyRuntimeArtifact.
   const entries = [];
   async function walk(rel) {
     const abs = rel === '' ? treeDir : path.join(treeDir, rel);
     const st = await fs.lstat(abs);
-    if (st.isSymbolicLink()) die(`exported tree contains a symlink: ${rel} — refusing to produce a manifest that would fail verification`, 2);
     if (st.isSocket() || st.isFIFO() || st.isCharacterDevice() || st.isBlockDevice()) {
       die(`exported tree contains a special file (device/FIFO/socket): ${rel} — refusing`, 2);
+    }
+    if (st.isSymbolicLink()) {
+      const target = await fs.readlink(abs);
+      const resolved = path.resolve(path.dirname(abs), target);
+      const rootRes = path.resolve(treeDir);
+      // Defense-in-depth: the pre-pass should have stripped any escaper, but
+      // walk() mirrors the verifier's walkTree() exactly — it throws on any
+      // symlink that escapes the rootfs rather than ever recording it.
+      if (!resolved.startsWith(rootRes + path.sep) && resolved !== rootRes) {
+        die(`exported tree contains an escaping symlink: ${rel} -> ${target} — the pre-pass should have stripped this`, 2);
+      }
+      entries.push({
+        path: rel,
+        kind: 'symlink',
+        mode: 0,
+        size: 0,
+        sha256: sha256Buffer(Buffer.from(target, 'utf8')),
+        linkTarget: target,
+      });
+      return;
     }
     if (st.isDirectory()) {
       if (rel !== '') {
@@ -201,10 +265,10 @@ async function main() {
     die(`cannot import compiled verifier at ${DIST_ROOTFS}\n  Run \`pnpm --filter @agentoctopus/sandbox build\` first.`);
   }
 
-  const nodeCandidates = ['usr/bin/node', 'bin/node'];
+  const nodeCandidates = ['usr/bin/node', 'bin/node', 'usr/local/bin/node'];
   const nodeRel = nodeCandidates.find((c) => entries.some((e) => e.path === c && e.kind === 'file' && (e.mode & 0o111) !== 0));
   if (!nodeRel) {
-    die(`no executable node binary at /usr/bin/node or /bin/node in the exported tree of ${imageRef}`);
+    die(`no executable node binary at /usr/bin/node, /bin/node, or /usr/local/bin/node in the exported tree of ${imageRef}`);
   }
   const nodePath = `/${nodeRel}`;
 
@@ -220,7 +284,7 @@ async function main() {
   }
   const basenames = new Map();
   for (const e of entries) {
-    if (e.kind !== 'file') continue;
+    if (e.kind === 'directory') continue;
     const base = e.path.split('/').pop();
     if (!basenames.has(base)) basenames.set(base, e.path);
   }
