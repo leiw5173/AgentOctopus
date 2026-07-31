@@ -59,6 +59,14 @@ const SANDBOX_DIST = '@agentoctopus/sandbox/dist/vm';
 type VmTcbArtifacts = {
   helper: string; libkrun: string; libkrunfw: string; imageBuilder: string;
 } & Record<string, string>;
+type VmTcbManifestShape = {
+  artifacts: {
+    libkrun: { sha256: string; size: number; mode: number };
+    libkrunfw: { sha256: string; size: number; mode: number };
+    helper: { sha256: string; size: number; mode: number };
+    imageBuilder: { sha256: string; size: number; mode: number };
+  };
+};
 type GateManifest = {
   platform: 'darwin-arm64' | 'linux-x64';
   schemaVersion: 1;
@@ -92,7 +100,7 @@ export interface SandboxVmHelpers {
   computeManifestDigest: (m: GateManifest) => string;
   GateManifestSchema: { parse: (u: unknown) => GateManifest };
   verifyVmTcb: (input: { artifactsDir: string; manifestPath: string }) =>
-    Promise<VmTcbArtifacts>;
+    Promise<{ paths: VmTcbArtifacts; manifest: VmTcbManifestShape }>;
 }
 
 async function loadSandboxVm(): Promise<SandboxVmHelpers> {
@@ -238,29 +246,24 @@ export class VmEngineImpl implements VmEnginePort {
       // (1) Verify TCB artifacts (helper, libkrun, libkrunfw, image-builder)
       //     against the on-disk vm-tcb-manifest — digest/size/mode/symlink/
       //     group-writable checks. Throws on any mismatch.
-      const artifacts = await sv.verifyVmTcb({
+      const verified = await sv.verifyVmTcb({
         artifactsDir: this.opts.artifactsDir,
         manifestPath: this.opts.tcbManifestPath,
       });
-      // (1b) verifyVmTcb returns FILE PATHS (digest/size/mode-checked against
-      //     the TCB manifest on disk), but verifyGateManifest compares the gate
-      //     manifest's pinned `artifacts[k]` (sha256:<hex>) refs to
-      //     `loadedArtifactDigests[k]` — so the digests, not the paths, must be
-      //     threaded across. Re-read the TCB manifest (already trust-verified by
-      //     verifyVmTcb: its own artifact sha256 values were just matched to the
-      //     on-disk files) and surface those pinned digests as the loaded set.
-      //     This closes the gap between the two verifiers without recomputing
-      //     sha256 over the files a second time (verifyVmTcb already did).
-      const tcbRaw = JSON.parse(await readFile(this.opts.tcbManifestPath, 'utf8')) as {
-        artifacts: { libkrun: { sha256: string }; libkrunfw: { sha256: string }; helper: { sha256: string }; imageBuilder: { sha256: string } };
-      };
+      // (1b) verifyGateManifest compares the gate manifest's pinned
+      //     `artifacts[k]` (sha256:<hex>) refs to `loadedArtifactDigests[k]`.
+      //     Thread those digests from the EXACT manifest body verifyVmTcb just
+      //     verified the on-disk files against — NEVER re-read the manifest
+      //     path. Between verifyVmTcb() and a second read, an attacker could
+      //     swap the file so one manifest verifies the binaries while
+      //     another's digests match the signed gate (verification-result
+      //     substitution).
       const loadedArtifactDigests = {
-        libkrun: 'sha256:' + tcbRaw.artifacts.libkrun.sha256,
-        libkrunfw: 'sha256:' + tcbRaw.artifacts.libkrunfw.sha256,
-        helper: 'sha256:' + tcbRaw.artifacts.helper.sha256,
-        imageBuilder: 'sha256:' + tcbRaw.artifacts.imageBuilder.sha256,
+        libkrun: 'sha256:' + verified.manifest.artifacts.libkrun.sha256,
+        libkrunfw: 'sha256:' + verified.manifest.artifacts.libkrunfw.sha256,
+        helper: 'sha256:' + verified.manifest.artifacts.helper.sha256,
+        imageBuilder: 'sha256:' + verified.manifest.artifacts.imageBuilder.sha256,
       };
-      void artifacts; // file paths used downstream by start(); probe() needs only digests.
       // (2) Load + verify the gate manifest. It carries the qualified rootfs
       //     digests list and pins libkrunAbi='v1.19.4' + blkFeatureRequired.
       let gateManifest: GateManifest;

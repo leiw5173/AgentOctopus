@@ -592,10 +592,22 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
       (m) => (m as { manifestDigest?: string }).manifestDigest ?? '',
     );
     vi.mocked(tcbManifest.verifyVmTcb).mockResolvedValue({
-      helper: '/fake/helper',
-      libkrun: '/fake/libkrun.dylib',
-      libkrunfw: '/fake/libkrunfw.dylib',
-      imageBuilder: '/fake/vm-image-builder',
+      paths: {
+        helper: '/fake/helper',
+        libkrun: '/fake/libkrun.dylib',
+        libkrunfw: '/fake/libkrunfw.dylib',
+        imageBuilder: '/fake/vm-image-builder',
+      },
+      // The manifest body the files were "verified" against — probe() threads
+      // THESE digests into the gate check (never re-reads the manifest path).
+      manifest: {
+        artifacts: {
+          libkrun: { sha256: hex('a'), size: 1, mode: 0o555 },
+          libkrunfw: { sha256: hex('b'), size: 1, mode: 0o555 },
+          helper: { sha256: hex('c'), size: 1, mode: 0o555 },
+          imageBuilder: { sha256: hex('d'), size: 1, mode: 0o555 },
+        },
+      },
     });
     tempDir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-probe-'));
     tcbPath = path.join(tempDir, 'tcb.json');

@@ -32,6 +32,19 @@ export interface VmTcbArtifacts {
   helper: string; libkrun: string; libkrunfw: string; imageBuilder: string;
 }
 
+/**
+ * The result of a TCB verification: the digest/size/mode-verified artifact
+ * paths AND the exact manifest body those files were verified against.
+ * Callers MUST thread `manifest` (never re-read the manifest path): between
+ * verifyVmTcb() and a second read an attacker could swap the file so one
+ * manifest verifies the binaries while another's digests match a signed gate
+ * (verification-result substitution).
+ */
+export interface VmTcbVerified {
+  paths: VmTcbArtifacts;
+  manifest: VmTcbManifest;
+}
+
 async function sha256File(p: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const h = createHash('sha256');
@@ -54,10 +67,10 @@ async function verifyOne(name: string, path: string, entry: { sha256: string; si
   if (st.mode & 0o022) throw new VmTcbError(`${name}: group/world-writable (mode ${(st.mode & 0o777).toString(8)})`);
 }
 
-export async function verifyVmTcb(input: { artifactsDir: string; manifestPath: string }): Promise<VmTcbArtifacts & Record<string, string>> {
+export async function verifyVmTcb(input: { artifactsDir: string; manifestPath: string }): Promise<VmTcbVerified> {
   const raw = await readFile(input.manifestPath, 'utf8');
   const manifest = VmTcbManifestSchema.parse(JSON.parse(raw));
-  const paths: Record<string, string> = {
+  const paths: VmTcbArtifacts = {
     helper: join(input.artifactsDir, 'sandbox-vm-helper'),
     libkrun: join(input.artifactsDir, process.platform === 'darwin' ? 'libkrun.dylib' : 'libkrun.so'),
     libkrunfw: join(input.artifactsDir, process.platform === 'darwin' ? 'libkrunfw.dylib' : 'libkrunfw.so'),
@@ -67,5 +80,5 @@ export async function verifyVmTcb(input: { artifactsDir: string; manifestPath: s
   await verifyOne('libkrun', paths.libkrun, manifest.artifacts.libkrun);
   await verifyOne('libkrunfw', paths.libkrunfw, manifest.artifacts.libkrunfw);
   await verifyOne('imageBuilder', paths.imageBuilder, manifest.artifacts.imageBuilder);
-  return paths as VmTcbArtifacts & Record<string, string>;
+  return { paths, manifest };
 }

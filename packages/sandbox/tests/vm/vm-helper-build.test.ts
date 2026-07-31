@@ -41,7 +41,10 @@ describe('vm TCB verification', () => {
     };
     await writeFile(join(dir, 'tcb.manifest.json'), JSON.stringify(manifest));
     const r = await verifyVmTcb({ artifactsDir: dir, manifestPath: join(dir, 'tcb.manifest.json') });
-    expect(r.helper).toContain('sandbox-vm-helper');
+    expect(r.paths.helper).toContain('sandbox-vm-helper');
+    // The returned manifest IS the one the files were verified against —
+    // callers thread its digests (never re-read the manifest path).
+    expect(r.manifest.artifacts.helper.sha256).toBe(digest('HELPER'));
   });
 
   it('throws on a tampered artifact digest', async () => {

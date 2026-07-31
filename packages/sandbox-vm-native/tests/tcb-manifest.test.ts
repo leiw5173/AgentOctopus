@@ -174,7 +174,7 @@ describe('unified vm-tcb-manifest (HI-3)', () => {
 
     const result = await verifyVmTcb!({ artifactsDir: dir, manifestPath });
     expect(result).toBeTruthy();
-    expect((result as Record<string, string>).imageBuilder).toContain('vm-image-builder');
+    expect((result as { paths: Record<string, string> }).paths.imageBuilder).toContain('vm-image-builder');
   });
 
   it('FAIL-CLOSED: buildTcbManifest throws when imageBuilder per-artifact manifest is absent', async () => {
