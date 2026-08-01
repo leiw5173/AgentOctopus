@@ -196,7 +196,13 @@ async function buildLibkrunFromSource(workDir, targetDir, libName) {
   console.log('vendor-libkrun: building libkrun (cargo via make)... this may take several minutes.');
   try {
     // libkrun's Makefile default target builds libkrun.{so,dylib} into target/.
-    await execFileAsync('make', ['-C', srcExtractDir], {
+    // BLK=1 maps to `--features blk` (Makefile `ifeq ($(BLK),1)`). The TCB
+    // REQUIRES the block-device ABI: vm-helper.c calls krun_add_disk +
+    // krun_set_root_disk_remount, which libkrun exports ONLY under the blk
+    // feature (engine pins blkFeatureRequired). The default build omits them,
+    // so without BLK=1 the vm-helper link fails with undefined references.
+    // virtio-blk is pure Rust — no extra system libs are needed.
+    await execFileAsync('make', ['-C', srcExtractDir, 'BLK=1'], {
       env: { ...process.env, RUSTFLAGS: '-C opt-level=2' },
       maxBuffer: 64 * 1024 * 1024,
     });
