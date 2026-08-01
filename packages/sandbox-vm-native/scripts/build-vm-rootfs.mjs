@@ -96,11 +96,14 @@ const VSOCK_FORWARDER_GUEST_PATH = '/usr/libexec/octopus-vsock-forwarder';
 // byte-identical across reproducible builds. Generated once, committed here.
 const ROOTFS_UUID = '8a3f0c2e-1b4d-4f7a-9c6e-2d8b1a5f4e3a';
 
-// Fixed epoch for mke2fs/tune2fs timestamps. E2FSPROGS_FAKE_TIME makes
-// every filesystem timestamp (create, last-write, last-mount) collapse to
-// this single value, so the image is byte-stable across builds. Zero is
-// the conventional "epoch" reproducible-build value.
-const FIXED_EPOCH = '0';
+// Fixed epoch for the mke2fs timestamps. E2FSPROGS_FAKE_TIME makes every
+// filesystem timestamp (create, last-write, last-mount, last-check) collapse
+// to this single value, so the image is byte-stable across builds. It must be
+// NON-ZERO: e2fsprogs treats E2FSPROGS_FAKE_TIME=0 as unset (0 is falsy) and
+// silently falls back to the real wall-clock time, so '0' produced
+// NON-deterministic images. '1' (one second past the epoch) is the smallest
+// value that actually engages the fake clock.
+const FIXED_EPOCH = '1';
 
 function die(msg, exitCode = 1) {
   console.error(`build-vm-rootfs: ERROR: ${msg}`);
@@ -294,12 +297,18 @@ function imageSizeBlocks(staging) {
 // ---------------------------------------------------------------------------
 // Build ONE rootfs image via mke2fs. Writes to destPath (an empty file
 // pre-sized to sizeBlocks*4096). Reproducibility knobs:
-//   E2FSPROGS_FAKE_TIME=FIXED_EPOCH  — all fs timestamps collapse to epoch 0
+//   E2FSPROGS_FAKE_TIME=FIXED_EPOCH  — all fs timestamps collapse to epoch 1
 //   mke2fs -t ext4 -b 4096 -U <uuid> -N <inodes>
-//         -O ^has_journal,^metadata_csum  — read-only rootfs: no journal, no
-//                                            csum (csum seed would vary)
-//         -E lazy_itable_init=0,lazy_journal_init=0 -d <staging>
-//   tune2fs -C 0 -T 0 ...             — last-mount/last-check to epoch
+//         -O ^has_journal,^metadata_csum,^64bit — read-only rootfs: no journal,
+//                                            no csum (csum seed would vary)
+//         -E ...,hash_seed=<uuid> -d <staging> — pins the dir_index hash seed
+//                                            (else mkfs randomizes the 16-byte
+//                                            s_hash_seed and images differ)
+//   tune2fs -C 0 -U <uuid>            — mount count + re-pin UUID. NO -T: no
+//                                       timezone-independent last-check value
+//                                       is accepted (`-T 0`/`@0` are rejected),
+//                                       and the fake clock already fixed
+//                                       last-check at mkfs time.
 // The image is then chmod 0444 (sealed read-only) — matches the C writer's
 // seal contract so the backend's mode assertion (0o444) holds uniformly.
 // ---------------------------------------------------------------------------
@@ -324,7 +333,7 @@ async function buildOnce(staging, destPath, sizeBlocks, inodeCount) {
     '-U', ROOTFS_UUID,
     '-N', String(inodeCount),
     '-O', '^has_journal,^metadata_csum,^64bit',
-    '-E', 'lazy_itable_init=0,lazy_journal_init=0',
+    '-E', `lazy_itable_init=0,lazy_journal_init=0,hash_seed=${ROOTFS_UUID}`,
     '-d', staging,
     destPath,
     `${sizeBlocks}`,
@@ -338,9 +347,12 @@ async function buildOnce(staging, destPath, sizeBlocks, inodeCount) {
   }
 
   // Collapse remaining nondeterministic superblock fields and seal read-only.
+  // No -T (last-check time): tune2fs rejects every timezone-independent value
+  // (`-T 0` and `-T @0` both die with "Couldn't parse date/time specifier"),
+  // and E2FSPROGS_FAKE_TIME already fixed last-check at mkfs time — so the flag
+  // was both broken (exit 1, failing the build) and redundant.
   const tune2fsArgs = [
     '-C', '0',      // mount count
-    '-T', FIXED_EPOCH, // last-check time
     '-U', ROOTFS_UUID, // re-pin UUID (defensive: some mke2fs revs rewrite it)
     destPath,
   ];
@@ -461,13 +473,28 @@ async function buildArch(arch, nodeHostPath, runtimeBins) {
 
 assertLinux();
 
+// Probe a required tool by resolving it on PATH — NOT by running a version
+// flag. mke2fs -V exits 0, but tune2fs has NO version flag: `tune2fs -V`
+// exits 1 ("invalid option -- 'V'"), and execFile rejects on ANY non-zero
+// exit, so a run-based probe misreports an INSTALLED tune2fs as "not on PATH"
+// (which is how this surfaced on the release lane). Search PATH for an
+// executable file instead; uniform across mke2fs/tune2fs/cc.
+async function assertOnPath(tool, hint) {
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, tool);
+    try {
+      await fs.access(candidate, fsSync.constants.X_OK);
+      return candidate;
+    } catch { /* not in this dir — keep searching */ }
+  }
+  die(`required tool '${tool}' is not on PATH — ${hint}`);
+}
+
 // Tool gate.
-try { await execFileAsync('mke2fs', ['-V']); }
-catch { die("required tool 'mke2fs' is not on PATH — install e2fsprogs on the release lane."); }
-try { await execFileAsync('tune2fs', ['-V']); }
-catch { die("required tool 'tune2fs' is not on PATH — install e2fsprogs on the release lane."); }
-try { await execFileAsync('cc', ['--version']); }
-catch { die("required tool 'cc' is not on PATH — install a C toolchain."); }
+await assertOnPath('mke2fs', 'install e2fsprogs on the release lane.');
+await assertOnPath('tune2fs', 'install e2fsprogs on the release lane.');
+await assertOnPath('cc', 'install a C toolchain.');
 
 // Declared runtime bins (copied verbatim). CI can extend via
 // OCTOPUS_ROOTFS_BINS="guest1:host1,guest2:host2".
