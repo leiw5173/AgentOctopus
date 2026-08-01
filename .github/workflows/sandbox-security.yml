@@ -594,6 +594,20 @@ jobs:
               exit 1
             fi
           done
+          # DIAGNOSTIC: the helper now reaches execve but reports
+          # "execve /usr/bin/node: No such file or directory" inside the chroot.
+          # Confirm whether the node executable is actually present in the
+          # runtime rootfs the helper chroots into (and its perms/loader).
+          echo "=== manifest nodePath + node entry ==="
+          node -e 'const m=require("./packages/sandbox/runtime/linux-node22.manifest.json"); console.log("nodePath=",m.nodePath); const e=m.files.find(f=>f.path===m.nodePath.slice(1)); console.log("node entry=",JSON.stringify(e)); console.log("total files=",m.files.length);'
+          echo "=== extract rootfs to a probe dir and inspect /usr/bin/node ==="
+          probe="$(mktemp -d)"
+          tar --use-compress-program=unzstd -xf packages/sandbox/runtime/linux-node22.rootfs.tar.zst -C "$probe" 2>&1 | tail -5 || tar -xf packages/sandbox/runtime/linux-node22.rootfs.tar.zst -C "$probe" 2>&1 | tail -5
+          echo "--- top-level ---"; ls -la "$probe"
+          echo "--- usr/bin ---"; ls -la "$probe/usr/bin" 2>&1 || echo "no usr/bin"
+          echo "--- node stat ---"; ls -la "$probe/usr/bin/node" 2>&1 || echo "NODE ABSENT at $probe/usr/bin/node"
+          echo "--- node ELF interpreter ---"; command -v readelf >/dev/null && readelf -l "$probe/usr/bin/node" 2>/dev/null | grep -A1 interpreter || echo "readelf unavailable"
+          rm -rf "$probe"
       - name: Build package and Linux proxy artifact
         run: |
           pnpm --filter @agentoctopus/sandbox build
