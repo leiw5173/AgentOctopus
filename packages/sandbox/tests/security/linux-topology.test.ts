@@ -35,6 +35,7 @@ import {
   execInNetns,
   ssListenCount,
   parseProbeJson,
+  LANE_NODE,
   type LinuxSandbox,
 } from './linux-lane-setup.js';
 
@@ -95,7 +96,7 @@ async function startTopologySandbox(opts: Parameters<typeof setupLinuxSandbox>[0
 }> {
   const sandbox = await setupLinuxSandbox({ timeoutMs: 120_000, ...opts });
   const proc = await sandbox.backend.spawn({
-    command: ['/usr/bin/node', '/skill/probe.js', 'block'],
+    command: [LANE_NODE, '/skill/probe.js', 'block'],
     timeoutMs: 120_000,
   });
   const skillCgroupPath = sandbox.skillCgroupPath;
@@ -159,7 +160,7 @@ describe('Linux lane — netns topology', () => {
       // attempts a write; the write must be denied (ok=true only when the
       // write FAILED).
       const result = await t.sandbox.backend.run({
-        command: ['/usr/bin/node', '/skill/probe.js', 'ca-ro-probe'],
+        command: [LANE_NODE, '/skill/probe.js', 'ca-ro-probe'],
         timeoutMs: 30_000,
       });
       const json = parseProbeJson(result.stdout);
@@ -196,7 +197,7 @@ describe('Linux lane — netns topology', () => {
     });
     try {
       const result = await t.sandbox.backend.run({
-        command: ['/usr/bin/node', '/skill/http-probe.js', t.sandbox.proxy.reachableAddr, upstreamUrl],
+        command: [LANE_NODE, '/skill/http-probe.js', t.sandbox.proxy.reachableAddr, upstreamUrl],
         timeoutMs: 30_000,
       });
       expect(result.exitCode).toBe(0);

@@ -66,6 +66,14 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_OUTPUT_MAX_BYTES = 32_768;
 
+/** In-root path of the node executable in the `linux-node22` runtime. The
+ * manifest ships node at /usr/local/bin/node (see runtimeProfile.osRuntime
+ * .nodePath below); several privileged-lane probes previously hardcoded
+ * /usr/bin/node, which does NOT exist in the runtime rootfs and made the
+ * helper's execve fail ENOENT once it first reached exec (a latent bug masked
+ * while the helper died earlier at setgroups). */
+export const LANE_NODE = '/usr/local/bin/node';
+
 // ---------------------------------------------------------------------------
 // Capability gating
 // ---------------------------------------------------------------------------
@@ -470,7 +478,7 @@ export async function runLinuxProbe(action: string, options: {
 } = {}): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean; json: Record<string, unknown> }> {
   const sandbox = await setupLinuxSandbox(options.sandbox ?? {});
   try {
-    const command = options.command ?? ['/usr/bin/node', '/skill/probe.js', action, ...(options.extraArgs ?? [])];
+    const command = options.command ?? [LANE_NODE, '/skill/probe.js', action, ...(options.extraArgs ?? [])];
     const result = await sandbox.backend.run({
       command,
       // Env is intentionally minimal: the helper strips it. Kept for the

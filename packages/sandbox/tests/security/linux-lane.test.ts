@@ -48,6 +48,7 @@ import {
   runLinuxProbe,
   execInNetns,
   parseProbeJson,
+  LANE_NODE,
   type LinuxSandbox,
 } from './linux-lane-setup.js';
 
@@ -107,7 +108,7 @@ interface RunningLinuxProbe {
 async function startProcessTreeProbe(input: { timeoutMs: number }): Promise<RunningLinuxProbe> {
   const sandbox = await setupLinuxSandbox({ timeoutMs: 60_000 });
   const proc = await sandbox.backend.spawn({
-    command: ['/usr/bin/node', '/skill/probe.js', 'process-tree'],
+    command: [LANE_NODE, '/skill/probe.js', 'process-tree'],
     timeoutMs: input.timeoutMs,
   });
   const cgroupPath = sandbox.skillCgroupPath;
@@ -134,7 +135,7 @@ async function startProcessTreeProbe(input: { timeoutMs: number }): Promise<Runn
 async function startBlockingProbe(): Promise<RunningLinuxProbe> {
   const sandbox = await setupLinuxSandbox({ timeoutMs: 60_000 });
   const proc = await sandbox.backend.spawn({
-    command: ['/usr/bin/node', '/skill/probe.js', 'block'],
+    command: [LANE_NODE, '/skill/probe.js', 'block'],
     timeoutMs: 60_000,
   });
   const cgroupPath = sandbox.skillCgroupPath;
@@ -186,7 +187,7 @@ describe('Linux lane — isolation', () => {
     // puts only the payload in argv; the OS lane cannot, so the action token
     // 'argv' is part of the emitted slice(2). This is the documented contract,
     // not mangling: process.argv.slice(2) reports EVERY arg including the action.
-    const result = await runLinuxProbe('argv', { command: ['/usr/bin/node', '/skill/probe.js', 'argv', 'alpha', 'two words'] });
+    const result = await runLinuxProbe('argv', { command: [LANE_NODE, '/skill/probe.js', 'argv', 'alpha', 'two words'] });
     expect(result.exitCode).toBe(0);
     expect(result.json.argv).toEqual(['argv', 'alpha', 'two words']);
   }, RUN_TIMEOUT);
@@ -234,7 +235,7 @@ describe('Linux lane — isolation', () => {
     const sandbox = await setupLinuxSandbox({ request: { hosts: ['169.254.169.254'] } });
     try {
       const result = await sandbox.backend.run({
-        command: ['/usr/bin/node', '/skill/http-probe.js', sandbox.proxy.reachableAddr, 'http://169.254.169.254/'],
+        command: [LANE_NODE, '/skill/http-probe.js', sandbox.proxy.reachableAddr, 'http://169.254.169.254/'],
         timeoutMs: 30_000,
       });
       expect(result.exitCode).not.toBe(0);
@@ -325,7 +326,7 @@ describe('Linux lane — isolation', () => {
     const sandbox = await setupLinuxSandbox({ timeoutMs: 30_000 });
     try {
       const result = await sandbox.backend.run({
-        command: ['/usr/bin/node', '/skill/probe.js', 'pids-flood'],
+        command: [LANE_NODE, '/skill/probe.js', 'pids-flood'],
         timeoutMs: 30_000,
       });
       const json = parseProbeJson(result.stdout);
