@@ -239,17 +239,39 @@ export async function createLimitedCgroup(
         throw new CgroupError(`attach: pid must be a positive integer, got ${pid}`);
       }
       const procsPath = path.join(cgPath, 'cgroup.procs');
-      await fs.writeFile(procsPath, String(pid)).catch((err) => {
-        throw new CgroupError(`cannot attach pid ${pid} to ${cgPath}: ${(err as Error).message}`, { cause: err });
-      });
-      // Read-back: the kernel must report the pid present.
-      const procs = await fs.readFile(procsPath);
-      const pids = procs.split('\n').map((s) => s.trim()).filter(Boolean);
-      if (!pids.includes(String(pid))) {
-        throw new CgroupError(
-          `cgroup.procs read-back does not contain pid ${pid} after attach — refusing to continue unconfined`,
-        );
+      // Attach is the security gate that confines the (SIGSTOPped, pre-exec)
+      // helper child before it is continued. Node's spawn() hands back a pid the
+      // instant fork returns, but the kernel cgroup membership of a freshly
+      // spawned, self-stopped child can take a moment to settle on a busy host;
+      // a single write+immediate read-back can transiently miss the pid even
+      // though the helper is alive and stop-pending. Retry the write+read-back
+      // on a short bounded budget so a transient settle delay does not abort the
+      // run, while remaining FAIL-CLOSED: if the pid never lands in the leaf
+      // (helper genuinely exited / refused), we still throw and never SIGCONT.
+      const maxAttempts = 10;
+      const delayMs = 25;
+      let lastWriteErr: Error | undefined;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          await fs.writeFile(procsPath, String(pid));
+          lastWriteErr = undefined;
+        } catch (err) {
+          lastWriteErr = err as Error;
+        }
+        // Read-back: the kernel must report the pid present.
+        const procs = await fs.readFile(procsPath).catch(() => '');
+        const pids = procs.split('\n').map((s) => s.trim()).filter(Boolean);
+        if (pids.includes(String(pid))) return;
+        if (attempt + 1 < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       }
+      if (lastWriteErr) {
+        throw new CgroupError(`cannot attach pid ${pid} to ${cgPath}: ${lastWriteErr.message}`, { cause: lastWriteErr });
+      }
+      throw new CgroupError(
+        `cgroup.procs read-back does not contain pid ${pid} after ${maxAttempts} attach attempts — refusing to continue unconfined`,
+      );
     },
 
     async kill(): Promise<void> {

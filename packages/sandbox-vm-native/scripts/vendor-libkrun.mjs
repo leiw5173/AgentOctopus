@@ -172,6 +172,38 @@ async function downloadVerified(url, expectedSha256, destPath) {
 // TCB manifest records the actual built artifact digest for verifyVmTcb).
 // ---------------------------------------------------------------------------
 
+// Resolve a dyld-loadable libclang.dylib directory for libkrun's `krun-input`
+// crate. That crate's build script uses clang-sys (bindgen) and links
+// `@rpath/libclang.dylib`; Xcode's clang does NOT ship a dyld-visible
+// libclang.dylib (only clang.dylib inside Xcode.app, off the search path), so
+// the build script aborts with `dyld: Library not loaded: @rpath/libclang.dylib`.
+// Homebrew's llvm formula (keg-only, like lld) provides the real dylib. Returns
+// null when no libclang is installed — clang-sys then falls back to its own
+// search and the build surfaces the actionable "install llvm" error.
+function resolveLibclangEnv() {
+  if (process.platform !== 'darwin') return {};
+  const candidates = [
+    process.env.LIBCLANG_PATH,
+    '/opt/homebrew/opt/llvm/lib', // Apple Silicon Homebrew (keg-only llvm)
+    '/usr/local/opt/llvm/lib', // Intel Homebrew
+  ];
+  for (const dir of candidates) {
+    if (dir && existsSync(path.join(dir, 'libclang.dylib'))) {
+      // LIBCLANG_PATH lets clang-sys's build-time link find the dylib;
+      // DYLD_FALLBACK_LIBRARY_PATH lets the RUNNING build script (and bindgen's
+      // runtime dlopen) resolve @rpath/libclang.dylib. Prepend so an explicit
+      // caller-provided value always wins.
+      return {
+        LIBCLANG_PATH: dir,
+        DYLD_FALLBACK_LIBRARY_PATH: process.env.DYLD_FALLBACK_LIBRARY_PATH
+          ? `${dir}:${process.env.DYLD_FALLBACK_LIBRARY_PATH}`
+          : dir,
+      };
+    }
+  }
+  return {};
+}
+
 async function buildLibkrunFromSource(workDir, targetDir, libName) {
   const tarPath = path.join(workDir, 'libkrun-src.tar.gz');
   const srcExtractDir = path.join(workDir, 'libkrun-src');
@@ -203,7 +235,7 @@ async function buildLibkrunFromSource(workDir, targetDir, libName) {
     // so without BLK=1 the vm-helper link fails with undefined references.
     // virtio-blk is pure Rust — no extra system libs are needed.
     await execFileAsync('make', ['-C', srcExtractDir, 'BLK=1'], {
-      env: { ...process.env, RUSTFLAGS: '-C opt-level=2' },
+      env: { ...process.env, RUSTFLAGS: '-C opt-level=2', ...resolveLibclangEnv() },
       maxBuffer: 64 * 1024 * 1024,
     });
   } catch (err) {

@@ -475,19 +475,21 @@ jobs:
           # qualifies nothing and resolves no file.
           echo "OCTOPUS_VM_ROOTFS_REF=$ref" >> "$GITHUB_ENV"
           echo "Placed linux-arm64 rootfs for the darwin-arm64 lane (ref $ref)"
-      # libkrun's krun-init-blob build script compiles init.c with `-fuse-ld=lld`
-      # (src/init_blob/build.rs), but the macOS runner's Xcode clang has no lld
-      # ("invalid linker name in argument '-fuse-ld=lld'"). Provision lld via
-      # Homebrew (already on macos-15) so the init blob links. Homebrew's lld is
-      # KEG-ONLY: `brew install` leaves the binaries in $(brew --prefix)/opt/lld/bin
-      # and never links them onto PATH, but clang resolves `-fuse-ld=lld` to the
-      # `ld64.lld` executable found on PATH. So link the lld binaries into
-      # /usr/local/bin (already at the front of the runner's PATH) and fail closed
-      # if the linker still cannot be resolved.
+      # libkrun's macOS build needs two keg-only Homebrew libs Xcode lacks:
+      # (1) lld — krun-init-blob's build script compiles init.c with
+      #     `-fuse-ld=lld`, which clang resolves to the `ld64.lld` executable on
+      #     PATH; and (2) llvm — krun-input's build script (clang-sys/bindgen)
+      #     links `@rpath/libclang.dylib`, which Xcode does not ship
+      #     dyld-visible. Homebrew installs are keg-only (binaries stay under
+      #     $(brew --prefix)/opt/{lld,llvm}), so link lld onto PATH and export
+      #     LIBCLANG_PATH for vendor-libkrun.mjs resolveLibclangEnv(); both
+      #     steps fail closed if the tool still cannot be resolved.
       - name: Provision lld for the libkrun init-blob build
         run: |
           set -euo pipefail
-          brew install lld
+          # lld → the init-blob linker; llvm → libclang.dylib for libkrun's
+          # krun-input build script (clang-sys/bindgen). Both are keg-only.
+          brew install lld llvm
           LLD_BIN="$(brew --prefix)/opt/lld/bin"
           mkdir -p /usr/local/bin
           for tool in ld64.lld ld.lld lld-link wasm-ld; do
@@ -496,6 +498,13 @@ jobs:
           command -v ld64.lld >/dev/null || { echo "ERROR: ld64.lld not on PATH after lld provision" >&2; exit 1; }
           clang -fuse-ld=lld -Wl,--version >/dev/null 2>&1 || clang -fuse-ld=lld -Wl,-v 2>&1 | grep -qi lld || { echo "ERROR: clang -fuse-ld=lld still cannot resolve an lld linker" >&2; exit 1; }
           echo "lld provisioned: $(command -v ld64.lld)"
+          # vendor-libkrun.mjs resolveLibclangEnv() reads this (and prepends it to
+          # DYLD_FALLBACK_LIBRARY_PATH) so the krun-input build script can link and
+          # dlopen @rpath/libclang.dylib. Fail closed if the dylib is absent.
+          LLVM_LIB="$(brew --prefix)/opt/llvm/lib"
+          test -f "$LLVM_LIB/libclang.dylib" || { echo "ERROR: libclang.dylib missing at $LLVM_LIB" >&2; exit 1; }
+          echo "LIBCLANG_PATH=$LLVM_LIB" >> "$GITHUB_ENV"
+          echo "libclang provisioned: $LLVM_LIB/libclang.dylib"
       - name: Build mac-side VM helper + vendor libkrun/libkrunfw
         run: |
           pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/vendor-libkrun.mjs
