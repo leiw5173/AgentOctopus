@@ -248,36 +248,32 @@ jobs:
       # ~9 concurrent 100MB+ node rootfs extracts AND user-mountable (the OS
       # backend's helper bind-mounts the extracted runtime root onto itself
       # from inside an unprivileged user namespace — a mount that EPERMs unless
-      # the source superblock is user-mountable, FS_USERNS_MOUNT). The runner's
-      # /tmp is a 455MB tmpfs (too small → ENOSPC) and the workspace disk is
-      # ext4 (large but NOT user-mountable → the helper's very first self-bind
-      # dies "mount(...rootfs-X -> ...rootfs-X, NULL, 0x5000): Permission
-      # denied", the helper exits, and the cgroup attach then reports ESRCH).
+      # the source superblock is user-mountable, FS_USERNS_MOUNT).
       #
-      # ROOT CAUSE of that EPERM, isolated by the A/B probe in the staging step:
-      # AppArmor is ENABLED (183 profiles) and the runner's profile authorizes an
-      # unprivileged-userns bind-mount ONLY under /tmp/**. The probe self-binds a
-      # dir under BOTH /tmp and $RUNNER_TEMP: /tmp/** succeeds (including a fresh
-      # tmpfs mounted there), while EVERYTHING under /home/ubuntu/actions-runner/
-      # _work/** EPERMs — even a fresh tmpfs mounted at _work/_temp — regardless
-      # of filesystem type. So the controlling variable is the PATH PREFIX, not
-      # the FS. Mounting a large tmpfs at _work/_temp/oct-tmp is futile; the
-      # tmpfs must live at a /tmp PATH to be bindable.
+      # ROOT CAUSE of the self-bind EPERM, isolated by A/B probes: AppArmor is
+      # ENABLED (183 profiles) and the runner's profile authorizes an
+      # unprivileged-userns bind-mount ONLY under /tmp/** and /var/tmp/** — while
+      # EVERYTHING under /home/ubuntu/actions-runner/_work/** EPERMs, regardless
+      # of filesystem type (the controlling variable is the PATH PREFIX, not the
+      # FS). The runtime rootfs must therefore live on an authorized path.
       #
-      # We therefore mount a dedicated 3g tmpfs at /tmp/oct-tmp (the runner has
-      # CAP_SYS_ADMIN — the same privilege probeOsCaps/cleanup already use for
-      # `ip netns`/`nft`) and point TMPDIR at it. We do NOT overmount the shared
-      # /tmp itself (that would shadow the runner agent's own /tmp files); a
-      # dedicated mountpoint on the same /tmp superblock is torn down in the
-      # post-lane step and stays bindable.
+      # WHY DISK (/var/tmp), NOT A RAM tmpfs: the runner has only 930MB RAM and
+      # /tmp is a 455MB tmpfs. A RAM-backed tmpfs cannot hold the rootfs extract
+      # (tmpfs pages consume RAM) — a 3g tmpfs there ENOSPC'd the extract (1245
+      # "No space left" errors) and starved the kernel of RAM, which is what
+      # actually made the helper's mount()/cgroup work fail. The root ext4 has
+      # several GB free, and /var/tmp is BOTH on that disk AND AppArmor-authorized
+      # (probed: BIND OK, ext4). So TMPDIR points at /var/tmp/oct-tmp — a plain
+      # disk-backed directory, no mount — giving the helper a bindable path with
+      # real capacity. We do NOT overmount the shared /var/tmp itself.
       #
       # TMPDIR is deliberately NOT set here: job-level `env:` is passed to steps
       # VERBATIM (no shell expansion), and `${{ runner.temp }}` is NOT an allowed
       # context in job-level `env:` (docs.github.com/.../contexts: only github/
       # needs/strategy/matrix/vars/secrets/inputs) — using it here fails workflow
       # evaluation with 0 jobs. Instead the pre-checkout rescue step exports the
-      # fixed path TMPDIR=/tmp/oct-tmp via $GITHUB_ENV, so every later step sees
-      # the correctly-resolved path.
+      # fixed path TMPDIR=/var/tmp/oct-tmp via $GITHUB_ENV, so every later step
+      # sees the correctly-resolved path.
       # probePrivilegedLinux() (harness) reads its canonical manifests from
       # probePrivilegedLinux() (harness) reads its canonical manifests from
       # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it. This
@@ -308,20 +304,20 @@ jobs:
           #
           # Export TMPDIR for ALL later steps via $GITHUB_ENV (see the job-env
           # comment above: job-level `env:` can't expand $RUNNER_TMP, and the
-          # runner.temp context isn't allowed there). The tmpfs mountpoint is a
-          # FIXED /tmp path: /tmp is the ONLY root the runner's AppArmor profile
-          # permits an unprivileged-userns self-bind on (see the env comment),
-          # so the OS-backend helper's rootfs bind only succeeds when TMPDIR is
-          # on the /tmp tmpfs. Fall back to /tmp itself if unset.
-          echo "TMPDIR=/tmp/oct-tmp" >> "$GITHUB_ENV"
-          # Create it now: pnpm/action-setup (which runs before the tmpfs-mount
+          # runner.temp context isn't allowed there). The path is a FIXED
+          # disk-backed /var/tmp dir: /var/tmp is on the root ext4 (several GB
+          # free) AND AppArmor-authorized for the helper's unprivileged-userns
+          # self-bind (see the env comment) — unlike the 930MB-RAM-starving
+          # tmpfs this replaced. Fall back to /var/tmp itself if unset.
+          echo "TMPDIR=/var/tmp/oct-tmp" >> "$GITHUB_ENV"
+          # Create it now: pnpm/action-setup (which runs before the staging
           # step) calls realpathSync(TMPDIR) and ENOENTs if the dir is absent.
           mkdir -p "$TMPDIR" 2>/dev/null || true
           ws="${{ github.workspace }}"
           tmp="$ws/.tmp"
           # A PRIOR run leaked a tmpfs mounted at the in-workspace .tmp. The
-          # lane's post-run umount runs from TMPDIR=/tmp/oct-tmp and
-          # never touches .tmp, so the mount persists on the self-hosted runner
+          # lane's post-run cleanup runs from TMPDIR and never touches .tmp, so
+          # the mount persists on the self-hosted runner
           # and checkout dies "EBUSY: resource busy or locked, rmdir '.tmp'"
           # before ANY lane step runs. fuser shows the holder as
           # "root kernel mount" — no userspace process to kill; the ONLY fix is
@@ -497,31 +493,25 @@ jobs:
           fi
           exit 0
       - uses: actions/checkout@v7
-      - name: Stage TMPDIR tmpfs + assert userns-bind precondition
+      - name: Stage TMPDIR (disk-backed) + assert userns-bind precondition
         shell: bash
         run: |
           set -euo pipefail
-          # Stage TMPDIR as a dedicated tmpfs (see the env comment above):
-          # large enough for the rootfs extracts AND on an AppArmor-authorized
-          # mount root (/tmp) so the OS-backend helper's unprivileged-userns
-          # self-bind succeeds. A dedicated mountpoint on the /tmp superblock
-          # (NOT overmounting /tmp itself) keeps the runner agent unaffected.
+          # TMPDIR is a DISK-backed directory (see the env comment above). The
+          # runner has only 930MB RAM, so a RAM-backed tmpfs cannot hold the
+          # runtime rootfs extract (it ENOSPC'd and starved RAM); the root ext4
+          # has several GB free. /var/tmp is on that disk AND AppArmor-authorizes
+          # the helper's unprivileged-userns self-bind (probed: BIND OK, ext4).
+          # Just create the directory — no mount.
           mkdir -p "${TMPDIR}"
-          if findmnt -rn --target "${TMPDIR}" -o FSTYPE | grep -qx tmpfs; then
-            echo "TMPDIR already tmpfs: ${TMPDIR}"
-          else
-            mount -t tmpfs -o size=3g,mode=1777 tmpfs "${TMPDIR}"
-            echo "mounted 3g tmpfs at ${TMPDIR}"
-          fi
-          echo "=== TMPDIR -> ${TMPDIR} ==="
-          findmnt --target "${TMPDIR}" -o TARGET,SOURCE,FSTYPE,SIZE,AVAIL
+          echo "TMPDIR -> ${TMPDIR} ($(findmnt -rn --target "${TMPDIR}" -o FSTYPE 2>/dev/null || echo '?'))"
           df -h "${TMPDIR}"
           # Fail-closed precondition check: the OS-backend helper pivots into a
           # NEW user+mount namespace and self-binds the extracted runtime root.
-          # That bind only succeeds when TMPDIR sits on an AppArmor-authorized
-          # mount root (/tmp — see the env comment). Assert it here so a future
-          # TMPDIR relocation (e.g. back under the _work ext4) fails LOUDLY at
-          # staging with a clear message instead of 17 ESRCH test failures.
+          # That bind only succeeds on an AppArmor-authorized path. Assert it
+          # here so a future TMPDIR relocation (e.g. back under the _work tree,
+          # which AppArmor rejects) fails LOUDLY at staging with a clear message
+          # instead of a dozen ESRCH test failures.
           bindprobe="${TMPDIR}/.oct-bind-assert"
           mkdir -p "$bindprobe"
           if unshare -Umr sh -c "mount --bind '$bindprobe' '$bindprobe'" 2>/tmp/oct-binderr; then
@@ -529,40 +519,11 @@ jobs:
             umount "$bindprobe" 2>/dev/null || true
           else
             echo "ERROR: unprivileged-userns self-bind FAILS at ${TMPDIR} -> $(cat /tmp/oct-binderr)" >&2
-            echo "ERROR: the OS-backend helper cannot self-bind its rootfs here; TMPDIR must be on the /tmp tmpfs (AppArmor-authorized). See the privileged-linux env comment." >&2
+            echo "ERROR: the OS-backend helper cannot self-bind its rootfs here; TMPDIR must be on an AppArmor-authorized disk path (e.g. /var/tmp). See the privileged-linux env comment." >&2
             rmdir "$bindprobe" 2>/dev/null || true
             exit 1
           fi
-          # Diagnostic (this run): the plain-mount probes ALL passed under
-          # `unshare -Umr`, yet the helper still EPERMs 0x1021 — so the
-          # discriminator is in the helper's OWN setup, not the mounts. The
-          # helper differs from the probe in exactly two prior syscalls:
-          #   (A) setns(fd, CLONE_NEWNET) into a NAMED netns, and
-          #   (B) mount(NULL, "/", NULL, MS_REC|MS_PRIVATE) making / private.
-          # Probe the helper's EXACT sequence to isolate which one flips the
-          # runtimeRoot remount to EPERM. Diagnostic only; never fails the step.
-          fr="${TMPDIR}/.oct-fullseq"
-          mkdir -p "$fr"
-          ns="octprobe$$"
-          ip netns add "$ns" 2>/dev/null || true
-          echo "=== FULL-SEQUENCE probe (setns named-netns + rprivate / + bind + remount) ==="
-          unshare -Umr sh -c "
-            set -x
-            mount --make-rprivate / &&
-            mount --bind '$fr' '$fr' &&
-            mount -o remount,ro,bind '$fr' &&
-            echo 'FULLSEQ(no-netns) bind+ro-remount OK'
-          " 2>/tmp/oct-fserr && echo "FULLSEQ-NONETNS OK" || echo "FULLSEQ-NONETNS FAIL -> $(cat /tmp/oct-fserr)"
-          # Now WITH the named netns joined first (the helper's real order):
-          nsenter --net="/run/netns/$ns" unshare -Umr sh -c "
-            set -x
-            mount --make-rprivate / &&
-            mount --bind '$fr' '$fr' &&
-            mount -o remount,ro,bind '$fr' &&
-            echo 'FULLSEQ(with-netns) bind+ro-remount OK'
-          " 2>/tmp/oct-fserr2 && echo "FULLSEQ-NETNS OK" || echo "FULLSEQ-NETNS FAIL -> $(cat /tmp/oct-fserr2)"
-          ip netns del "$ns" 2>/dev/null || true
-          umount "$fr" 2>/dev/null || true; rmdir "$fr" 2>/dev/null || true
+          rmdir "$bindprobe" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
@@ -665,39 +626,6 @@ jobs:
             install -m 0644 packages/sandbox/runtime/os-helper.manifest.json "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}/os-helper.manifest.json"
             echo "refreshed runner-managed cache at ${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}"
           fi
-          # DIAGNOSTIC (this run): the 3g tmpfs at /tmp/oct-tmp cannot work on a
-          # 930MB-RAM runner — tmpfs is RAM-backed, so the rootfs extract (which
-          # needs >516MB available) hits ENOSPC (1245 errors) AND starves RAM.
-          # The helper needs a DISK-backed location that AppArmor still
-          # authorizes for unprivileged-userns self-bind. Probe candidates to
-          # find one. Diagnostic only; never fails the step.
-          echo "=== os-helper ground truth (diagnostic) ==="
-          echo "env OCTOPUS_SANDBOX_OS_HELPER_BINARY=${OCTOPUS_SANDBOX_OS_HELPER_BINARY:-<unset>}"
-          echo "env OCTOPUS_SANDBOX_OS_HELPER_MANIFEST=${OCTOPUS_SANDBOX_OS_HELPER_MANIFEST:-<unset>}"
-          echo "workspace runtime/os-helper sha: $(sha256sum packages/sandbox/runtime/os-helper 2>/dev/null | cut -d' ' -f1)"
-          echo "manifest helperSha256: $(node -p "JSON.parse(require('fs').readFileSync('packages/sandbox/runtime/os-helper.manifest.json','utf8')).helperSha256" 2>/dev/null)"
-          echo "all os-helper files on disk:"
-          find / -name 'os-helper' -type f 2>/dev/null | while read -r f; do echo "  $(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)  $f"; done
-          echo "source-marker in launch binary (expect a match only in the REBUILT helper):"
-          strings packages/sandbox/runtime/os-helper 2>/dev/null | grep -c 'out-of-tree mount' || echo "0 (marker absent)"
-          echo "=== disk layout (all real mounts) ==="
-          df -h -x tmpfs -x devtmpfs 2>/dev/null || df -h
-          echo "=== candidate userns-bind probe (disk-backed paths) ==="
-          probe_path() { # $1=dir
-            mkdir -p "$1/.oct-bp" 2>/dev/null || { echo "  SKIP $1 (mkdir failed)"; return; }
-            if unshare -Umr sh -c "mount --bind '$1/.oct-bp' '$1/.oct-bp'" 2>/tmp/oct-bperr; then
-              echo "  BIND OK:   $1 ($(findmnt -rn --target "$1" -o FSTYPE 2>/dev/null))"
-              umount "$1/.oct-bp" 2>/dev/null || true
-            else
-              echo "  BIND FAIL: $1 ($(findmnt -rn --target "$1" -o FSTYPE 2>/dev/null)) -> $(cat /tmp/oct-bperr)"
-            fi
-            rmdir "$1/.oct-bp" 2>/dev/null || true
-          }
-          probe_path /var/tmp
-          probe_path /var/lib/oct-tmp
-          probe_path /opt/oct-tmp
-          probe_path /mnt/oct-tmp
-          probe_path /home/oct-tmp
       - name: Require real privileged Linux capability
         run: pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
       - name: Run privileged Linux lanes with zero skips
@@ -786,17 +714,11 @@ jobs:
             lsof +D "$d" >/dev/null 2>&1 || rm -rf -- "$d" || true
           done
           rm -rf packages/sandbox/runtime packages/sandbox/build
-          # TMPDIR is a dedicated tmpfs mountpoint (see the staging step): sweep
-          # its contents, then unmount it so the runner is left without the RAM
-          # mount. umount AFTER the sweep; tolerate busy (a leaked session mount
-          # under the rootfs) by falling back to a lazy unmount.
-          if findmnt -rn --target "${TMPDIR}" -o FSTYPE | grep -qx tmpfs; then
-            rm -rf "${TMPDIR:?}"/* || true
-            umount "${TMPDIR}" 2>/dev/null || umount -l "${TMPDIR}" 2>/dev/null || true
-            echo "unmounted tmpfs at ${TMPDIR}"
-          else
-            rm -rf "${TMPDIR}" || true
-          fi
+          # TMPDIR is a plain disk-backed directory under /var/tmp (see the
+          # staging step): sweep its leaked rootfs contents, then remove the dir
+          # so the runner is left clean. No mount to unmount (that was the old
+          # RAM-backed tmpfs design).
+          rm -rf "${TMPDIR}" || true
 
   macos-restricted:
     name: macos-restricted
