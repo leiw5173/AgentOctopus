@@ -623,6 +623,34 @@ jobs:
         run: |
           pnpm --filter @agentoctopus/sandbox build
           node packages/sandbox/scripts/bundle-egress-proxy.mjs
+      # The privileged lane's PREFERRED artifact path restores a runner-managed
+      # copy of os-helper from $OCTOPUS_CI_RUNTIME_ARTIFACT_DIR — a CACHED binary
+      # provisioned out-of-band that can lag the current commit. When helper.c
+      # changes (e.g. a mount-flag fix), the lane otherwise tests the STALE
+      # binary and the fix never takes effect (observed: three helper.c commits
+      # had no effect because the cached helper still carried the old mounts).
+      # Rebuild os-helper from the checked-out commit's src/os/helper.c (runs
+      # after `pnpm build` because the script self-checks via the compiled
+      # verifyHelperArtifact), verify the digest changed, and refresh the
+      # runner-managed cache so later runs also pick up the fix.
+      - name: Rebuild os-helper from the current commit (fix stale runner cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          before=$(sha256sum packages/sandbox/runtime/os-helper | cut -d' ' -f1)
+          node packages/sandbox/scripts/build-os-helper.mjs
+          after=$(sha256sum packages/sandbox/runtime/os-helper | cut -d' ' -f1)
+          echo "os-helper sha256 before=$before after=$after"
+          if [ "$before" = "$after" ]; then
+            echo "NOTE: os-helper unchanged (runner cache already current)."
+          else
+            echo "os-helper REBUILT from current commit — runner cache was stale."
+          fi
+          if [ -n "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR:-}" ] && [ -d "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}" ]; then
+            install -m 0755 packages/sandbox/runtime/os-helper "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}/os-helper"
+            install -m 0644 packages/sandbox/runtime/os-helper.manifest.json "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}/os-helper.manifest.json"
+            echo "refreshed runner-managed cache at ${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}"
+          fi
       - name: Require real privileged Linux capability
         run: pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
       - name: Run privileged Linux lanes with zero skips
