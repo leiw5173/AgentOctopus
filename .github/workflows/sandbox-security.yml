@@ -335,6 +335,50 @@ jobs:
           rm -rf "$tmp" 2>/dev/null || true
           echo "rescue done; .tmp present? $(test -e "$tmp" && echo yes || echo no); still-mounted? $(findmnt -rn --target "$tmp" -o FSTYPE 2>/dev/null || echo no)"
 
+          # --- FIX (root cause): kill leaked egress-proxy node processes -----
+          # ROOT CAUSE of the recurring fork EAGAIN / exit-134 SIGABRT: each
+          # privileged session launches a netns-mode egress proxy
+          # (`node .../egress-proxy-server.mjs --namespace-path /run/netns/octn-*`).
+          # A session interrupted mid-run never runs the proxy's SIGTERM teardown,
+          # so the process is reparented to PID 1 and LEAKS on this persistent
+          # runner. The discriminator run counted 53 of them, each committing
+          # tens of MB of V8 VSZ → Committed_AS ~6.0GB on a 930MB box. Under that
+          # memory saturation the next job's Node/V8 cannot commit heap and
+          # ABORTS (exit 134), and small nested forks EAGAIN. (PIDs 780/ulimit
+          # 2092 and overcommit_memory=1 both already ruled out.) The in-repo
+          # security-cleanup-linux.mjs now kills these too, but that script only
+          # exists AFTER checkout — this rescue is the ONLY step guaranteed to
+          # run before the memory-critical checkout, so kill the leak inline here.
+          # Match the proxy by its bundle entrypoint (never a bare `node`, which
+          # is the runner agent itself); SIGTERM then SIGKILL survivors.
+          echo "=== leaked egress-proxy processes (pre-kill) ==="
+          proxy_pids=$(grep -l 'egress-proxy-server\.mjs' /proc/[0-9]*/cmdline 2>/dev/null | cut -d/ -f3 | grep -vx "$$" || true)
+          if [ -n "$proxy_pids" ]; then
+            echo "$proxy_pids" | tr '\n' ' '; echo
+            for p in $proxy_pids; do kill -TERM "$p" 2>/dev/null || true; done
+            sleep 1.5 || sleep 2
+            for p in $proxy_pids; do
+              if grep -q 'egress-proxy-server\.mjs' "/proc/$p/cmdline" 2>/dev/null; then
+                kill -KILL "$p" 2>/dev/null || true
+              fi
+            done
+            echo "killed leaked proxies; remaining: $(grep -l 'egress-proxy-server\.mjs' /proc/[0-9]*/cmdline 2>/dev/null | wc -l)"
+          else
+            echo "(none)"
+          fi
+          # Now that leaked proxies no longer pin their netns, drop the stale
+          # octn-* namespaces + oct-proxy cgroups they held (mirrors cleanup).
+          for n in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^octns?-' || true); do
+            ip netns delete "$n" 2>/dev/null || true
+          done
+          cgroot="${OCTOPUS_TEST_CGROUP_PARENT:-/sys/fs/cgroup}"
+          for d in "$cgroot"/oct-proxy-* "$cgroot"/oct-*; do
+            [ -d "$d" ] || continue
+            [ -w "$d/cgroup.kill" ] && echo 1 > "$d/cgroup.kill" 2>/dev/null || true
+            rmdir "$d" 2>/dev/null || true
+          done
+          echo "post-kill Committed_AS: $(awk '/Committed_AS/{print $2" "$3}' /proc/meminfo 2>/dev/null)"
+
           # --- fork/EAGAIN diagnostics — hypothesis DISCRIMINATOR --------------
           # Two EAGAIN hypotheses survive; they are mutually exclusive and the
           # captured counters tell them apart. git config/version (single small
