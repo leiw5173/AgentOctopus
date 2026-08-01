@@ -291,6 +291,30 @@ jobs:
           echo "=== TMPDIR -> ${TMPDIR} ==="
           findmnt --target "${TMPDIR}" -o TARGET,SOURCE,FSTYPE,SIZE,AVAIL
           df -h "${TMPDIR}"
+          echo "=== root-cause probe: unprivileged-userns self-bind of a dir ==="
+          # The OS backend helper pivots into a NEW user+mount namespace and
+          # bind-mounts the extracted runtime root onto itself. Reproduce that
+          # exact syscall on BOTH /tmp and TMPDIR to identify the failing
+          # variable (filesystem / mount-ownership / LSM). This is diagnostic
+          # only and never fails the step.
+          uname -a || true
+          echo "kernel.unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+          echo "user.max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)"
+          echo "apparmor: $(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || echo n/a) ($(cat /sys/kernel/security/apparmor/profiles 2>/dev/null | wc -l) profiles)"
+          echo "id: $(id)"
+          echo "capsh: $(capsh --print 2>/dev/null | grep -i 'Current:' || echo n/a)"
+          mkdir -p /tmp/oct-bindtest "${TMPDIR}/oct-bindtest"
+          echo "findmnt /tmp:        $(findmnt -rn --target /tmp -o SOURCE,FSTYPE,OPTIONS)"
+          echo "findmnt TMPDIR:      $(findmnt -rn --target "${TMPDIR}" -o SOURCE,FSTYPE,OPTIONS)"
+          for d in /tmp/oct-bindtest "${TMPDIR}/oct-bindtest"; do
+            if unshare -Umr sh -c "mount --bind '$d' '$d'" 2>/tmp/binderr; then
+              echo "SELF-BIND OK:   $d"
+              umount "$d" 2>/dev/null || true
+            else
+              echo "SELF-BIND FAIL: $d -> $(cat /tmp/binderr)"
+            fi
+          done
+          rmdir /tmp/oct-bindtest "${TMPDIR}/oct-bindtest" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
