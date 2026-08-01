@@ -16,9 +16,12 @@
  *
  *   Phase 1 — OUTSIDE chroot:
  *     - open the named netns fd (from spec.netnsPath)
+ *     - setns(netnsFd, CLONE_NEWNET)   [BEFORE the userns pivot — setns into a
+ *       pre-existing netns needs CAP_SYS_ADMIN in the CURRENT user namespace,
+ *       which the CLONE_NEWUSER unshare below would drop (EPERM). setns touches
+ *       only the net ns, so the pivot leaves the joined net ns in place.]
  *     - unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWIPC|CLONE_NEWUTS)
  *     - write uid_map/gid_map (root in-ns → real root out-ns)
- *     - setns(netnsFd, CLONE_NEWNET)
  *     - mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL)  — propagation private
  *     - bind verified runtime root onto itself, remount MS_BIND|MS_REMOUNT|MS_RDONLY
  *     - for each hostBinds[] entry: bind source→target, remount
@@ -470,14 +473,25 @@ static void xmount(const char *src, const char *target, const char *fstype,
 /* ------------------------------------------------------------------ */
 
 static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
-    /* Open the named netns fd BEFORE unshare so setns() can re-enter it
-     * after the user-namespace pivot. */
+    /* Open the named netns fd before any pivot. */
     int netnsFd = open(spec->netnsPath, O_RDONLY | O_CLOEXEC);
     if (netnsFd < 0)
         die("open netns %s: %s", spec->netnsPath, strerror(errno));
 
-    /* Create the sandboxed namespaces. NEVER an anonymous `unshare --net`:
-     * the net namespace is always the named one provided by the launcher. */
+    /* Join the named netns BEFORE the user-namespace pivot. setns(CLONE_NEWNET)
+     * into a pre-existing netns requires CAP_SYS_ADMIN in the CURRENT (real,
+     * root-owned) user namespace. unshare(CLONE_NEWUSER) immediately drops that
+     * capability (the process becomes root only of the fresh userns, which does
+     * not own the named netns), so calling setns after the pivot fails with
+     * EPERM. Joining first is safe: setns changes ONLY the network namespace —
+     * the subsequent unshare(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|...) creates
+     * the mount/pid/ipc/uts/user namespaces fresh while leaving the just-joined
+     * net namespace in place, so the helper keeps the named netns through the
+     * pivot. NEVER an anonymous `unshare --net`: the net namespace is always the
+     * named one provided by the launcher. */
+    if (setns(netnsFd, CLONE_NEWNET) < 0)
+        die_errno("setns(netnsFd, CLONE_NEWNET)");
+
     /* Capture the real (pre-pivot) uid/gid BEFORE unshare: inside the fresh
      * user namespace getuid()/getgid() return the overflow id (65534) because
      * no uid_map exists yet, which would build an invalid "0 65534 1" map and
@@ -497,9 +511,6 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
     snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
     xwrite_file("/proc/self/gid_map", map);
 
-    /* Join the named netns. */
-    if (setns(netnsFd, CLONE_NEWNET) < 0)
-        die_errno("setns(netnsFd, CLONE_NEWNET)");
     /* Keep the fd open for the child; close-on-exec is fine because we
      * never exec the helper again. */
     *outNetnsFd = netnsFd;

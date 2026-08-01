@@ -22,3 +22,11 @@ Also: the post-build `linkSmokeTest` RUN step now sets `DYLD_LIBRARY_PATH`
 instead of always `LD_LIBRARY_PATH`, which Darwin ignores. Without it the smoke
 binary linked fine but could not locate `libkrun.1.dylib` in the target dir at
 runtime.
+
+And `linkVersionedSonames` no longer skips Darwin: libkrun's Makefile bakes
+`-install_name libkrun.1.dylib` (and our `libkrunfw.5.dylib` is compiled
+`-DABI_VERSION=5`), so the VERSIONED filename is the loader-resolved name there
+too. It now reads the real install_name via `otool -D` (falling back to the pinned
+`libkrun.1.dylib`/`libkrunfw.5.dylib`) and creates the versioned symlink — still
+a symlink to the single digest-verified real file, never a second unverified copy
+(a TCB gap).

@@ -415,25 +415,45 @@ async function writeArtifactManifest(libPath, manifestPath, pin) {
 // second real copy: prebuilds keeps exactly ONE digest-verified real file per
 // lib (the one writeArtifactManifest hashes), and the loader follows the
 // versioned symlink to those verified bytes. A second real copy would be
-// loaded by the OS WITHOUT any digest check — a TCB gap. Darwin dylibs use an
-// unversioned install_name, so this is a no-op there.
+// loaded by the OS WITHOUT any digest check — a TCB gap. On Darwin the dylib's
+// install_name is versioned too (libkrun.1.dylib / libkrunfw.5.dylib), so the
+// same versioned symlink is required there — the loader resolves DT_NEEDED by
+// that install_name basename.
 // ---------------------------------------------------------------------------
 
 async function linkVersionedSonames(libPaths) {
-  if (process.platform === 'darwin') return [];
   const created = [];
-  // Pinned fallback SONAMEs, used only if readelf is unavailable on the lane.
-  const FALLBACK_SONAME = { 'libkrun.so': 'libkrun.so.1', 'libkrunfw.so': 'libkrunfw.so.5' };
+  // Pinned fallback SONAMEs / install names, used only if the inspection tool
+  // (readelf on Linux, otool on Darwin) is unavailable on the lane. Darwin's
+  // libkrun Makefile bakes `-install_name libkrun.<ABI-major>.dylib` (ABI-major
+  // 1 for the v1.19.4 pin), and our libkrunfw.5.dylib is compiled with
+  // -DABI_VERSION=5 — so the VERSIONED filename is the loader-resolved name on
+  // both platforms and must exist alongside the unversioned link-time name.
+  const FALLBACK_SONAME = process.platform === 'darwin'
+    ? { 'libkrun.dylib': 'libkrun.1.dylib', 'libkrunfw.dylib': 'libkrunfw.5.dylib' }
+    : { 'libkrun.so': 'libkrun.so.1', 'libkrunfw.so': 'libkrunfw.so.5' };
   for (const libPath of libPaths) {
     const base = path.basename(libPath);
     let soname = null;
-    try {
-      const { stdout } = await execFileAsync('readelf', ['-d', libPath]);
-      const m = stdout.match(/\(SONAME\)\s+Library soname: \[([^\]]+)\]/);
-      if (m) soname = m[1];
-    } catch { /* readelf missing — fall back to the pinned SONAME below */ }
+    if (process.platform === 'darwin') {
+      // The real file may be behind a symlink (libkrun.dylib -> libkrun.1.dylib
+      // would be circular); otool -D reads the install_name recorded IN the dylib.
+      try {
+        const { stdout } = await execFileAsync('otool', ['-D', libPath]);
+        const lines = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+        // First line is the path header; the install_name is the next line.
+        const candidate = lines.find((l) => l.endsWith('.dylib'));
+        if (candidate) soname = path.basename(candidate); // strip any @rpath/ prefix
+      } catch { /* otool missing — fall back to the pinned name below */ }
+    } else {
+      try {
+        const { stdout } = await execFileAsync('readelf', ['-d', libPath]);
+        const m = stdout.match(/\(SONAME\)\s+Library soname: \[([^\]]+)\]/);
+        if (m) soname = m[1];
+      } catch { /* readelf missing — fall back to the pinned SONAME below */ }
+    }
     if (!soname) soname = FALLBACK_SONAME[base] ?? null;
-    if (!soname || soname === base) continue; // unversioned SONAME — nothing to shim
+    if (!soname || soname === base) continue; // unversioned name — nothing to shim
     const linkPath = path.join(path.dirname(libPath), soname);
     await fs.rm(linkPath, { force: true }).catch(() => {});
     await fs.symlink(base, linkPath); // relative: resolves within the same dir
