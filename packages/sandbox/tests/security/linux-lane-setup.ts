@@ -43,7 +43,7 @@ import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { SandboxConfigSchema, type SandboxConfig } from '../../src/schema.js';
+import { SandboxConfigSchema, type SandboxConfig, type CredentialGrant } from '../../src/schema.js';
 import { buildSnapshot, verifySnapshot, type BuiltSnapshot } from '../../src/snapshot.js';
 import { resolvePolicy, type SandboxPolicy } from '../../src/policy.js';
 import { selectBackend, type ResolvedRuntimeProfile } from '../../src/backend.js';
@@ -175,11 +175,15 @@ export interface LinuxSandboxOptions {
   /**
    * Hook invoked AFTER prepareTopology() (so the netns exists) but BEFORE the
    * policy is resolved and the proxy launched. Runs on the HOST with the
-   * carrier coordinates and returns additional hosts to grant. This lets the
-   * topology lane start a host-side upstream BEFORE the nft table is fixed —
-   * the initial ruleset's input default-drop would otherwise cut it off.
+   * carrier coordinates and returns additional hosts AND credential grants to
+   * admit. This lets the topology lane start a host-side upstream on an
+   * ephemeral port BEFORE the nft table is fixed (the initial ruleset's input
+   * default-drop would otherwise cut it off) and then grant that exact
+   * host:port — a non-default port is only admitted via a credential grant
+   * (policy Rule 3), and a private/loopback literal additionally needs an exact
+   * host grant (Rule 4 → allowPrivateLiteral).
    */
-  afterTopology?: (carrier: { netnsName: string; proxyIp: string; proxyPort: number }) => Promise<string[]>;
+  afterTopology?: (carrier: { netnsName: string; proxyIp: string; proxyPort: number }) => Promise<{ hosts?: string[]; credentials?: CredentialGrant[] }>;
   /** Per-probe overrides folded into the run spec (timeout, output cap). */
   timeoutMs?: number;
   outputMaxBytes?: number;
@@ -310,9 +314,11 @@ export async function setupLinuxSandbox(opts: LinuxSandboxOptions = {}): Promise
   // the extra hosts to grant BEFORE the policy is resolved and the proxy's
   // nft authorization fixes the table (the initial ruleset's input
   // default-drop would otherwise cut a later-started upstream off).
-  const hookHosts = opts.afterTopology
+  const hookResult = opts.afterTopology
     ? await opts.afterTopology({ netnsName, proxyIp: carrier.reachableHost, proxyPort: carrier.listenPort })
-    : [];
+    : {};
+  const hookHosts = hookResult.hosts ?? [];
+  const hookCreds = hookResult.credentials ?? [];
   const grantedHosts = [...(opts.grantedHosts ?? []), ...hookHosts];
 
   // Fail-closed config: only the OS backend is acceptable, and only at full
@@ -322,13 +328,26 @@ export async function setupLinuxSandbox(opts: LinuxSandboxOptions = {}): Promise
     defaultBackend: 'os',
     minIsolationLevel: 'full',
     defaults: { timeoutMs: DEFAULT_TIMEOUT_MS, outputMaxBytes: DEFAULT_OUTPUT_MAX_BYTES },
-    grants: grantedHosts.length > 0
-      ? [{ installationId: snapshot.identity.installationId, digest: snapshot.identity.digest, hosts: grantedHosts }]
+    grants: (grantedHosts.length > 0 || hookCreds.length > 0)
+      ? [{
+          installationId: snapshot.identity.installationId,
+          digest: snapshot.identity.digest,
+          hosts: grantedHosts,
+          // Credential grants admit a non-default upstream port (policy Rule 3);
+          // omit the field entirely when the hook grants none.
+          ...(hookCreds.length > 0 ? { credentials: hookCreds } : {}),
+        }]
       : [],
   });
   const requestDescriptor: SandboxSkillDescriptor = {
     ...descriptor,
-    request: { ...descriptor.request, hosts: [...(descriptor.request.hosts ?? []), ...hookHosts] },
+    // resolvePolicy intersects granted credentials with request.credentials, so
+    // the hook's credential KEYS must also be requested for them to take effect.
+    request: {
+      ...descriptor.request,
+      hosts: [...(descriptor.request.hosts ?? []), ...hookHosts],
+      credentials: [...(descriptor.request.credentials ?? []), ...hookCreds.map((c) => c.key)],
+    },
   };
   const policy = resolvePolicy(requestDescriptor, config);
 
@@ -432,17 +451,16 @@ export async function deriveNetnsFacts(netnsName: string): Promise<{ nftTable: s
       .filter((l) => l.startsWith('table inet oct_'));
     nftTable = names[0]?.replace(/^table inet /, '') ?? '';
   }
-  // The host veth is the host-side peer of the veth pair: interfaces in the
-  // DEFAULT namespace whose name matches the oh* prefix (the netns-side os*
-  // peer does not appear in the default namespace listing).
-  let hostVeth = '';
-  const links = await runArgv(['ip', '-o', 'link', 'show']);
-  if (links.code === 0) {
-    for (const line of links.stdout.split('\n')) {
-      const m = /^\d+:\s+(oh[0-9a-f]+)[:@]/.exec(line);
-      if (m) { hostVeth = m[1]!; break; }
-    }
-  }
+  // The nft table (oct_<salt>) and the host veth (oh<salt>) are BOTH derived
+  // from the SAME per-session random salt (netns.ts deriveNames), so this
+  // session's host veth name follows directly from the netns-scoped table name
+  // resolved above. We deliberately do NOT grep the global `ip link` list for
+  // the first oh* interface: on a persistent self-hosted runner that list
+  // accumulates STALE oh* veths leaked by pre-reaper runs, and a first-match
+  // grep returns one of those (always the same lowest-ifindex leftover) instead
+  // of this session's interface — failing the teardown assertion against a name
+  // this session never owned, even though its own veth cleaned up correctly.
+  const hostVeth = nftTable.startsWith('oct_') ? `oh${nftTable.slice('oct_'.length)}` : '';
   return { nftTable, hostVeth };
 }
 

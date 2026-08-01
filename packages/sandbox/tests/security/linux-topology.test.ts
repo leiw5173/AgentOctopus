@@ -189,38 +189,63 @@ describe('Linux lane — netns topology', () => {
 
   it('reaches a granted upstream through the proxy only (HTTP via the egress proxy)', async (ctx) => {
     if (!needLinux(ctx)) return;
-    // The skill's netns has NO route off-box except the /32 peer route to the
-    // host-side proxy, so a successful HTTP fetch of a granted PUBLIC host can
-    // ONLY have traversed the proxy. (The companion `direct-internet` lane test
-    // proves the skill cannot reach the same host directly — together they show
-    // egress is proxy-only.) The proxy runs on the HOST, which has internet.
+    // HERMETIC round-trip through the host-side proxy: a host-side loopback
+    // upstream on an EPHEMERAL port, admitted by a credential grant (the ONLY
+    // way the policy admits a non-default port — Rule 3) plus an exact host
+    // grant of the private literal (Rule 4 → allowPrivateLiteral, lifting the
+    // SSRF block on loopback for this explicitly-granted target). The skill's
+    // netns has no off-box route but the /32 peer route to the proxy, so a 2xx
+    // can ONLY have traversed the proxy. Hermetic on purpose: the self-hosted
+    // runner's public egress may be restricted, so no external host is used.
     //
-    // WHY a granted public default-port host, not a loopback upstream: the
-    // proxy policy grants HOSTS at their default port (Rule 3); a non-default
-    // port needs an explicit target/credential grant this lane does not wire,
-    // and a private/loopback literal is additionally SSRF-protected. A loopback
-    // upstream on an ephemeral listen(0) port is therefore denied by policy
-    // (403) — the correct behavior, not a proxy bug. example.com:80 is a granted
-    // public host on its default port, so it is forwarded.
-    //
-    // spawnBlock=false: this test drives its own one-shot backend.run() probe
-    // through the proxy, so it must NOT keep a persistent `block` process in
-    // the shared session cgroup (that would fail run()'s post-exit "cgroup is
-    // empty" containment check). The proxy + grants this test verifies come
-    // from setupLinuxSandbox, independent of any persistent probe.
-    const t = await startTopologySandbox({ request: { hosts: ['example.com'] } }, false);
+    // spawnBlock=false: this test drives its own one-shot backend.run() probe,
+    // so it must NOT keep a persistent `block` process in the shared session
+    // cgroup (that would fail run()'s post-exit "cgroup is empty" check).
+    let upstream: ReturnType<typeof createServer> | undefined;
+    let upstreamUrl = '';
+    const t = await startTopologySandbox({
+      request: { hosts: ['127.0.0.1'], credentials: ['LANE_UPSTREAM'] },
+      afterTopology: async () => {
+        upstream = createServer((sock) => {
+          sock.end('HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok');
+        });
+        await new Promise<void>((resolveListen, rejectListen) => {
+          upstream!.once('error', rejectListen);
+          upstream!.listen(0, '127.0.0.1', () => resolveListen());
+        });
+        const addr = upstream!.address();
+        if (addr === null || typeof addr === 'string') throw new Error('upstream fixture has no port');
+        upstreamUrl = `http://127.0.0.1:${addr.port}/`;
+        return {
+          hosts: ['127.0.0.1'],
+          // Credential grant admits the ephemeral port (Rule 3 hasCredPort) and
+          // matches the GET on pathPrefix '/' (Rule 5; root prefix ⇒ highRisk).
+          // No secret value is wired (fixture secrets = {}), so the proxy simply
+          // authorizes + forwards without injecting an auth header.
+          credentials: [{
+            key: 'LANE_UPSTREAM',
+            host: '127.0.0.1',
+            port: addr.port,
+            scheme: 'http',
+            methods: ['GET'],
+            pathPrefix: '/',
+            header: 'x-lane-auth',
+            highRisk: true,
+          }],
+        };
+      },
+    }, false);
     try {
       const result = await t.sandbox.backend.run({
-        command: [LANE_NODE, '/skill/http-probe.js', t.sandbox.proxy.reachableAddr, 'http://example.com/'],
+        command: [LANE_NODE, '/skill/http-probe.js', t.sandbox.proxy.reachableAddr, upstreamUrl],
         timeoutMs: 30_000,
       });
-      // http-probe exits 0 only on a 2xx from the upstream — i.e. the proxy
-      // forwarded the granted request and relayed the response back to the
-      // skill. A non-2xx (policy deny / upstream error) exits non-zero.
+      // http-probe exits 0 only on a 2xx from the upstream and prints the body.
       expect(result.exitCode).toBe(0);
-      expect(result.stdout.length).toBeGreaterThan(0);
+      expect(result.stdout).toContain('ok');
     } finally {
       await t.cleanup();
+      if (upstream) await new Promise<void>((r) => upstream!.close(() => r()));
     }
   }, RUN_TIMEOUT);
 
@@ -304,26 +329,10 @@ describe('Linux lane — netns topology', () => {
 
     await t.cleanup();
 
-    // DIAGNOSTIC (failure-2 root cause): surface the exact netns-teardown error
-    // and the live host-side state of THIS session's veth. netns.cleanup() runs
-    // `ip link delete <hostIf>` as root in the host netns; if the veth still
-    // exists afterward, EITHER that command recorded a non-benign error
-    // (EBUSY/EPERM/... → backend.netnsCleanupErrors), OR it reported the link
-    // already absent (ENOENT, treated as success and NOT recorded) while the
-    // link is in fact still present host-side — a command-context/visibility
-    // bug. Logging both discriminates the two before the assertion below.
-    const diagShow = await runArgv(['ip', '-d', 'link', 'show', hostVeth]);
-    const diagNetns = await runArgv(['ip', 'netns', 'list']);
-    // eslint-disable-next-line no-console
-    console.error('TEARDOWN-DIAG ' + JSON.stringify({
-      hostVeth,
-      netnsName,
-      vethPresentAfterCleanup: diagShow.code === 0,
-      vethDetail: diagShow.stdout.replace(/\s+/g, ' ').slice(0, 600),
-      vethShowStderr: diagShow.stderr.slice(0, 200),
-      netnsList: diagNetns.stdout.replace(/\s+/g, ' | ').slice(0, 400),
-      netnsCleanupErrors: t.sandbox.backend.netnsCleanupErrors,
-    }));
+    // Teardown recorded no non-benign errors: the netns cleanup's `ip link
+    // delete <hostIf>` + `ip netns delete` succeeded (already-absent counts as
+    // success). A leaked veth/netns from THIS session would surface here.
+    expect(t.sandbox.backend.netnsCleanupErrors).toEqual([]);
 
     // No skill path remains after backend cleanup: the netns, its nft table,
     // the host veth peer, and the skill cgroup are all gone.
