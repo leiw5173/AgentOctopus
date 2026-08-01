@@ -17,8 +17,12 @@
  * lane. Reproducibility is enforced by:
  *   - fixed UUID (-U <uuid>)
  *   - fixed capacity algorithm (-b 4096, sized from the staging tree)
- *   - fixed mtime/hash_seed: -T now is forbidden; we set E2FSPROGS_FAKE_TIME
- *     and disable hash_seed via tune2fs so directory entries are stable
+ *   - fixed mtime/atime: the staging tree is pinned to the fixed epoch and
+ *     E2FSPROGS_FAKE_TIME makes mke2fs fake the mkfs-assigned times; the one
+ *     volatile inode field it does NOT fake (ctime) is pinned post-build via
+ *     debugfs. hash_seed is pinned via mke2fs -E hash_seed=<uuid>.
+ *   - NO tune2fs: it re-bumps s_wtime to the wall clock even under
+ *     E2FSPROGS_FAKE_TIME, and mke2fs already sets mount count 0 + the UUID.
  *   - fixed inode params (-N <count> so inode table size is deterministic)
  *   - journal DISABLED (-O ^has_journal) — read-only rootfs, no journal
  *   - lazy init DISABLED (-E lazy_itable_init=0,lazy_journal_init=0)
@@ -338,11 +342,12 @@ function imageSizeBlocks(staging) {
 //         -E ...,hash_seed=<uuid> -d <staging> — pins the dir_index hash seed
 //                                            (else mkfs randomizes the 16-byte
 //                                            s_hash_seed and images differ)
-//   tune2fs -C 0 -U <uuid>            — mount count + re-pin UUID. NO -T: no
-//                                       timezone-independent last-check value
-//                                       is accepted (`-T 0`/`@0` are rejected),
-//                                       and the fake clock already fixed
-//                                       last-check at mkfs time.
+//   debugfs set_inode_field <N> ctime <epoch>  — pins the one volatile inode
+//                                       field mke2fs does NOT fake (ctime is
+//                                       wall-clock). NO tune2fs: it re-bumps
+//                                       s_wtime to the wall clock even under
+//                                       the fake clock, and mke2fs already set
+//                                       mount count 0 + the UUID.
 // The image is then chmod 0444 (sealed read-only) — matches the C writer's
 // seal contract so the backend's mode assertion (0o444) holds uniformly.
 // ---------------------------------------------------------------------------
@@ -354,6 +359,16 @@ async function buildOnce(staging, destPath, sizeBlocks, inodeCount) {
   const fh = await fs.open(destPath, 'w');
   await fh.close();
   await fs.truncate(destPath, sizeBlocks * 4096);
+
+  // Re-pin atime IMMEDIATELY before THIS mke2fs run. On relatime mounts (the
+  // default; the CI runner's ext4 is relatime) the FIRST read after a touch
+  // bumps atime — so the previous build's mke2fs read already advanced the
+  // staging files' atime. Pinning only once (in buildStaging) lets build N+1
+  // pack a newer atime than build N. Re-pinning before every build makes both
+  // mke2fs runs read the identical pinned atime, so the double-build digests
+  // match. (Verified: pin-once diverges on ext4/relatime, re-pin-per-build is
+  // byte-identical; tmpfs/noatime masked this in earlier local testing.)
+  await pinStagingTimes(staging);
 
   const env = {
     ...process.env,
@@ -380,22 +395,28 @@ async function buildOnce(staging, destPath, sizeBlocks, inodeCount) {
       '  Ensure e2fsprogs is installed (pinned version on the release lane).');
   }
 
-  // Collapse remaining nondeterministic superblock fields and seal read-only.
-  // No -T (last-check time): tune2fs rejects every timezone-independent value
-  // (`-T 0` and `-T @0` both die with "Couldn't parse date/time specifier"),
-  // and E2FSPROGS_FAKE_TIME already fixed last-check at mkfs time — so the flag
-  // was both broken (exit 1, failing the build) and redundant.
-  const tune2fsArgs = [
-    '-C', '0',      // mount count
-    '-U', ROOTFS_UUID, // re-pin UUID (defensive: some mke2fs revs rewrite it)
-    destPath,
-  ];
+  // mke2fs sets every inode's ctime to the wall clock (the one timestamp it
+  // does NOT fake under E2FSPROGS_FAKE_TIME, and the one no `touch` can pin —
+  // ctime is the inode-metadata-change time, not a file timestamp). Pin every
+  // allocated inode's ctime to the fixed epoch with debugfs. We sweep 1..
+  // inodeCount: debugfs skips free inodes with a harmless error, so we do not
+  // need the exact allocation map. (The superblock's other volatile fields —
+  // created/last-check — are already faked to the epoch by mke2fs, and we
+  // deliberately do NOT run tune2fs: it unconditionally re-bumps s_wtime to the
+  // wall clock even under E2FSPROGS_FAKE_TIME, and mke2fs already sets mount
+  // count 0 + the pinned UUID, so tune2fs is pure nondeterminism here.)
+  const zapCmds = ['set_inode_field <1> ctime 1'];
+  for (let i = 2; i <= inodeCount; i++) zapCmds.push(`set_inode_field <${i}> ctime 1`);
+  const zapFile = path.join(os.tmpdir(), `octopus-debugfs-zap-${process.pid}-${Date.now()}.txt`);
+  await fs.writeFile(zapFile, zapCmds.join('\n') + '\n');
   try {
-    await execFileAsync('tune2fs', tune2fsArgs, { env });
+    await execFileAsync('debugfs', ['-w', '-f', zapFile, destPath]);
   } catch (err) {
+    await fs.rm(zapFile, { force: true }).catch(() => {});
     await fs.rm(destPath, { force: true }).catch(() => {});
-    die(`tune2fs failed: ${err.stderr ?? err.message}`);
+    die(`debugfs ctime pin failed: ${err.stderr ?? err.message}`);
   }
+  await fs.rm(zapFile, { force: true }).catch(() => {});
 
   // Seal read-only (0444) — matches the C writer's seal contract so the
   // backend mode assertion (rootfs mode === 0o444) holds.
@@ -541,7 +562,7 @@ async function assertOnPath(tool, hint) {
 
 // Tool gate.
 await assertOnPath('mke2fs', 'install e2fsprogs on the release lane.');
-await assertOnPath('tune2fs', 'install e2fsprogs on the release lane.');
+await assertOnPath('debugfs', 'install e2fsprogs on the release lane.');
 await assertOnPath('cc', 'install a C toolchain.');
 
 // Declared runtime bins (copied verbatim). CI can extend via
