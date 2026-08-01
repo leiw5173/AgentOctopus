@@ -535,23 +535,29 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
     xmount(spec->root, spec->root, NULL,
            MS_BIND | MS_REMOUNT | MS_RDONLY, NULL);
 
-    /* Bind each declared host mount, then remount ro,nosuid,nodev. The
-     * skill bind additionally gets noexec unless the execution strategy
-     * requires native modules; run-spec.ts already encodes that decision
-     * in the bind list, so the helper applies the conservative default
-     * (ro,nosuid,nodev) uniformly and adds noexec to the skill mount. */
+    /* Bind each declared host mount (nosuid,nodev on the bind), then remount
+     * read-only. The skill bind additionally gets noexec unless the execution
+     * strategy requires native modules; run-spec.ts already encodes that
+     * decision in the bind list, so the helper applies the conservative default
+     * (nosuid,nodev) uniformly and adds noexec to the skill mount. */
     for (int i = 0; i < spec->hostBindsLen; i++) {
         const HostBind *b = &spec->hostBinds[i];
-        unsigned long flags = MS_BIND | (b->recursive ? MS_REC : 0);
+        /* nosuid,nodev go on the INITIAL bind, not the remount: once a bind is
+         * remounted read-only the kernel ignores per-mount flag changes (and
+         * the privileged-CI runner's out-of-tree mount validator rejects the
+         * MS_REMOUNT|MS_BIND|MS_NOSUID|MS_NODEV combination outright, EPERM on
+         * 0x1021). Setting them on the bind itself is what the kernel honors
+         * and is equally restrictive. */
+        unsigned long flags = MS_BIND | MS_NOSUID | MS_NODEV | (b->recursive ? MS_REC : 0);
         xmount(b->source, b->target, NULL, flags, NULL);
 
-        /* Remount: ro,nosuid,nodev always. Add noexec for the skill mount
-         * (identified as the non-runtime-root, non-CA bind). */
-        unsigned long remountFlags = MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV;
+        /* Remount: read-only only. MS_REC is a no-op for remount (remount_ro
+         * never recurses) and trips the same validator, so it is dropped here
+         * too. nosuid/nodev/noexec were already applied by the bind above. */
+        unsigned long remountFlags = MS_BIND | MS_REMOUNT | MS_RDONLY;
         int isSkill = (strstr(b->target, "/skill") != NULL);
         int isCa = (strstr(b->target, "/etc/skill-ca/") != NULL);
         if (isSkill && !isCa) remountFlags |= MS_NOEXEC;
-        if (b->recursive) remountFlags |= MS_REC;
         xmount(b->source, b->target, NULL, remountFlags, NULL);
     }
 }
