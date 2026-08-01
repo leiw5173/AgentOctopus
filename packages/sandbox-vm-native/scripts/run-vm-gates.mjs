@@ -166,7 +166,14 @@ async function runGateG1(targetDir, helperPath, rootfsImg, rootfsRef, skillBlock
   }
 
   await fs.rm(hostSentinelDir, { recursive: true, force: true }).catch(() => {});
-  return { gate: 'G1', ...evaluateG1(guestStdout, sentinelValue) };
+  const result = evaluateG1(guestStdout, sentinelValue);
+  // On helper early-exit the DONE marker is absent and the real boot failure
+  // sits in the helper's stderr (captured into guestStdout by
+  // bootVmAndCaptureStdout). Surface it so a NO-GO is diagnosable.
+  if (result.status === 'NO-GO' && !guestStdout.includes('G1-DONE')) {
+    console.error(`run-vm-gates: G1 helper output (early-exit):\n${guestStdout.trim() || '(no output)'}`);
+  }
+  return { gate: 'G1', ...result };
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +231,11 @@ async function runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, skillBlock
   await new Promise((r) => setTimeout(r, 100));
   canary.close();
 
-  return { gate: 'G2', ...evaluateG2(guestStdout, canaryReceivedConnection) };
+  const result = evaluateG2(guestStdout, canaryReceivedConnection);
+  if (result.status === 'NO-GO' && !guestStdout.includes('G2-DONE')) {
+    console.error(`run-vm-gates: G2 helper output (early-exit):\n${guestStdout.trim() || '(no output)'}`);
+  }
+  return { gate: 'G2', ...result };
 }
 
 // ---------------------------------------------------------------------------
@@ -299,16 +310,24 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
       env,
       maxBuffer: 16 * 1024 * 1024,
     });
+    // Capture BOTH stdout and stderr. The helper writes every early-exit
+    // diagnostic to fd 2 via die() (e.g. "krun_set_root failed", dlopen/HVF
+    // errors) before _exit(127) — a NO-GO "helper early-exit" with only stdout
+    // captured hides that reason entirely. Append stderr so the gate NO-GO
+    // message carries the actual boot failure.
     let stdout = '';
+    let stderr = '';
     child.stdout?.on('data', (c) => { stdout += c.toString('utf8'); });
+    child.stderr?.on('data', (c) => { stderr += c.toString('utf8'); });
     try {
       await child;
     } catch (err) {
       // Non-zero exit is expected for probe scripts that encounter failures;
       // treat the captured stdout as the result regardless.
       if (err.stdout) stdout += err.stdout.toString('utf8');
+      if (err.stderr) stderr += err.stderr.toString('utf8');
     }
-    return stdout;
+    return stderr.trim() ? `${stdout}\n[helper stderr]\n${stderr}` : stdout;
   } finally {
     if (serverReady) {
       await new Promise((r) => vsockServer.close(r));
