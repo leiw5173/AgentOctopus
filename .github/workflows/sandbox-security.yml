@@ -244,13 +244,20 @@ jobs:
     env:
       OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
       OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
-      # Rootfs staging must NOT land on the runner's /tmp — it is a small
-      # RAM-backed tmpfs. The OS backend, probeOsCaps' runtime-artifact extract,
-      # and the lane's own workDirs all mkdtemp under os.tmpdir(), so one TMPDIR
-      # redirect moves every extract to the runner's workspace disk (far larger).
-      # Without this, ~9 concurrent node rootfs extracts (100MB+ each) fill the
-      # tmpfs mid-lane → tar exits ENOSPC → probeOsCaps reports restricted →
-      # selectBackend fails closed with NoFullBackendError on all spawn tests.
+      # Rootfs staging must live on a filesystem that is BOTH large enough for
+      # ~9 concurrent 100MB+ node rootfs extracts AND user-mountable (the OS
+      # backend's helper bind-mounts the extracted runtime root onto itself
+      # from inside an unprivileged user namespace — a mount that EPERMs unless
+      # the source superblock is user-mountable, FS_USERNS_MOUNT). The runner's
+      # /tmp is a 455MB tmpfs (too small → ENOSPC) and the workspace disk is
+      # ext4 (large but NOT user-mountable → the helper's very first self-bind
+      # dies "mount(...rootfs-X -> ...rootfs-X, NULL, 0x5000): Permission
+      # denied", the helper exits, and the cgroup attach then reports ESRCH).
+      # tmpfs satisfies both constraints, so we mount a dedicated large tmpfs
+      # at this mountpoint (the runner has CAP_SYS_ADMIN — the same privilege
+      # probeOsCaps/cleanup already use for `ip netns`/`nft`) and point TMPDIR
+      # at it. We do NOT overmount the shared /tmp (that would break the
+      # runner agent); a private mountpoint is torn down in the post-lane step.
       TMPDIR: ${{ github.workspace }}/.tmp
       # probePrivilegedLinux() (harness) reads its canonical manifests from
       # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it. This
@@ -268,13 +275,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Evidence for the tmpfs-exhaustion root cause: show every mount's
-          # size/usage so a future ENOSPC is diagnosable from the log, and
-          # create the TMPDIR redirect target on the workspace disk.
+          # Stage TMPDIR as a dedicated tmpfs (see the env comment above):
+          # large enough for the rootfs extracts AND user-mountable so the OS
+          # backend helper's unprivileged-userns self-bind succeeds. A private
+          # mountpoint (not the shared /tmp) keeps the runner agent unaffected.
           mkdir -p "${TMPDIR}"
+          if findmnt -rn --target "${TMPDIR}" -o FSTYPE | grep -qx tmpfs; then
+            echo "TMPDIR already tmpfs: ${TMPDIR}"
+          else
+            mount -t tmpfs -o size=3g,mode=1777 tmpfs "${TMPDIR}"
+            echo "mounted 3g tmpfs at ${TMPDIR}"
+          fi
           echo "=== df -h (all mounts) ==="
           df -h
           echo "=== TMPDIR -> ${TMPDIR} ==="
+          findmnt --target "${TMPDIR}" -o TARGET,SOURCE,FSTYPE,SIZE,AVAIL
           df -h "${TMPDIR}"
       - name: Verify privileged Linux lane files are present
         shell: bash
@@ -437,7 +452,18 @@ jobs:
             [ -d "$d" ] || continue
             lsof +D "$d" >/dev/null 2>&1 || rm -rf -- "$d" || true
           done
-          rm -rf packages/sandbox/runtime packages/sandbox/build "${TMPDIR}"
+          rm -rf packages/sandbox/runtime packages/sandbox/build
+          # TMPDIR is a dedicated tmpfs mountpoint (see the staging step): sweep
+          # its contents, then unmount it so the runner is left without the RAM
+          # mount. umount AFTER the sweep; tolerate busy (a leaked session mount
+          # under the rootfs) by falling back to a lazy unmount.
+          if findmnt -rn --target "${TMPDIR}" -o FSTYPE | grep -qx tmpfs; then
+            rm -rf "${TMPDIR:?}"/* || true
+            umount "${TMPDIR}" 2>/dev/null || umount -l "${TMPDIR}" 2>/dev/null || true
+            echo "unmounted tmpfs at ${TMPDIR}"
+          else
+            rm -rf "${TMPDIR}" || true
+          fi
 
   macos-restricted:
     name: macos-restricted
