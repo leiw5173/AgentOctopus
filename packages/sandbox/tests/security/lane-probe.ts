@@ -134,18 +134,31 @@ if (action === 'ca-ro-probe') {
 
 if (action === 'pids-flood') {
   // Fork-bomb against the trusted pids.max=64 ceiling: spawn short-lived Node
-  // children until fork fails (EAGAIN). ok=false when MORE than 63 spawns
-  // succeeded — that would prove the cgroup PID ceiling is not enforced.
-  let spawned = 0;
+  // children and count how many actually START. ok=false when MORE than 63
+  // start — that would prove the cgroup PID ceiling is not enforced.
+  //
+  // CRITICAL measurement detail: spawn() does NOT throw synchronously when the
+  // kernel refuses fork() past pids.max. fork-EAGAIN is delivered ASYNCHRONOUSLY
+  // as an 'error' event on the ChildProcess (verified empirically under a
+  // pids-limit-64 container: spawn() returned 200 times, 182 async 'error'
+  // events, zero sync throws). A try/catch therefore counts spawn-ATTEMPTS
+  // (always 200) and can never observe the ceiling. We instead count the 'spawn'
+  // event (the child truly started) vs the 'error' event (fork refused), then
+  // wait one tick for the async events to settle before emitting.
+  let started = 0;
+  let refused = 0;
   let failErr = 'none';
   for (let i = 0; i < 200; i++) {
-    try {
-      const c = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
-      c.unref();
-      spawned++;
-    } catch (e) { failErr = e.code; break; }
+    const c = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+    c.on('spawn', () => { started++; });
+    c.on('error', (e) => { refused++; if (failErr === 'none') failErr = e.code; });
+    c.unref();
   }
-  emit({ ok: spawned <= 63, spawned, failErr });
+  // Give the event loop a moment to deliver every 'spawn'/'error' event before
+  // reporting; the counts are meaningless until they settle.
+  setTimeout(() => {
+    emit({ ok: started <= 63, spawned: started, refused, failErr });
+  }, 800);
   // Keep the parent (and its children) inside the cgroup so pids.max stays
   // accountable; the backend timeout reaps the whole cgroup.
   setInterval(() => {}, 60000);

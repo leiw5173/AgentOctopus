@@ -74,6 +74,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -909,11 +910,55 @@ int main(int argc, char **argv) {
     if (child < 0) die_errno("fork");
 
     if (child == 0) {
-        /* Child: PID 1 in the new PID namespace. Close the netns fd — phase 3
-         * never touches it. */
+        /* Child: PID 1 in the new PID namespace. PID 1 has a mandatory duty no
+         * other process can fill: it is the reaper for EVERY descendant in the
+         * namespace, including orphaned grandchildren re-parented to it. The
+         * untrusted workload (node) does NOT reap — when it spawns detached or
+         * unref'd children that exit, they become ZOMBIES. A zombie is still a
+         * task in the session cgroup, so `cgroup.events populated` stays 1 and
+         * the backend's post-run `waitEmpty()` fails with "cgroup not empty".
+         * The kernel SIGKILLs orphans when PID 1 dies (pid-ns teardown), but
+         * node's OWN already-exited children are zombies that only a LIVING
+         * process inside this namespace can reap — and the backend (in the
+         * parent ns) cannot cross the boundary. So this child must NOT exec the
+         * workload directly; it stays as a minimal init/reaper (the standard
+         * tini/runc pattern) and forks a grandchild to run phase 3. */
+        pid_t worker = fork();
+        if (worker < 0) die_errno("fork worker");
+
+        if (worker == 0) {
+            /* Grandchild: the untrusted workload. Close the netns fd — phase 3
+             * never touches it. */
+            close(netnsFd);
+            phase3_enter_root(&spec, stopBeforeExec);
+            /* never returns */
+            _exit(127);
+        }
+
+        /* Reaper loop: collect the worker AND every orphaned/zombie descendant
+         * re-parented to us, until the worker exits. Then propagate its code.
+         * Reap aggressively (WNOHANG + short sleep) so zombies never linger past
+         * the workload's exit — that is what lets the cgroup drain promptly. */
         close(netnsFd);
-        phase3_enter_root(&spec, stopBeforeExec);
-        /* never returns */
+        int wstatus = 0;
+        int workerReaped = 0;
+        while (!workerReaped) {
+            pid_t r;
+            while ((r = waitpid(-1, &wstatus, WNOHANG)) > 0) {
+                if (r == worker) workerReaped = 1;
+            }
+            if (!workerReaped) {
+                /* Nothing reaped this pass; sleep briefly then retry. EINTR
+                 * from SIGCHLD is fine — the loop re-polls. */
+                struct timespec ts = { 0, 1000000 }; /* 1ms */
+                nanosleep(&ts, NULL);
+            }
+        }
+        /* Drain any stragglers that exited with the worker before we leave. */
+        while (waitpid(-1, &wstatus, WNOHANG) > 0) { /* reap */ }
+
+        if (WIFEXITED(wstatus)) _exit(WEXITSTATUS(wstatus));
+        if (WIFSIGNALED(wstatus)) _exit(128 + WTERMSIG(wstatus));
         _exit(127);
     }
 

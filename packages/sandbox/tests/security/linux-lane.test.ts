@@ -319,10 +319,11 @@ describe('Linux lane — isolation', () => {
 
   it('enforces the pids.max=64 ceiling against a fork-bomb (M7)', async (ctx) => {
     if (!needLinux(ctx)) return;
-    // The probe spawns Node children until fork fails. With pids.max=64 the
-    // kernel refuses fork past the ceiling (EAGAIN), so the number of
-    // successful spawns is bounded well below the 200-attempt loop. The
-    // probe emits ok=false if it managed MORE than 63 spawns.
+    // The probe spawns Node children and counts how many actually START (the
+    // 'spawn' event) vs are refused (the async 'error' event — spawn() does NOT
+    // throw synchronously on fork-EAGAIN). With pids.max=64 the kernel refuses
+    // fork past the ceiling, so the number of real starts is bounded well below
+    // the 200-attempt loop. The probe emits ok=false if MORE than 63 start.
     const sandbox = await setupLinuxSandbox({ timeoutMs: 30_000 });
     try {
       const result = await sandbox.backend.run({
