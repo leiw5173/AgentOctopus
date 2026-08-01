@@ -533,22 +533,31 @@ jobs:
             rmdir "$bindprobe" 2>/dev/null || true
             exit 1
           fi
-          # Diagnostic (resolved): the helper's read-only REMOUNT of the rootfs
-          # used MS_REMOUNT|MS_BIND|MS_RDONLY|MS_REC (0x5021) and EPERMed on this
-          # kernel. The probe below proved remount-ro itself IS permitted under
-          # a userns, so the restriction was the no-op MS_REC on the recursive
-          # remount — fixed in helper.c by dropping it. Kept as a one-line
-          # regression guard: if a future change re-introduces a remount the
-          # kernel rejects, this surfaces it at staging, not as 12 ESRCH tests.
-          rp="${TMPDIR}/.oct-remount-probe"
-          mkdir -p "$rp"
+          # Diagnostic (this run): the runtimeRoot is remounted read-only TWICE
+          # (self-bind at helper.c:535, then again as hostBinds[0] at :561), and
+          # the SECOND remount still EPERMs with 0x1021 even after nosuid/nodev
+          # moved onto the bind. My flag model is exhausted; probe the EXACT
+          # sequence to find the true discriminator. Diagnostic only; never
+          # fails the step (result read from the log).
+          dr="${TMPDIR}/.oct-dblremount"
+          mkdir -p "$dr"
+          echo "=== double-remount probe (helper's exact runtimeRoot sequence) ==="
           unshare -Umr sh -c "
-            mount --bind '$rp' '$rp' &&
-            mount -o remount,ro,bind '$rp'
-          " 2>/tmp/oct-rperr && echo "STAGE OK: unprivileged-userns remount-ro succeeds" || {
-            echo "ERROR: unprivileged-userns remount-ro FAILS -> $(cat /tmp/oct-rperr)" >&2; exit 1; }
-          umount "$rp" 2>/dev/null || true; rmdir "$rp" 2>/dev/null || true
-          rmdir "$bindprobe" 2>/dev/null || true
+            set -x
+            mount --bind '$dr' '$dr' &&
+            mount -o remount,ro,bind '$dr' &&
+            echo 'PROBE1 first-ro-remount OK' &&
+            mount -o remount,ro,bind,nosuid '$dr' &&
+            echo 'PROBE2 second-ro-remount+nosuid OK'
+          " 2>/tmp/oct-drerr && echo "DOUBLE-REMOUNT OK" || echo "DOUBLE-REMOUNT FAIL -> $(cat /tmp/oct-drerr)"
+          # Isolate: is the SECOND remount (already-ro) the problem, or nosuid?
+          unshare -Umr sh -c "
+            mount --bind '$dr' '$dr' &&
+            mount -o remount,ro,bind '$dr' &&
+            mount -o remount,ro,bind '$dr' &&
+            echo 'PROBE3 plain second-ro-remount (no new flags) OK'
+          " 2>/tmp/oct-drerr2 && echo "SECOND-RO-ONLY OK" || echo "SECOND-RO-ONLY FAIL -> $(cat /tmp/oct-drerr2)"
+          umount "$dr" 2>/dev/null || true; rmdir "$dr" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
