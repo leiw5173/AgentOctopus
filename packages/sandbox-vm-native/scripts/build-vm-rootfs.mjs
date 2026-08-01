@@ -234,24 +234,31 @@ async function compileGuest(staging, guestAbsPath, srcPath, extra = []) {
 }
 
 // Pin every staging entry's atime + mtime to the fixed epoch. mke2fs -d copies
-// each source file's atime into the image inode; the double-build reproducibility
-// assertion reads the SAME staging tree twice, and (on CI runners without noatime)
-// the first mke2fs read bumps each source's atime, so the second build packs a
-// different atime and the digests diverge. ctime/mtime come from the source's
-// fixed mtime (stable) and crtime is forced by E2FSPROGS_FAKE_TIME, but atime is
-// NOT covered by the fake clock — it must be pinned on the staging tree itself.
+// each source file's atime into the image inode; on hosts without noatime,
+// relatime bumps a directory's atime to wall-clock the moment it is readdir'd
+// (the pinned atime is <= its mtime, which is exactly the relatime trigger), so
+// any read of the staging tree after pinning would be packed with a drifted
+// atime and the digests would diverge across runs. Two rules make this hold:
+//   (1) POST-ORDER: within the walk a directory is utimes'd only AFTER its
+//       children are processed — its own readdir must not come after its utimes.
+//   (2) LAST-TOUCH: the pin runs AFTER the reads that follow it (see buildOnce —
+//       mke2fs reads the whole tree, so each buildOnce re-pins right after mke2fs
+//       returns, before the next build reads it). ctime/mtime come from the
+//       fixed mtime and crtime is forced by E2FSPROGS_FAKE_TIME, but atime is NOT
+//       covered by the fake clock — it must be pinned on the staging tree itself,
+//       and nothing may read the tree after the final pin.
 async function pinStagingTimes(staging) {
   const epoch = new Date(Number(FIXED_EPOCH) * 1000);
   const walk = async (dir) => {
     for (const name of await fs.readdir(dir)) {
       const p = path.join(dir, name);
       const st = await fs.lstat(p);
-      await fs.utimes(p, epoch, epoch);
       if (st.isDirectory()) await walk(p);
+      await fs.utimes(p, epoch, epoch); // post-order: after the dir's own readdir
     }
   };
-  await fs.utimes(staging, epoch, epoch);
   await walk(staging);
+  await fs.utimes(staging, epoch, epoch); // root last, after its readdir above
 }
 
 async function buildStaging(staging, nodeHostPath, runtimeBins) {
@@ -282,8 +289,10 @@ async function buildStaging(staging, nodeHostPath, runtimeBins) {
     await fs.mkdir(path.join(staging, d), { recursive: true });
   }
 
-  // Pin atime+mtime LAST, after all writes, so the double-build packs a stable
-  // atime (see pinStagingTimes).
+  // Pin atime+mtime after all writes so the size/tree reads below start from a
+  // stable tree. The DECISIVE pin is the one buildOnce applies right after mke2fs
+  // reads the tree (relatime bumps dir atimes on read) — that is the last touch
+  // before the next build reads it. See pinStagingTimes.
   await pinStagingTimes(staging);
 }
 
@@ -391,6 +400,14 @@ async function buildOnce(staging, destPath, sizeBlocks, inodeCount) {
   // Seal read-only (0444) — matches the C writer's seal contract so the
   // backend mode assertion (rootfs mode === 0o444) holds.
   await fs.chmod(destPath, 0o444);
+
+  // mke2fs -d just readdir'd the ENTIRE staging tree, which (on hosts without
+  // noatime) bumped every directory's atime to wall-clock via relatime. The
+  // next buildOnce (or, on the second pass, the promotion below) reads the same
+  // tree, so re-pin it NOW — the pin must be the last touch before any
+  // subsequent read, or the second image packs a drifted directory atime and
+  // cross-run digests diverge. See pinStagingTimes.
+  await pinStagingTimes(staging);
 }
 
 // Build the rootfs for one arch: build the staging tree, compute the tree
