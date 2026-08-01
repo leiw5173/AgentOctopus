@@ -298,7 +298,10 @@ jobs:
       - name: Rescue stale in-workspace tmpfs before checkout
         shell: bash
         run: |
-          set -uo pipefail
+          # Deliberately NOT `set -e`/pipefail-sensitive: this rescue must NEVER
+          # fail the job — a clean runner or a missing mount is not an error.
+          # The GHA runner forces `-e -o pipefail` on bash steps, so guard every
+          # command with `|| true` and end with an explicit `exit 0`.
           ws="${{ github.workspace }}"
           # Unmount stale tmpfs mounts under the workspace (deepest first),
           # then remove the now-unmounted mountpoint dirs so checkout's rmdir
@@ -309,10 +312,11 @@ jobs:
               echo "rescuing stale tmpfs mount: $t"
               umount -l "$t" 2>/dev/null || umount "$t" 2>/dev/null || true
             fi
-          done
+          done || true
           rm -rf "$ws/.tmp" 2>/dev/null || true
           echo "rescue done; remaining mounts under workspace:"
-          findmnt -rn --submounts "$ws" -o TARGET,FSTYPE 2>/dev/null || echo "  (none)"
+          { findmnt -rn --submounts "$ws" -o TARGET,FSTYPE 2>/dev/null || echo "  (none)"; } || true
+          exit 0
       - uses: actions/checkout@v7
       - name: Diagnose disk layout + stage TMPDIR
         shell: bash
