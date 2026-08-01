@@ -244,6 +244,14 @@ jobs:
     env:
       OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
       OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
+      # Rootfs staging must NOT land on the runner's /tmp — it is a small
+      # RAM-backed tmpfs. The OS backend, probeOsCaps' runtime-artifact extract,
+      # and the lane's own workDirs all mkdtemp under os.tmpdir(), so one TMPDIR
+      # redirect moves every extract to the runner's workspace disk (far larger).
+      # Without this, ~9 concurrent node rootfs extracts (100MB+ each) fill the
+      # tmpfs mid-lane → tar exits ENOSPC → probeOsCaps reports restricted →
+      # selectBackend fails closed with NoFullBackendError on all spawn tests.
+      TMPDIR: ${{ github.workspace }}/.tmp
       # probePrivilegedLinux() (harness) reads its canonical manifests from
       # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it. This
       # MUST be absolute: the test process runs `pnpm --filter @agentoctopus/
@@ -256,6 +264,18 @@ jobs:
       OCTOPUS_OS_PROBE_MANIFEST_ROOT: ${{ github.workspace }}/packages/sandbox/runtime
     steps:
       - uses: actions/checkout@v7
+      - name: Diagnose disk layout + stage TMPDIR
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Evidence for the tmpfs-exhaustion root cause: show every mount's
+          # size/usage so a future ENOSPC is diagnosable from the log, and
+          # create the TMPDIR redirect target on the workspace disk.
+          mkdir -p "${TMPDIR}"
+          echo "=== df -h (all mounts) ==="
+          df -h
+          echo "=== TMPDIR -> ${TMPDIR} ==="
+          df -h "${TMPDIR}"
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
@@ -284,7 +304,7 @@ jobs:
           # session's working state, and match the exact oct- prefixes the
           # sandbox creates — never a broad /tmp glob.
           shopt -s nullglob
-          for d in /tmp/oct-os-backend-* /tmp/octopus-llane-*; do
+          for d in "${TMPDIR}"/oct-os-backend-* "${TMPDIR}"/octopus-llane-*; do
             [ -d "$d" ] || continue
             if lsof +D "$d" >/dev/null 2>&1; then
               echo "skip in-use $d"
@@ -410,14 +430,14 @@ jobs:
             done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
           fi
           # Sweep verified-idle leaked tmpdirs (see the pre-lane step): a session
-          # that failed mid-run leaks its oct-* rootfs under the small /tmp tmpfs
-          # and would ENOSPC the next lane. Skip any dir with a live open handle.
+          # that failed mid-run leaks its oct-* rootfs and would bloat the next
+          # lane. Skip any dir with a live open handle. Then drop TMPDIR itself.
           shopt -s nullglob
-          for d in /tmp/oct-os-backend-* /tmp/octopus-llane-*; do
+          for d in "${TMPDIR}"/oct-os-backend-* "${TMPDIR}"/octopus-llane-*; do
             [ -d "$d" ] || continue
             lsof +D "$d" >/dev/null 2>&1 || rm -rf -- "$d" || true
           done
-          rm -rf packages/sandbox/runtime packages/sandbox/build
+          rm -rf packages/sandbox/runtime packages/sandbox/build "${TMPDIR}"
 
   macos-restricted:
     name: macos-restricted
