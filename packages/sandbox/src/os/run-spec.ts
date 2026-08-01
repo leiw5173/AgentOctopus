@@ -152,9 +152,10 @@ export interface BuildOsRunCommandOptions {
  * 0600 file, and return the direct helper argv. Never emits shell text.
  *
  * The returned `args` are exactly `['--launch-spec', launchSpecPath,
- * '--stop-before-exec']` — the helper performs trusted setup, raises
- * SIGSTOP so the cgroup can attach it, then SIGCONT completes the phase-3
- * privilege drop + execve.
+ * '--stop-before-exec']` — the helper PARENT raises SIGSTOP before its
+ * phase-1 setup so the cgroup can attach the spawned pid, then SIGCONT runs
+ * all setup + fork + execve inside the cgroup (the untrusted child inherits
+ * the cgroup at fork()).
  */
 export async function buildOsRunCommand(
   opts: BuildOsRunCommandOptions,

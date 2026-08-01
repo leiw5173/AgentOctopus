@@ -12,10 +12,13 @@
  *   2. Write finite `memory.max`, `memory.swap.max=0`, `pids.max`, `cpu.max`;
  *      read each value back and compare. Verify `cgroup.kill` and
  *      `cgroup.events` exist.
- *   3. (Caller) spawns the verified helper with `--stop-before-exec`.
- *   4. `attach(pid)` writes the actual helper child PID to `cgroup.procs`,
+ *   3. (Caller) spawns the verified helper with `--stop-before-exec`; the
+ *      helper PARENT raises SIGSTOP before its phase-1 setup.
+ *   4. `attach(pid)` writes the spawned helper PID to `cgroup.procs`,
  *      reads `cgroup.procs` back and requires that PID, then the caller
- *      sends SIGCONT.
+ *      sends SIGCONT. The helper then does ALL untrusted setup (netns enter,
+ *      unshare, mounts, chroot, fork, execve) inside the cgroup, and the
+ *      untrusted child inherits the cgroup at fork() from instruction 0.
  *   5. On any failure, `kill()` + `waitEmpty()` + remove the cgroup and
  *      surface the failure. Never continue unconfined.
  *
@@ -239,8 +242,8 @@ export async function createLimitedCgroup(
         throw new CgroupError(`attach: pid must be a positive integer, got ${pid}`);
       }
       const procsPath = path.join(cgPath, 'cgroup.procs');
-      // Attach is the security gate that confines the (SIGSTOPped, pre-exec)
-      // helper child before it is continued. Node's spawn() hands back a pid the
+      // Attach is the security gate that confines the (SIGSTOPped, pre-setup)
+      // helper before it is continued. Node's spawn() hands back a pid the
       // instant fork returns, but the kernel cgroup membership of a freshly
       // spawned, self-stopped child can take a moment to settle on a busy host;
       // a single write+immediate read-back can transiently miss the pid even

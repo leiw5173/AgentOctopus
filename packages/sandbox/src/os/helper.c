@@ -51,9 +51,11 @@
  * NEVER execs setpriv, and NEVER performs an anonymous `unshare --net`
  * (the netns is always the named one passed in via the spec).
  *
- * --stop-before-exec: the child raises SIGSTOP immediately before the
- * PR_SET_NO_NEW_PRIVS/execve boundary so the launcher can attach the child
- * PID to the session cgroup; SIGCONT completes phase 3.
+ * --stop-before-exec: the PARENT raises SIGSTOP in main() immediately before
+ * phase 1, so the launcher attaches the spawned (parent) PID to the session
+ * cgroup and SIGCONTs it. Every later step — netns enter, unshare, mounts,
+ * chroot, fork(), execve — then runs INSIDE the session cgroup, and the
+ * untrusted child inherits that cgroup at fork() from its first instruction.
  *
  * Fail-closed: every syscall is checked; any failure writes a single-line
  * diagnostic to fd 2 and _exit(127). There is no recovery path and no
@@ -729,11 +731,11 @@ static void phase3_enter_root(const LaunchSpec *spec, int stopBeforeExec) {
     require_mount_ro("/");
     require_mount_ro(INROOT_SKILL);
 
-    /* --stop-before-exec: raise SIGSTOP so the launcher can attach this
-     * PID to the session cgroup. SIGCONT resumes here. */
-    if (stopBeforeExec) {
-        if (raise(SIGSTOP) != 0) die_errno("raise(SIGSTOP)");
-    }
+    /* No SIGSTOP here: the helper PARENT already stopped before phase 1 (see
+     * main()), so this child was born inside the session cgroup at fork() and
+     * needs no stop of its own. stopBeforeExec is intentionally unused in the
+     * child. */
+    (void)stopBeforeExec;
 
     /* Lock down privileges BEFORE dropping uid.
      *
@@ -874,6 +876,27 @@ int main(int argc, char **argv) {
     parse_launch_spec(specJson, specLen, &spec);
 
     int netnsFd = -1;
+
+    /* --stop-before-exec: raise SIGSTOP HERE, in the PARENT, before phase 1 —
+     * NOT in the child (the old design stopped the child in phase 3). The
+     * launcher (os-backend) attaches the SPAWNED pid — this parent — to the
+     * session cgroup, verifies membership, then SIGCONTs. Stopping here, before
+     * any setup, means:
+     *   1. the attached pid (this parent) is exactly the one the backend's
+     *      cgroup.attach() + read-back machinery was built for (the pid
+     *      spawn() returned), and
+     *   2. the ENTIRE untrusted setup — netns enter, unshare, mounts, chroot,
+     *      and the fork()+execve of the untrusted process — runs INSIDE the
+     *      session cgroup. In cgroup v2 a child inherits its parent's cgroup at
+     *      fork(), so the PID-namespace-init child (and every grandchild it
+     *      forks) is a member of the session cgroup from its FIRST instruction.
+     * The old child-stop left the child born OUTSIDE the cgroup (the backend
+     * attached the parent, which never ran the workload), so pids.max never
+     * bounded the fork-bomb and cgroup.kill never reached the grandchildren —
+     * the pids-ceiling and timeout failures. SIGCONT resumes here. */
+    if (stopBeforeExec) {
+        if (raise(SIGSTOP) != 0) die_errno("raise(SIGSTOP)");
+    }
 
     /* Phase 1 — outside chroot. */
     phase1_outside_chroot(&spec, &netnsFd);

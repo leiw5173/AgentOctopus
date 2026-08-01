@@ -611,10 +611,11 @@ export class OsSandboxBackend implements SandboxBackend {
       }
       throw err;
     }
-    // SIGCONT the helper to complete phase-3 privilege drop + execve. The
-    // helper was started with --stop-before-exec and raised SIGSTOP before
-    // execve; the cgroup attach is the security gate, so the SIGCONT only
-    // fires AFTER membership is verified.
+    // SIGCONT the helper to run its full setup + fork + execve inside the
+    // session cgroup. The helper was started with --stop-before-exec and the
+    // PARENT raised SIGSTOP before phase 1; the cgroup attach is the security
+    // gate, so the SIGCONT only fires AFTER membership is verified. The
+    // untrusted child (PID-1 in the new ns) inherits the cgroup at fork().
     try {
       child.kill('SIGCONT');
     } catch (err) {
