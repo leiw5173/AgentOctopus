@@ -475,6 +475,12 @@ jobs:
           # qualifies nothing and resolves no file.
           echo "OCTOPUS_VM_ROOTFS_REF=$ref" >> "$GITHUB_ENV"
           echo "Placed linux-arm64 rootfs for the darwin-arm64 lane (ref $ref)"
+      # libkrun's krun-init-blob build script compiles init.c with `-fuse-ld=lld`
+      # (src/init_blob/build.rs), but the macOS runner's Xcode clang has no lld
+      # ("invalid linker name in argument '-fuse-ld=lld'"). Provision lld via
+      # Homebrew (already on macos-15) so the init blob links.
+      - name: Provision lld for the libkrun init-blob build
+        run: brew install lld
       - name: Build mac-side VM helper + vendor libkrun/libkrunfw
         run: |
           pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/vendor-libkrun.mjs

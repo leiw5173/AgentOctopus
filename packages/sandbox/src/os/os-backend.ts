@@ -474,7 +474,11 @@ export class OsSandboxBackend implements SandboxBackend {
     await authorize(this.netns, { proxyListenPort: this.carrier.listenPort });
 
     try {
-      // Step 5: assemble + verify the runtime root.
+      // Step 5: assemble + verify the runtime root. assembleRootfs mkdtemps a
+      // rootfs- dir INSIDE workDir, so workDir must exist first — it is only
+      // assigned in the constructor and otherwise created later (launch-spec
+      // mkdir), so mkdtemp would die ENOENT on the missing parent.
+      await mkdir(this.workDir, { recursive: true, mode: 0o700 });
       const assemble = this.deps.assembleRootfs ?? assembleRootfs;
       this.layout = await assemble({
         snapshotRoot: opts.snapshotRoot,
