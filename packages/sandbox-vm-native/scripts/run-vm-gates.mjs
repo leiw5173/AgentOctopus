@@ -329,6 +329,36 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
     });
   });
 
+  // --- Pre-boot diagnostic: is the helper + libkrun loadable WITHOUT entering
+  // the hypervisor? `--has-blk` runs the helper's BLK-probe subcommand, which
+  // resolves dyld + links libkrun/libkrunfw and calls krun_has_feature but
+  // NEVER calls krun_start_enter (no HVF access). The full boot dies with
+  // SIGKILL (exit 137) and ZERO userspace output, so we cannot tell whether
+  // the kill is (a) the helper/dylibs being unloaded or (b) the kernel
+  // rejecting the ad-hoc hypervisor entitlement at HVF entry. This probe
+  // separates them: exit 0/1 here => the binary + libs load fine, so 137 at
+  // boot = HVF-entitlement kill; SIGKILL here => the helper itself can't load.
+  let probeInfo = 'has-blk probe: not run';
+  try {
+    const probeEnv = { PATH: process.env.PATH ?? '' };
+    if (process.platform === 'darwin') probeEnv.DYLD_LIBRARY_PATH = targetDir;
+    else probeEnv.LD_LIBRARY_PATH = targetDir;
+    const probeRes = await new Promise((resolve) => {
+      execFile(helperPath, ['--has-blk'], { env: probeEnv, timeout: 15_000 }, (err, stdout, stderr) => {
+        if (!err) return resolve({ tag: 'exit 0 (BLK supported)', stdout, stderr });
+        resolve({
+          tag: `code=${err.code ?? 'n/a'} signal=${err.signal ?? 'none'}`,
+          stdout: stdout ?? '',
+          stderr: stderr ?? '',
+        });
+      });
+    });
+    probeInfo = `has-blk probe: ${probeRes.tag}` +
+      (probeRes.stderr?.trim() ? ` stderr=${probeRes.stderr.trim().slice(0, 160)}` : '');
+  } catch (err) {
+    probeInfo = `has-blk probe threw: ${err.message}`;
+  }
+
   // --- Control + rootfs fd plumbing (mirrors engine.ts start(), R9/R10). ---
   // The helper REQUIRES three inherited fds and silently no-ops without them:
   //   fd 3 (H2G_READ_FD)      — host→guest control read end
@@ -442,7 +472,7 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
   if (!guest) {
     const fallback = helperStdout.trim();
     if (fallback) tail.push(`[helper stdout]\n${fallback}`);
-    tail.push(`[guest console (fd 4) empty — no DONE marker relayed]\n[helper ${exitInfo}]`);
+    tail.push(`[guest console (fd 4) empty — no DONE marker relayed]\n[helper ${exitInfo}]\n[${probeInfo}]`);
   } else {
     tail.push(`[helper ${exitInfo}]`);
   }
