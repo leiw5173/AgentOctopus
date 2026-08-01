@@ -97,6 +97,12 @@
 #define INROOT_DEV      "/dev"
 #define INROOT_CA       "/etc/skill-ca/ca.pem"
 
+/* The host "nobody"/overflow id — the kernel's default overflowuid/overflowgid
+ * (fs.overflowuid, fs.overflowgid; 65534 unless a container runtime overrides
+ * it, which this runner does not). The untrusted drop target (spec.uid/gid)
+ * is mapped to this host id inside the user namespace. */
+#define OVERFLOW_ID     65534
+
 /* ------------------------------------------------------------------ */
 /* Launch-spec model (parsed from JSON)                                */
 /* ------------------------------------------------------------------ */
@@ -502,31 +508,32 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
         die_errno("unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
-    /* uid_map/gid_map: in-ns uid/gid 0 → real uid/gid, so root-owned files
-     * (the verified runtime root) remain accessible.
+    /* uid_map/gid_map. Two ids must be mapped in the new user namespace:
+     *   - in-ns 0        → real uid/gid (ruid/rgid): root-owned files (the
+     *                      verified runtime root) stay accessible to the helper.
+     *   - in-ns OVERFLOW → the host overflow id (65534 "nobody"): the id the
+     *                      untrusted process drops to. Without this line,
+     *                      setgid(65534)/setuid(65534) in phase 3 fails EINVAL
+     *                      because the target id is UNMAPPED in the userns.
+     * The gid_map MUST carry the overflow line too: uid 65534 happens to work
+     * without it (an unmapped uid resolves to the overflow uid 65534 via the
+     * nameless-uid path), but there is no equivalent for gid — an unmapped
+     * target gid is EINVAL. That asymmetry is why the single-line "0 rgid 1"
+     * gid_map passed uid-drop yet died at setgid.
      *
-     * The gid_map write requires CAP_SETGID in the PARENT user namespace
-     * (kernel new_idmap_permitted() → ns_capable(ns->parent, CAP_SETGID)).
-     * The privileged runner's uid-0 process LACKS CAP_SETGID in its bounding
-     * set (confirmed empirically: the uid_map write — CAP_SETUID, present —
-     * succeeds, while the gid_map write EPERMs). The only fallback for a
-     * writer without parent-ns CAP_SETGID is the kernel's unprivileged
-     * self-map path, which UNCONDITIONALLY requires setgroups to be "deny"
-     * first (user_namespaces(7)). There is no order that avoids "deny" here:
-     * the capability is checked against the parent ns regardless of uid_map
-     * state. So "deny" is mandatory on this runner.
-     *
-     * Consequence: "deny" is a per-userns, IRREVERSIBLE flag
-     * (USERNS_SETGROUPS_ALLOWED) that permanently disables setgroups(2) for
-     * the whole namespace. That is acceptable because the runner process's
-     * real gid is 0 with NO supplementary groups, so there is nothing to
-     * drop — phase 3 must NOT call setgroups() (it would EPERM), and
-     * setgid()/setuid() are unaffected. */
-    char map[64];
+     * /proc/self/setgroups "deny" is written BEFORE gid_map because the
+     * two-line gid_map cannot use the kernel's unprivileged single-line
+     * self-map path; "deny" is required for the unprivileged multi-line write
+     * (user_namespaces(7)). "deny" is per-userns and IRREVERSIBLE — it
+     * permanently disables setgroups(2) for the whole namespace, so phase 3
+     * must NOT call setgroups() (it would EPERM). That is safe: the helper
+     * runs with no supplementary groups (the runner's Groups: is empty), so
+     * there is nothing to drop, and setgid()/setuid() are unaffected. */
+    char map[96];
     xwrite_file("/proc/self/setgroups", "deny");
-    snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
+    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)ruid, (int)spec->uid, OVERFLOW_ID);
     xwrite_file("/proc/self/uid_map", map);
-    snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
+    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)rgid, (int)spec->gid, OVERFLOW_ID);
     xwrite_file("/proc/self/gid_map", map);
 
     /* Keep the fd open for the child; close-on-exec is fine because we
@@ -729,12 +736,12 @@ static void phase3_enter_root(const LaunchSpec *spec, int stopBeforeExec) {
     /* Lock down privileges BEFORE dropping uid.
      *
      * No setgroups() call here: phase 1 wrote /proc/self/setgroups "deny"
-     * (mandatory — the runner lacks parent-ns CAP_SETGID, so gid_map needs the
-     * kernel's unprivileged self-map path), and "deny" permanently disables
-     * setgroups(2) in this userns, so calling it would EPERM. That is safe
-     * because the runner's real gid is 0 with NO supplementary groups — there
-     * is nothing to drop. setgid() (primary gid) and setuid() are unaffected
-     * by "deny". */
+     * (required before the multi-line gid_map write), and "deny" permanently
+     * disables setgroups(2) in this userns, so calling it would EPERM. That is
+     * safe — the helper runs with no supplementary groups (the runner's
+     * Groups: is empty), so there is nothing to drop. setgid()/setuid() are
+     * unaffected by "deny", and both target ids are now mapped in the userns
+     * (phase-1 overflow line), so they succeed. */
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) die_errno("PR_SET_NO_NEW_PRIVS");
     if (setgid(spec->gid) < 0) die_errno("setgid");
     if (setuid(spec->uid) < 0) die_errno("setuid");
@@ -805,13 +812,13 @@ static void probe_namespaces(void) {
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
         die_errno("probe unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
-    /* Mirror phase-1 mapping so the probe exercises the same privileged
-     * writes the real launch needs. */
-    char map[64];
+    /* Mirror phase-1 mapping (root + overflow lines) so the probe exercises
+     * the same privileged writes the real launch needs. */
+    char map[96];
     xwrite_file("/proc/self/setgroups", "deny");
-    snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
+    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)ruid, OVERFLOW_ID, OVERFLOW_ID);
     xwrite_file("/proc/self/uid_map", map);
-    snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
+    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)rgid, OVERFLOW_ID, OVERFLOW_ID);
     xwrite_file("/proc/self/gid_map", map);
 
     /* Success: namespaces created and uid/gid mapped. Exit 0. The kernel
