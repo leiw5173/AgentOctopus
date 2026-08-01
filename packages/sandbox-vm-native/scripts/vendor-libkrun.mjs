@@ -455,6 +455,20 @@ async function linkVersionedSonames(libPaths) {
     if (!soname) soname = FALLBACK_SONAME[base] ?? null;
     if (!soname || soname === base) continue; // unversioned name — nothing to shim
     const linkPath = path.join(path.dirname(libPath), soname);
+    // Idempotence / anti-circular guard: when libPath is ITSELF a symlink whose
+    // target already IS the versioned name (the libkrunfw Darwin layout —
+    // buildLibkrunfwDylibFromBundle produces real libkrunfw.5.dylib + a
+    // libkrunfw.dylib -> libkrunfw.5.dylib symlink), the versioned real file
+    // already exists at linkPath. rm-ing it and symlinking soname -> base would
+    // create libkrunfw.5.dylib -> libkrunfw.dylib -> libkrunfw.5.dylib, a cycle
+    // that DESTROYS the real bytes and breaks -lkrunfw at link time (observed
+    // on the macOS vm-lane: "ld: library 'krunfw' not found"). Skip in that
+    // case — the shim relationship is already correct.
+    const baseStat = await fs.lstat(libPath).catch(() => null);
+    if (baseStat?.isSymbolicLink()) {
+      const target = await fs.readlink(libPath).catch(() => null);
+      if (target && path.basename(target) === soname) continue; // already correct
+    }
     await fs.rm(linkPath, { force: true }).catch(() => {});
     await fs.symlink(base, linkPath); // relative: resolves within the same dir
     created.push(linkPath);
