@@ -271,6 +271,26 @@ async function buildFullLink() {
 
   await codesignAdHoc(HELPER_PATH);
 
+  // DIAGNOSTIC: dump the applied signature + entitlements so a VmCreate/HVF
+  // failure can be attributed. A missing/wrong entitlement here (e.g. stripped
+  // signature, or hypervisor not granted to the ad-hoc identity) is the exact
+  // cause of krun_start_enter's VmCreate EINVAL. Best-effort: log, never fail.
+  if (process.platform === 'darwin') {
+    try {
+      const { stdout: ent } = await execFileAsync('codesign', ['-d', '--entitlements', ':-', HELPER_PATH]);
+      console.log(`build-vm-helper: helper entitlements:\n${ent.trim()}`);
+    } catch (err) {
+      console.log(`build-vm-helper: could not read entitlements: ${err.stderr ?? err.message}`);
+    }
+    try {
+      const { stdout: sig } = await execFileAsync('codesign', ['-dv', '--verbose=2', HELPER_PATH]);
+      console.log(`build-vm-helper: helper signature: ${String(sig).trim()}`);
+    } catch (err) {
+      // codesign -dv writes to stderr and may exit non-zero; surface what it said.
+      console.log(`build-vm-helper: signature info: ${(err.stderr ?? err.message ?? '').trim()}`);
+    }
+  }
+
   const st = await fs.stat(HELPER_PATH);
   const helperSha256 = await sha256File(HELPER_PATH);
   if (!SHA256_RE.test(helperSha256)) die('internal error: computed digest is not 64 lowercase hex', 3);

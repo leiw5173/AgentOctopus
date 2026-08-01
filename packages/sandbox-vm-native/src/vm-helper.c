@@ -661,12 +661,13 @@ int vm_helper_main(int argc, char **argv) {
     if (ctx < 0) die("krun_create_ctx failed: %d", (int)ctx);
 
     /* DIAGNOSTIC: when OCT_VM_HELPER_KRUN_DEBUG=1, raise libkrun's internal
-     * log level to Debug so krun_start_enter's EINVAL surfaces its actual
-     * cause (which config element libkrun rejects). Off by default so the
-     * production helper stays silent; the CI gate sets it to diagnose boot
-     * failures. Logging goes to stderr, which the gate captures. */
+     * log level to Trace so krun_start_enter's EINVAL surfaces its actual
+     * cause (which config element libkrun rejects, incl. the HVF VmCreate
+     * syscall result). Off by default so the production helper stays silent;
+     * the CI gate sets it to diagnose boot failures. Logging goes to stderr,
+     * which the gate captures. */
     if (getenv("OCT_VM_HELPER_KRUN_DEBUG") != NULL)
-        (void)krun_set_log_level(KRUN_LOG_LEVEL_DEBUG);
+        (void)krun_set_log_level(KRUN_LOG_LEVEL_TRACE);
 
     /* 1. Disable the implicit vsock device so none are injected. */
     krun_check(krun_disable_implicit_vsock((uint32_t)ctx), "disable_implicit_vsock");
