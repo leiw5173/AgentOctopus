@@ -258,7 +258,18 @@ jobs:
       # probeOsCaps/cleanup already use for `ip netns`/`nft`) and point TMPDIR
       # at it. We do NOT overmount the shared /tmp (that would break the
       # runner agent); a private mountpoint is torn down in the post-lane step.
-      TMPDIR: ${{ github.workspace }}/.tmp
+      #
+      # CRITICAL: the mountpoint lives OUTSIDE github.workspace (under
+      # RUNNER_TEMP). A previous revision staged it at ${{ github.workspace
+      # }}/.tmp — actions/checkout@v7 rmdirs the whole workspace tree to sync
+      # the repo, hit the lingering tmpfs mountpoint, and died "EBUSY: resource
+      # busy or locked, rmdir '.../AgentOctopus/.tmp'", failing the ENTIRE job
+      # at checkout before any lane step ran. Keeping the tmpfs outside the
+      # workspace means checkout never traverses it, so a leaked/stale mount
+      # can never block checkout again. RUNNER_TEMP sits on the runner's large
+      # _work disk (the tmpfs is sized 3g), and the post-lane step still
+      # unmounts it.
+      TMPDIR: ${{ runner.temp }}/oct-tmp
       # probePrivilegedLinux() (harness) reads its canonical manifests from
       # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it. This
       # MUST be absolute: the test process runs `pnpm --filter @agentoctopus/
