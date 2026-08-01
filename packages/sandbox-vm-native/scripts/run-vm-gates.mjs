@@ -403,7 +403,10 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
     // Minimal env so the helper can find vendored libkrun/libkrunfw. The
     // vendored dylibs carry bare/@rpath install names; *_LIBRARY_PATH is
     // consulted before rpath resolution, pointing the loader at targetDir.
-    const env = { PATH: process.env.PATH ?? '' };
+    // OCT_VM_HELPER_KRUN_DEBUG raises libkrun's log level so a krun_start_enter
+    // EINVAL prints WHICH config element libkrun rejects (diagnosing gate boot
+    // failures); it only adds stderr output, never changes behavior.
+    const env = { PATH: process.env.PATH ?? '', OCT_VM_HELPER_KRUN_DEBUG: '1' };
     if (process.platform === 'darwin') {
       env.DYLD_LIBRARY_PATH = targetDir;
     } else {
