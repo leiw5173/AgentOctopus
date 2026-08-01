@@ -485,8 +485,14 @@ async function linkSmokeTest(targetDir) {
       `  This indicates an ABI mismatch between the built libs and the header pin.`);
   }
   // Actually RUN the smoke binary — proves the dylibs load at runtime.
+  // Mirror the engine/run-vm-gates loader convention: DYLD_LIBRARY_PATH on
+  // Darwin, LD_LIBRARY_PATH on Linux. (On Darwin, LD_LIBRARY_PATH is ignored,
+  // so without this the binary cannot locate libkrun.1.dylib in targetDir.)
+  const runEnv = process.platform === 'darwin'
+    ? { ...process.env, DYLD_LIBRARY_PATH: targetDir }
+    : { ...process.env, LD_LIBRARY_PATH: targetDir };
   try {
-    await execFileAsync(smokeBin, [], { env: { ...process.env, LD_LIBRARY_PATH: targetDir } });
+    await execFileAsync(smokeBin, [], { env: runEnv });
   } catch (err) {
     await fs.rm(smokeSrc, { force: true }).catch(() => {});
     await fs.rm(smokeBin, { force: true }).catch(() => {});

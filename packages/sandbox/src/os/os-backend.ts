@@ -577,14 +577,38 @@ export class OsSandboxBackend implements SandboxBackend {
       throw new Error('OsSandboxBackend.spawn: helper child has no pid');
     }
 
+    // Capture the helper's early stderr NOW, before attach. If the helper dies
+    // before it can self-stop (a phase-1/phase-2 die() — netns, mount, chroot,
+    // spec parse), attach() then fails with ESRCH ("no such process"), which on
+    // its own is silent about WHY. The helper always writes its diagnostic to
+    // fd 2 before _exit(127), so buffering stderr from the moment of spawn lets
+    // the attach-failure error carry the helper's own reason. Bounded to avoid
+    // unbounded memory from a runaway pre-exec child.
+    let earlyStderr = '';
+    const onEarlyData = (chunk: Buffer): void => {
+      if (earlyStderr.length < 8192) earlyStderr += chunk.toString('utf8');
+    };
+    // Real ChildProcess.stderr is an EventEmitter; test doubles may be a bare
+    // stream without listener methods. Attach defensively so mocks still work.
+    const stderrEmitter = child.stderr as unknown as { on?: (ev: string, fn: (c: Buffer) => void) => void } | null | undefined;
+    const canListen = typeof stderrEmitter?.on === 'function';
+    if (canListen) child.stderr!.on('data', onEarlyData);
+
     // Attach the actual child PID through CgroupHandle.attach(), verify
     // membership, then continue it (SIGCONT).
     try {
       await cgroup.attach(pid);
     } catch (err) {
       // Attach failure → never SIGCONT. Kill the stopped child best-effort.
+      // Give the dying helper a tick to flush its fd-2 diagnostic, then surface
+      // it — an ESRCH means the helper already exited, and its stderr says why.
       try { child.kill('SIGKILL'); } catch { /* best-effort */ }
+      await new Promise((resolve) => setTimeout(resolve, 30));
       await cleanupLaunchSpec(cmd.launchSpecPath).catch(() => {});
+      const detail = earlyStderr.trim();
+      if (detail.length > 0 && err instanceof Error) {
+        throw new Error(`${err.message} — helper stderr: ${detail.split('\n').slice(0, 4).join(' | ')}`, { cause: err });
+      }
       throw err;
     }
     // SIGCONT the helper to complete phase-3 privilege drop + execve. The
@@ -602,6 +626,10 @@ export class OsSandboxBackend implements SandboxBackend {
 
     const stdout = new PassThrough();
     const stderr = new PassThrough();
+    // Stop the early-stderr buffer from also consuming once we pipe; any bytes
+    // captured pre-SIGCONT are the helper's trusted setup diagnostics, not skill
+    // output, so they stay out of the skill's stderr stream.
+    if (canListen) (child.stderr as unknown as { off?: (ev: string, fn: (c: Buffer) => void) => void })?.off?.('data', onEarlyData);
     child.stdout?.pipe(stdout);
     child.stderr?.pipe(stderr);
 

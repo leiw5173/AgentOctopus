@@ -16,3 +16,9 @@ the macOS vm-lane build aborted with `dyld: Library not loaded:
 and dlopen the dylib. No-op on non-darwin platforms and when no libclang is
 installed (clang-sys falls back to its own search and surfaces the actionable
 "install llvm" error).
+
+Also: the post-build `linkSmokeTest` RUN step now sets `DYLD_LIBRARY_PATH`
+(Darwin) / `LD_LIBRARY_PATH` (Linux) — mirroring `engine.ts`/`run-vm-gates.mjs` —
+instead of always `LD_LIBRARY_PATH`, which Darwin ignores. Without it the smoke
+binary linked fine but could not locate `libkrun.1.dylib` in the target dir at
+runtime.
