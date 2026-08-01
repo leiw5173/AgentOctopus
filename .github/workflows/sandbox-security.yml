@@ -245,8 +245,15 @@ jobs:
       OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
       OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
       # probePrivilegedLinux() (harness) reads its canonical manifests from
-      # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it.
-      OCTOPUS_OS_PROBE_MANIFEST_ROOT: packages/sandbox/runtime
+      # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it. This
+      # MUST be absolute: the test process runs `pnpm --filter @agentoctopus/
+      # sandbox exec vitest`, whose child CWD is packages/sandbox (NOT the repo
+      # root), so a relative root would resolve to packages/sandbox/packages/
+      # sandbox/runtime and the probe would report the artifacts "not found"
+      # even though the download+enforce steps (which run from the repo root)
+      # placed them correctly. security-probe-linux.mjs masks this by resolving
+      # PKG_ROOT/runtime from its own location — it never uses this env var.
+      OCTOPUS_OS_PROBE_MANIFEST_ROOT: ${{ github.workspace }}/packages/sandbox/runtime
     steps:
       - uses: actions/checkout@v7
       - name: Verify privileged Linux lane files are present
