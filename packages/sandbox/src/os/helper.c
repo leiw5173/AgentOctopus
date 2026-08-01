@@ -39,7 +39,9 @@
  *     - verify runtime root and skill mounts are read-only (parse
  *       /proc/self/mountinfo; refuse to exec if any is RW)
  *     - prctl(PR_SET_NO_NEW_PRIVS, 1)
- *     - setgroups(0, NULL), setgid(spec.gid), setuid(spec.uid)   [65534]
+ *     - setgid(spec.gid), setuid(spec.uid)   [65534]
+ *       (no setgroups(): phase 1's mandatory "deny" disables it; the runner's
+ *       real gid 0 has no supplementary groups to drop)
  *     - clearenv(), then install ONLY the allowlisted spec.env
  *     - execve(command[0], command, envp)
  *
@@ -63,7 +65,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
-#include <grp.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -501,25 +502,28 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
         die_errno("unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
-    /* uid_map/gid_map: in-ns uid 0 → real uid, so root-owned files (the
-     * verified runtime root) remain accessible.
+    /* uid_map/gid_map: in-ns uid/gid 0 → real uid/gid, so root-owned files
+     * (the verified runtime root) remain accessible.
      *
-     * /proc/self/setgroups "deny" is required ONLY for an UNPRIVILEGED caller:
-     * without CAP_SETGID in the parent user namespace the kernel refuses the
-     * gid_map write until setgroups is denied (user_namespaces(7)). "deny" is
-     * a per-userns, IRREVERSIBLE flag (USERNS_SETGROUPS_ALLOWED): once written
-     * it permanently disables setgroups(2) for every process in the namespace,
-     * which would kill the child's setgroups(0, NULL) drop in phase 3 with
-     * EPERM (and cannot be undone — writing "allow" back is EPERM).
+     * The gid_map write requires CAP_SETGID in the PARENT user namespace
+     * (kernel new_idmap_permitted() → ns_capable(ns->parent, CAP_SETGID)).
+     * The privileged runner's uid-0 process LACKS CAP_SETGID in its bounding
+     * set (confirmed empirically: the uid_map write — CAP_SETUID, present —
+     * succeeds, while the gid_map write EPERMs). The only fallback for a
+     * writer without parent-ns CAP_SETGID is the kernel's unprivileged
+     * self-map path, which UNCONDITIONALLY requires setgroups to be "deny"
+     * first (user_namespaces(7)). There is no order that avoids "deny" here:
+     * the capability is checked against the parent ns regardless of uid_map
+     * state. So "deny" is mandatory on this runner.
      *
-     * A root caller (the privileged-CI runner runs as root) holds CAP_SETGID in
-     * the parent userns and writes gid_map WITHOUT needing "deny". So write
-     * "deny" only when we actually lack that capability — i.e. when non-root.
-     * This keeps setgroups available for the phase-3 supplementary-group drop
-     * while still letting an unprivileged user map its gid. */
+     * Consequence: "deny" is a per-userns, IRREVERSIBLE flag
+     * (USERNS_SETGROUPS_ALLOWED) that permanently disables setgroups(2) for
+     * the whole namespace. That is acceptable because the runner process's
+     * real gid is 0 with NO supplementary groups, so there is nothing to
+     * drop — phase 3 must NOT call setgroups() (it would EPERM), and
+     * setgid()/setuid() are unaffected. */
     char map[64];
-    if (ruid != 0)
-        xwrite_file("/proc/self/setgroups", "deny");
+    xwrite_file("/proc/self/setgroups", "deny");
     snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
     xwrite_file("/proc/self/uid_map", map);
     snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
@@ -722,9 +726,16 @@ static void phase3_enter_root(const LaunchSpec *spec, int stopBeforeExec) {
         if (raise(SIGSTOP) != 0) die_errno("raise(SIGSTOP)");
     }
 
-    /* Lock down privileges BEFORE dropping uid. */
+    /* Lock down privileges BEFORE dropping uid.
+     *
+     * No setgroups() call here: phase 1 wrote /proc/self/setgroups "deny"
+     * (mandatory — the runner lacks parent-ns CAP_SETGID, so gid_map needs the
+     * kernel's unprivileged self-map path), and "deny" permanently disables
+     * setgroups(2) in this userns, so calling it would EPERM. That is safe
+     * because the runner's real gid is 0 with NO supplementary groups — there
+     * is nothing to drop. setgid() (primary gid) and setuid() are unaffected
+     * by "deny". */
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) die_errno("PR_SET_NO_NEW_PRIVS");
-    if (setgroups(0, NULL) < 0) die_errno("setgroups");
     if (setgid(spec->gid) < 0) die_errno("setgid");
     if (setuid(spec->uid) < 0) die_errno("setuid");
 

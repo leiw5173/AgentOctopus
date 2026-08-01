@@ -627,7 +627,18 @@ jobs:
             echo "refreshed runner-managed cache at ${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}"
           fi
       - name: Require real privileged Linux capability
-        run: pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
+        run: |
+          # DIAGNOSTIC: the helper's gid_map write EPERMs while its uid_map
+          # write succeeds — the user_namespaces(7) signature of a missing
+          # CAP_SETGID in the PARENT namespace (bounding-set restricted).
+          # Print the runner's real capability set + supplementary groups so
+          # the setgroups/gid_map interplay is grounded in fact, not inference.
+          echo "=== runner uid/gid/groups ==="; id
+          echo "=== /proc/self/status capability + group fields ==="
+          grep -E '^(Uid|Gid|Groups|CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status
+          echo "=== decoded CapBnd/CapEff (if capsh present) ==="
+          command -v capsh >/dev/null && capsh --decode=$(grep '^CapBnd:' /proc/self/status | awk '{print "0x"$2}') || echo "capsh not installed"
+          pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
       - name: Run privileged Linux lanes with zero skips
         run: |
           # default reporter -> stdout (CI log), json -> file (assert-no-skipped).
