@@ -315,6 +315,29 @@ jobs:
             fi
           done
           rmdir /tmp/oct-bindtest "${TMPDIR}/oct-bindtest" 2>/dev/null || true
+          echo "=== root-cause probe 2: which property makes /tmp bindable? (non-destructive) ==="
+          # /tmp binds OK; a runtime-mounted tmpfs FAILs. Isolate the controlling
+          # variable by mounting fresh tmpfs copies with /tmp's exact flags and
+          # different mountpoints, then self-binding a dir on each. Diagnostic only.
+          probe_bind() { # $1=label $2=dir
+            mkdir -p "$2/oct-pb"
+            if unshare -Umr sh -c "mount --bind '$2/oct-pb' '$2/oct-pb'" 2>/tmp/pberr; then
+              echo "  BIND OK:   $1 ($2)"
+              umount "$2/oct-pb" 2>/dev/null || true
+            else
+              echo "  BIND FAIL: $1 ($2) -> $(cat /tmp/pberr)"
+            fi
+            rmdir "$2/oct-pb" 2>/dev/null || true
+          }
+          # (a) fresh tmpfs with /tmp's EXACT flags at a NEW mountpoint
+          mkdir -p /tmp/.pb-a && mount -t tmpfs -o mode=1777,nosuid,nodev,usrquota tmpfs /tmp/.pb-a 2>/dev/null && probe_bind "fresh-tmpfs-/tmp-flags" /tmp/.pb-a
+          umount /tmp/.pb-a 2>/dev/null; rmdir /tmp/.pb-a 2>/dev/null
+          # (b) does /tmp's bindability survive BELOW the mount root (a subdir)?
+          probe_bind "subdir-of-/tmp" "$(mktemp -d -p /tmp oct-sub-XXXX)"
+          # (c) the existing TMPDIR tmpfs REMOUNTED to add nosuid,nodev,usrquota
+          mount -o remount,nosuid,nodev,usrquota "${TMPDIR}" 2>/dev/null && probe_bind "tmpdir-remounted-flags" "${TMPDIR}" || echo "  remount of TMPDIR failed"
+          # (d) reference: a bind under the workspace ext4 for contrast
+          probe_bind "workspace-ext4" "${TMPDIR%/}/../.pb-ext4" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
