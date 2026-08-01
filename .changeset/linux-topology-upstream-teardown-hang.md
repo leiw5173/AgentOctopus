@@ -8,12 +8,15 @@ linux-topology lane: fix two test-harness teardown bugs that the prior hermetic/
   was closed in `finally` with `server.close()`, which waits for EVERY accepted
   connection to end and has NO timeout. The egress proxy's connection to the
   upstream can linger (half-closed) after the round-trip, so `close()` blocked
-  forever and the test ran to its full 180s timeout — masking the (passing)
-  credential-grant round-trip. Now calls `server.closeAllConnections()` before
-  `close()` so teardown returns promptly. This was the ONLY unbounded operation
-  in the test path (setup, `backend.run()`, `cgroup.waitEmpty`, and
-  `sandbox.cleanup()` are all deadline-bounded; the companion teardown test
-  proves `cleanup()` does not hang).
+  forever and the test ran to its full 180s timeout — masking the credential
+  round-trip. The fixture now tracks every accepted connection and destroys
+  them explicitly before `close()` (with a 2s `close()` ceiling as
+  belt-and-suspenders). This is version-independent: `server.closeAllConnections()`
+  is not available on the runner's Node, so an explicit tracked-socket destroy
+  is used instead. This was the ONLY unbounded operation in the test path
+  (setup, `backend.run()`, `cgroup.waitEmpty`, and `sandbox.cleanup()` are all
+  deadline-bounded; the companion teardown test proves `cleanup()` does not
+  hang).
 - **Teardown test re-bind assertion (EADDRNOTAVAIL):** the final step re-bound
   `proxyIp:proxyPort` to prove the proxy listener closed. That is incompatible
   with correct teardown: `proxyIp` lives on the host veth, which teardown

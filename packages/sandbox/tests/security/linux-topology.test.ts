@@ -26,7 +26,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createServer } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
   linuxLaneAvailability,
@@ -202,12 +202,22 @@ describe('Linux lane — netns topology', () => {
     // so it must NOT keep a persistent `block` process in the shared session
     // cgroup (that would fail run()'s post-exit "cgroup is empty" check).
     let upstream: ReturnType<typeof createServer> | undefined;
+    // Every accepted upstream connection, tracked so teardown can destroy the
+    // egress proxy's lingering (half-closed) socket: server.close() waits for
+    // ALL connections to end with NO timeout, and closeAllConnections() is not
+    // available on the runner's Node — so we destroy them explicitly
+    // (version-independent) instead of letting close() hang the test.
+    const upstreamSockets = new Set<Socket>();
     let upstreamUrl = '';
     const t = await startTopologySandbox({
       request: { hosts: ['127.0.0.1'], credentials: ['LANE_UPSTREAM'] },
       afterTopology: async () => {
         upstream = createServer((sock) => {
           sock.end('HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok');
+        });
+        upstream.on('connection', (sock) => {
+          upstreamSockets.add(sock);
+          sock.on('close', () => upstreamSockets.delete(sock));
         });
         await new Promise<void>((resolveListen, rejectListen) => {
           upstream!.once('error', rejectListen);
@@ -246,14 +256,17 @@ describe('Linux lane — netns topology', () => {
     } finally {
       await t.cleanup();
       if (upstream) {
-        // The proxy's connection to this upstream can linger (half-closed)
-        // after the round-trip. `server.close()` waits for EVERY connection to
-        // end and has NO timeout, so one lingering proxy socket would hang this
-        // teardown forever — that is what drove the test to its full 180s
-        // timeout, masking the (passing) round-trip. Destroy all connections
-        // first so close() returns promptly.
-        upstream.closeAllConnections();
-        await new Promise<void>((r) => upstream!.close(() => r()));
+        // Destroy every accepted connection so close() cannot block on a
+        // lingering proxy socket (see the upstreamSockets note above).
+        for (const sock of upstreamSockets) sock.destroy();
+        upstreamSockets.clear();
+        // Belt-and-suspenders: never let close() hang the test even if a socket
+        // somehow survives destruction — the round-trip result is already
+        // captured above, so a 2s ceiling is safe.
+        await Promise.race([
+          new Promise<void>((r) => upstream!.close(() => r())),
+          new Promise<void>((r) => setTimeout(r, 2_000)),
+        ]);
       }
     }
   }, RUN_TIMEOUT);
