@@ -213,22 +213,35 @@ jobs:
             test -f "$base/$arch/rootfs/$ref" || { echo "ERROR: missing runtime placement $base/$arch/rootfs/$ref" >&2; exit 1; }
             echo "VM rootfs present for $arch (ref $ref)"
           done
-      # upload-artifact rejects any file whose name contains a colon (NTFS-
-      # agnostic rule), and the runtime placement rootfs/sha256:<hex> carries a
-      # literal colon (engine.resolveRootfs joins rootfsDir + the ref verbatim).
-      # Pack the TCB into ONE tar so the colon lives inside the archive and the
-      # uploaded file is colon-free; every download site untars to restore the
-      # exact on-disk layout.
-      - name: Tar the linux-x64 VM TCB for colon-safe upload
+      # Split the TCB into TWO per-arch artifacts so each consumer downloads
+      # only what it uses: privileged-linux qualifies linux-x64 (and re-uploads
+      # only linux-x64), while vm-lane consumes only the linux-arm64 rootfs.
+      # Bundling both arches into one ~191MB tar forced the resource-constrained
+      # self-hosted privileged runner to pull ~100MB of arm64 rootfs it never
+      # touches, and that large transfer stalled past the artifact service's
+      # 5x retry budget and failed the lane (a ~38MB artifact on the same runner
+      # downloads fine — the failure is size-correlated). Each tar still wraps
+      # the colon-bearing rootfs/sha256:<hex> path so the uploaded file stays
+      # colon-free (upload-artifact rejects colons); download sites untar to
+      # restore the exact on-disk layout.
+      - name: Tar the per-arch VM TCB for colon-safe upload
         shell: bash
         run: |
           set -euo pipefail
           tar -cf vm-tcb-linux-x64.tar \
-            -C packages/sandbox-vm-native/prebuilds linux-x64 linux-arm64
+            -C packages/sandbox-vm-native/prebuilds linux-x64
+          tar -cf vm-rootfs-linux-arm64.tar \
+            -C packages/sandbox-vm-native/prebuilds linux-arm64
       - uses: actions/upload-artifact@v4
         with:
           name: vm-tcb-linux-x64
           path: vm-tcb-linux-x64.tar
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm-rootfs-linux-arm64
+          path: vm-rootfs-linux-arm64.tar
           if-no-files-found: error
           retention-days: 7
 
@@ -657,9 +670,12 @@ jobs:
       # KVM — run-vm-gates' G1/G2 boot a real guest — so the linux-x64
       # gate-manifest.json + signed release-manifest pair that the release
       # pack job requires (fail-closed) can only be produced here. The base
-      # TCB (helper + libs + image builder + tcb-manifest + both-arch rootfs)
-      # comes from produce-linux-artifacts. This job is fork-guarded, so the
-      # signing secret is always available when these steps run.
+      # TCB (helper + libs + image builder + tcb-manifest + linux-x64 rootfs)
+      # comes from produce-linux-artifacts, which uploads the linux-x64 TCB as
+      # its own artifact (the linux-arm64 rootfs is a separate artifact consumed
+      # only by the macOS vm-lane — this lane qualifies + re-uploads linux-x64
+      # alone, so it never downloads the arm64 rootfs). This job is fork-guarded,
+      # so the signing secret is always available when these steps run.
       - name: Build sandbox-vm-native package
         run: pnpm --filter @agentoctopus/sandbox-vm-native build
       - name: Download linux-x64 VM TCB from the producer
@@ -836,22 +852,22 @@ jobs:
         run: |
           pnpm --filter @agentoctopus/sandbox build
           pnpm --filter @agentoctopus/sandbox-vm-native build
-      # F2c/F3: download the Linux-produced VM TCB. build-vm-rootfs.mjs is
+      # F2c/F3: download the Linux-produced guest rootfs. build-vm-rootfs.mjs is
       # Linux-only (mke2fs + a Linux guest node), so produce-linux-artifacts
-      # builds the full linux-x64 TCB + both-arch guest rootfs and this lane
-      # consumes the linux-arm64 rootfs (guest arch = host arch under
-      # libkrun/HVF). The mac-side helper + libkrun/libkrunfw are built locally
-      # next (those scripts work on macOS).
-      - name: Download VM TCB from the Linux producer
+      # builds the both-arch guest rootfs and uploads the linux-arm64 rootfs as
+      # its own artifact (vm-rootfs-linux-arm64), which this lane consumes
+      # (guest arch = host arch under libkrun/HVF). The mac-side helper +
+      # libkrun/libkrunfw are built locally next (those scripts work on macOS).
+      - name: Download the linux-arm64 guest rootfs from the Linux producer
         uses: actions/download-artifact@v4
         with:
-          name: vm-tcb-linux-x64
-          path: /tmp/vm-tcb-linux-x64-dl
-      - name: Untar VM TCB into prebuilds
+          name: vm-rootfs-linux-arm64
+          path: /tmp/vm-rootfs-linux-arm64-dl
+      - name: Untar the linux-arm64 rootfs into prebuilds
         shell: bash
         run: |
           set -euo pipefail
-          tar -xf /tmp/vm-tcb-linux-x64-dl/vm-tcb-linux-x64.tar \
+          tar -xf /tmp/vm-rootfs-linux-arm64-dl/vm-rootfs-linux-arm64.tar \
             -C packages/sandbox-vm-native/prebuilds
       - name: Place the linux-arm64 rootfs under the darwin-arm64 prebuilds dir
         shell: bash
@@ -865,7 +881,7 @@ jobs:
           # if the producer did not provide it (no x64 fallback).
           src=packages/sandbox-vm-native/prebuilds/linux-arm64
           dst=packages/sandbox-vm-native/prebuilds/darwin-arm64
-          test -f "$src/rootfs.img" || { echo "ERROR: linux-arm64 rootfs missing from vm-tcb-linux-x64 — produce-linux-artifacts must set OCTOPUS_ROOTFS_NODE_ARM64" >&2; exit 1; }
+          test -f "$src/rootfs.img" || { echo "ERROR: linux-arm64 rootfs missing from vm-rootfs-linux-arm64 — produce-linux-artifacts must set OCTOPUS_ROOTFS_NODE_ARM64" >&2; exit 1; }
           mkdir -p "$dst/rootfs"
           cp "$src/rootfs.img" "$dst/rootfs.img"                 # run-vm-gates.mjs qualification image
           cp "$src/rootfs.manifest.json" "$dst/rootfs.manifest.json"
