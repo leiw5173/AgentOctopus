@@ -533,31 +533,36 @@ jobs:
             rmdir "$bindprobe" 2>/dev/null || true
             exit 1
           fi
-          # Diagnostic (this run): the runtimeRoot is remounted read-only TWICE
-          # (self-bind at helper.c:535, then again as hostBinds[0] at :561), and
-          # the SECOND remount still EPERMs with 0x1021 even after nosuid/nodev
-          # moved onto the bind. My flag model is exhausted; probe the EXACT
-          # sequence to find the true discriminator. Diagnostic only; never
-          # fails the step (result read from the log).
-          dr="${TMPDIR}/.oct-dblremount"
-          mkdir -p "$dr"
-          echo "=== double-remount probe (helper's exact runtimeRoot sequence) ==="
+          # Diagnostic (this run): the plain-mount probes ALL passed under
+          # `unshare -Umr`, yet the helper still EPERMs 0x1021 — so the
+          # discriminator is in the helper's OWN setup, not the mounts. The
+          # helper differs from the probe in exactly two prior syscalls:
+          #   (A) setns(fd, CLONE_NEWNET) into a NAMED netns, and
+          #   (B) mount(NULL, "/", NULL, MS_REC|MS_PRIVATE) making / private.
+          # Probe the helper's EXACT sequence to isolate which one flips the
+          # runtimeRoot remount to EPERM. Diagnostic only; never fails the step.
+          fr="${TMPDIR}/.oct-fullseq"
+          mkdir -p "$fr"
+          ns="octprobe$$"
+          ip netns add "$ns" 2>/dev/null || true
+          echo "=== FULL-SEQUENCE probe (setns named-netns + rprivate / + bind + remount) ==="
           unshare -Umr sh -c "
             set -x
-            mount --bind '$dr' '$dr' &&
-            mount -o remount,ro,bind '$dr' &&
-            echo 'PROBE1 first-ro-remount OK' &&
-            mount -o remount,ro,bind,nosuid '$dr' &&
-            echo 'PROBE2 second-ro-remount+nosuid OK'
-          " 2>/tmp/oct-drerr && echo "DOUBLE-REMOUNT OK" || echo "DOUBLE-REMOUNT FAIL -> $(cat /tmp/oct-drerr)"
-          # Isolate: is the SECOND remount (already-ro) the problem, or nosuid?
-          unshare -Umr sh -c "
-            mount --bind '$dr' '$dr' &&
-            mount -o remount,ro,bind '$dr' &&
-            mount -o remount,ro,bind '$dr' &&
-            echo 'PROBE3 plain second-ro-remount (no new flags) OK'
-          " 2>/tmp/oct-drerr2 && echo "SECOND-RO-ONLY OK" || echo "SECOND-RO-ONLY FAIL -> $(cat /tmp/oct-drerr2)"
-          umount "$dr" 2>/dev/null || true; rmdir "$dr" 2>/dev/null || true
+            mount --make-rprivate / &&
+            mount --bind '$fr' '$fr' &&
+            mount -o remount,ro,bind '$fr' &&
+            echo 'FULLSEQ(no-netns) bind+ro-remount OK'
+          " 2>/tmp/oct-fserr && echo "FULLSEQ-NONETNS OK" || echo "FULLSEQ-NONETNS FAIL -> $(cat /tmp/oct-fserr)"
+          # Now WITH the named netns joined first (the helper's real order):
+          nsenter --net="/run/netns/$ns" unshare -Umr sh -c "
+            set -x
+            mount --make-rprivate / &&
+            mount --bind '$fr' '$fr' &&
+            mount -o remount,ro,bind '$fr' &&
+            echo 'FULLSEQ(with-netns) bind+ro-remount OK'
+          " 2>/tmp/oct-fserr2 && echo "FULLSEQ-NETNS OK" || echo "FULLSEQ-NETNS FAIL -> $(cat /tmp/oct-fserr2)"
+          ip netns del "$ns" 2>/dev/null || true
+          umount "$fr" 2>/dev/null || true; rmdir "$fr" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
