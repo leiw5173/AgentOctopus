@@ -135,20 +135,28 @@ await fs.mkdir(targetDir, { recursive: true });
 // Darwin codesign entitlements (only used on the full-link path)
 //
 // The helper runs the guest with vsock-ONLY networking (TSI disabled —
-// vm-helper.c: "NO virtio-net / passt / gvproxy"), so it needs ONLY the
-// hypervisor entitlement. It must NOT request com.apple.vm.networking: that
-// entitlement is required for bridged/vmnet networking we never use, and on
-// macOS 15+ (verified on macOS 26) requesting it on an AD-HOC signature makes
-// the kernel SIGKILL the process at exec (exit 137, zero userspace output) —
-// the exact G1/G2 / --has-blk kill observed on the vm-lane. A binary signed
-// with only com.apple.security.hypervisor runs fine. Only grant entitlements
-// the helper actually exercises.
+// The helper runs the guest with vsock-ONLY networking (TSI disabled —
+// vm-helper.c: "NO virtio-net / passt / gvproxy"), so it needs the hypervisor
+// entitlement and NOT com.apple.vm.networking (bridged/vmnet we never use —
+// and on macOS 15+ requesting it on an AD-HOC signature makes the kernel
+// SIGKILL the process at exec, exit 137 — the original G1/G2 kill).
+//
+// It ALSO needs com.apple.security.cs.disable-library-validation: the helper
+// dynamically loads the vendored libkrun/libkrunfw dylibs, which are NOT
+// signed with the same identity (they are unsigned/ad-hoc). With library
+// validation left enabled, Hypervisor.framework refuses hv_vm_create for a
+// process that loaded foreign dylibs — surfacing as krun_start_enter's
+// Internal(Vm(VmSetup(VmCreate))) EINVAL even though the hypervisor
+// entitlement is present (observed on the macos-15 vm-lane). This is the same
+// entitlement pair krunkit/libkrun requires on aarch64-darwin. Only grant the
+// entitlements the helper actually needs; never re-add vm.networking.
 // ---------------------------------------------------------------------------
 
 const ENTITLEMENTS_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>com.apple.security.hypervisor</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
 </dict></plist>
 `;
 
