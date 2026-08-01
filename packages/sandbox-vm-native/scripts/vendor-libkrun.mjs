@@ -347,7 +347,19 @@ async function buildLibkrunfwDylibFromBundle(extractDir, targetDir) {
     die(`libkrunfw darwin bundle missing ${kernelC} — the prebuilt-aarch64 tarball layout changed.`);
   }
   const ABI = '5'; // libkrunfw v5.5.0 ABI_VERSION (pinned with the tarball)
+  // Compile under the versioned name, then MOVE the real bytes to the
+  // UNVERSIONED link-time name (libkrunfw.dylib). verifyVmTcb hard-rejects a
+  // symlink at the digest path (vm-helper-build.ts:61) and the TCB invariant is
+  // exactly ONE real digest-verified file per lib at the unversioned name; the
+  // versioned loader name (libkrunfw.5.dylib) is created later by
+  // linkVersionedSonames as a symlink to this real file. With no -install_name
+  // flag the dylib records its OUTPUT path basename as the install_name, so
+  // compiling directly to `libkrunfw.5.dylib` keeps the recorded loader-resolved
+  // name exactly `libkrunfw.5.dylib` even after the rename — consumers link
+  // `-lkrunfw` against the unversioned real file and dyld resolves their
+  // DT_NEEDED via the versioned symlink.
   const versioned = path.join(targetDir, `libkrunfw.${ABI}.dylib`);
+  const base = path.join(targetDir, 'libkrunfw.dylib');
   console.log('vendor-libkrun: no prebuilt darwin dylib exists — compiling kernel.c bundle into libkrunfw.5.dylib (native cc, the Makefile Darwin step)...');
   try {
     // Mirrors libkrunfw/Makefile $(KRUNFW_BINARY_Darwin): cc -fPIC
@@ -361,10 +373,12 @@ async function buildLibkrunfwDylibFromBundle(extractDir, targetDir) {
       '  Ensure a C toolchain (clang/cc via Xcode CLT) is installed on the lane.');
   }
   await fs.chmod(versioned, 0o755);
-  // install layout: libkrunfw.dylib -> libkrunfw.5.dylib
-  const base = path.join(targetDir, 'libkrunfw.dylib');
+  // Move the real bytes onto the unversioned link-time name. Same-directory
+  // rename is atomic and leaves exactly one real copy (no TCB gap from a
+  // duplicate). linkVersionedSonames then recreates libkrunfw.5.dylib as a
+  // symlink to this file.
   await fs.rm(base, { force: true }).catch(() => {});
-  await fs.symlink(path.basename(versioned), base);
+  await fs.rename(versioned, base);
   return base;
 }
 

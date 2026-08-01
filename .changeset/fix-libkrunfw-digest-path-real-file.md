@@ -1,0 +1,5 @@
+---
+"@agentoctopus/sandbox-vm-native": patch
+---
+
+Fix the Darwin `libkrunfw` layout so the TCB digest path is a real file, not a symlink. `buildLibkrunfwDylibFromBundle` previously compiled `libkrunfw.5.dylib` (real) and made `libkrunfw.dylib` a symlink to it, but `verifyVmTcb` hard-rejects a symlink at the digest path (`libkrunfw.dylib`), so `build-vm-helper.mjs` died with `verifyVmTcb rejected the combined manifest: libkrunfw: not a regular file (symlink/missing)` on the macOS vm-lane. The function now compiles under the versioned name and renames the real bytes to the unversioned link-time name `libkrunfw.dylib` (atomic same-dir rename, exactly one digest-verified real copy); `linkVersionedSonames` then provides `libkrunfw.5.dylib` as a symlink to that real file, matching the libkrun layout and the single-real-file TCB invariant. Because the dylib is compiled with no `-install_name` flag, its recorded install_name stays exactly `libkrunfw.5.dylib` after the rename, so `-lkrunfw` consumers still resolve at runtime (verified: consumer links, records `DT_NEEDED=libkrunfw.5.dylib`, and runs via the versioned symlink).
