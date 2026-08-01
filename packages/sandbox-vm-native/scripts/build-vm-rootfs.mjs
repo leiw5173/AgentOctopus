@@ -233,6 +233,27 @@ async function compileGuest(staging, guestAbsPath, srcPath, extra = []) {
   await fs.rename(tmpOut, dest);
 }
 
+// Pin every staging entry's atime + mtime to the fixed epoch. mke2fs -d copies
+// each source file's atime into the image inode; the double-build reproducibility
+// assertion reads the SAME staging tree twice, and (on CI runners without noatime)
+// the first mke2fs read bumps each source's atime, so the second build packs a
+// different atime and the digests diverge. ctime/mtime come from the source's
+// fixed mtime (stable) and crtime is forced by E2FSPROGS_FAKE_TIME, but atime is
+// NOT covered by the fake clock — it must be pinned on the staging tree itself.
+async function pinStagingTimes(staging) {
+  const epoch = new Date(Number(FIXED_EPOCH) * 1000);
+  const walk = async (dir) => {
+    for (const name of await fs.readdir(dir)) {
+      const p = path.join(dir, name);
+      const st = await fs.lstat(p);
+      await fs.utimes(p, epoch, epoch);
+      if (st.isDirectory()) await walk(p);
+    }
+  };
+  await fs.utimes(staging, epoch, epoch);
+  await walk(staging);
+}
+
 async function buildStaging(staging, nodeHostPath, runtimeBins) {
   await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
   await fs.mkdir(staging, { recursive: true });
@@ -260,6 +281,10 @@ async function buildStaging(staging, nodeHostPath, runtimeBins) {
   for (const d of ['/tmp', '/run', '/dev', '/etc']) {
     await fs.mkdir(path.join(staging, d), { recursive: true });
   }
+
+  // Pin atime+mtime LAST, after all writes, so the double-build packs a stable
+  // atime (see pinStagingTimes).
+  await pinStagingTimes(staging);
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +416,13 @@ async function buildArch(arch, nodeHostPath, runtimeBins) {
     }
 
     const sizeBlocks = imageSizeBlocks(staging);
-    const inodeCount = entries.length + 4; // entries + root + lost+found + slack
+    // Inode floor: ext4 reserves inodes 1-10 (root is inode 2) and mke2fs takes
+    // inode 11 for lost+found, so the staging tree's inodes start at 12. The
+    // old `entries + 4` left only `entries - 6` usable inodes — it succeeded
+    // only because the tree was tiny, and failed with "Could not allocate
+    // inode" the first time a real guest node binary was packed. Reserve the 11
+    // structural inodes plus headroom.
+    const inodeCount = entries.length + 32; // entries + 10 reserved + lost+found + slack
 
     // Double-build reproducibility assertion: build into two temp paths,
     // require byte-identical SHA-256. Any nondeterminism (timestamps,
