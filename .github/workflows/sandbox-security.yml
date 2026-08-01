@@ -354,6 +354,23 @@ jobs:
           if [ -r "$cg/pids.current" ]; then
             echo "cgroup pids.current/max:        $(cat "$cg/pids.current" 2>/dev/null)/$(cat "$cg/pids.max" 2>/dev/null)"
           fi
+          # fork() EAGAIN with FREE pids (confirmed: 162 procs vs ulimit 2092)
+          # is NOT PID exhaustion — it is the kernel refusing to commit the
+          # child's copy-on-write address space. That happens under strict
+          # overcommit (vm.overcommit_memory=2, CommitLimit reached) or a full
+          # memory cgroup. Capture the memory + overcommit state so we can see
+          # WHY tar's fork was refused while tiny ps/findmnt forks succeeded.
+          echo "=== memory / overcommit state ==="
+          grep -E 'MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree|Committed_AS|CommitLimit' /proc/meminfo 2>/dev/null || echo "  (meminfo unavailable)"
+          echo "vm.overcommit_memory: $(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo '?')  (0=heuristic 1=always 2=strict)"
+          echo "vm.overcommit_ratio:  $(cat /proc/sys/vm/overcommit_ratio 2>/dev/null || echo '?')"
+          for c in /sys/fs/cgroup /sys/fs/cgroup/agentoctopus-ci; do
+            if [ -r "$c/memory.current" ]; then
+              echo "cgroup $c memory.current/max: $(cat "$c/memory.current" 2>/dev/null)/$(cat "$c/memory.max" 2>/dev/null)"
+            fi
+          done
+          echo "--- top-12 processes by RSS (KB) ---"
+          ps -eo pid,ppid,rss,comm,args --sort=-rss 2>/dev/null | head -13 || true
           echo "--- top process-command counts (all users) ---"
           ps -eo comm= 2>/dev/null | sort | uniq -c | sort -rn | head -15 || echo "  (ps unavailable)"
           echo "--- longest-lived processes (possible leaks) ---"
