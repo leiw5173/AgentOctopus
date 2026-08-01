@@ -287,6 +287,32 @@ jobs:
       # PKG_ROOT/runtime from its own location — it never uses this env var.
       OCTOPUS_OS_PROBE_MANIFEST_ROOT: ${{ github.workspace }}/packages/sandbox/runtime
     steps:
+      # Pre-checkout rescue: a leaked tmpfs mount INSIDE the workspace (staged
+      # at ${{ github.workspace }}/.tmp by an older revision) persists across
+      # runs on the self-hosted runner and makes actions/checkout@v7 fail with
+      # "EBUSY: resource busy or locked, rmdir '.../AgentOctopus/.tmp'" before
+      # ANY lane step runs. No later step can clear it because checkout dies
+      # first. Unmount any such stale tmpfs here — best-effort (|| true) so a
+      # clean runner is unaffected and a missing mount is not an error. This is
+      # the ONLY thing that can run before checkout.
+      - name: Rescue stale in-workspace tmpfs before checkout
+        shell: bash
+        run: |
+          set -uo pipefail
+          ws="${{ github.workspace }}"
+          # Unmount stale tmpfs mounts under the workspace (deepest first),
+          # then remove the now-unmounted mountpoint dirs so checkout's rmdir
+          # succeeds. Only touch tmpfs targets; never the workspace root itself.
+          findmnt -rn --submounts "$ws" -o TARGET 2>/dev/null | sort -r | while read -r t; do
+            [ "$t" = "$ws" ] && continue
+            if findmnt -rn --target "$t" -o FSTYPE 2>/dev/null | grep -qx tmpfs; then
+              echo "rescuing stale tmpfs mount: $t"
+              umount -l "$t" 2>/dev/null || umount "$t" 2>/dev/null || true
+            fi
+          done
+          rm -rf "$ws/.tmp" 2>/dev/null || true
+          echo "rescue done; remaining mounts under workspace:"
+          findmnt -rn --submounts "$ws" -o TARGET,FSTYPE 2>/dev/null || echo "  (none)"
       - uses: actions/checkout@v7
       - name: Diagnose disk layout + stage TMPDIR
         shell: bash
