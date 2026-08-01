@@ -459,6 +459,22 @@ export async function ssListenCount(netnsName: string, ip: string, port: number)
   return res.stdout.split('\n').filter((l) => l.includes(needle)).length;
 }
 
+/** `ss -ltnH` rows listening on an exact address:port on the HOST namespace.
+ *
+ * The egress proxy binds HOST-SIDE: `setupNetns` assigns `proxyIp` to the
+ * host-side veth (`hostIf`, which stays on the host — only `skillIf` is moved
+ * into the skill netns), and `egress-proxy-server` listens on that host
+ * address (see os-backend.ts: the proxy "binds host-side over the carrier").
+ * The skill reaches it via the veth peer route, so the listener is visible to
+ * `ss` on the HOST, NOT to `ss` run inside the skill netns. Use this to assert
+ * the proxy listener exists / is gone. */
+export async function hostSsListenCount(ip: string, port: number): Promise<number> {
+  const res = await runArgv(['ss', '-ltnH']);
+  if (res.code !== 0) return -1;
+  const needle = `${ip}:${port}`;
+  return res.stdout.split('\n').filter((l) => l.includes(needle)).length;
+}
+
 /**
  * Run one lane probe action through the full OS sandbox and parse the single
  * JSON object the probe emits on stdout. Tears the sandbox down fully.

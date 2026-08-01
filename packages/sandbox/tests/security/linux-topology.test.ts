@@ -33,8 +33,8 @@ import {
   needPrivilegedLinux,
   setupLinuxSandbox,
   execInNetns,
-  ssListenCount,
-  parseProbeJson,
+  hostSsListenCount,
+  runLinuxProbe,
   LANE_NODE,
   type LinuxSandbox,
 } from './linux-lane-setup.js';
@@ -87,21 +87,34 @@ async function skillPidFromCgroup(cgroupPath: string): Promise<number> {
 /**
  * Start a running sandbox with the blocking probe so the topology exists
  * while assertions run. Returns the sandbox + the running process handle.
+ *
+ * `spawnBlock` (default true) spawns a persistent `block` probe into the
+ * session cgroup so there is a live PID to nsenter into (M8) and so the
+ * topology stays up. Tests that run their OWN one-shot `backend.run()` probe
+ * against this sandbox's proxy must pass `spawnBlock: false`: a persistent
+ * process in the shared session cgroup would make `run()`'s post-exit
+ * "cgroup is empty" containment check fail (the persistent process is still
+ * there), even though the one-shot probe drained correctly.
  */
-async function startTopologySandbox(opts: Parameters<typeof setupLinuxSandbox>[0] = {}): Promise<{
+async function startTopologySandbox(
+  opts: Parameters<typeof setupLinuxSandbox>[0] = {},
+  spawnBlock = true,
+): Promise<{
   sandbox: LinuxSandbox;
-  proc: Awaited<ReturnType<LinuxSandbox['backend']['spawn']>>;
+  proc?: Awaited<ReturnType<LinuxSandbox['backend']['spawn']>>;
   skillCgroupPath: string;
   cleanup(): Promise<void>;
 }> {
   const sandbox = await setupLinuxSandbox({ timeoutMs: 120_000, ...opts });
-  const proc = await sandbox.backend.spawn({
-    command: [LANE_NODE, '/skill/probe.js', 'block'],
-    timeoutMs: 120_000,
-  });
+  const proc = spawnBlock
+    ? await sandbox.backend.spawn({
+        command: [LANE_NODE, '/skill/probe.js', 'block'],
+        timeoutMs: 120_000,
+      })
+    : undefined;
   const skillCgroupPath = sandbox.skillCgroupPath;
   if (!skillCgroupPath) {
-    await proc.close().catch(() => {});
+    await proc?.close().catch(() => {});
     await sandbox.cleanup();
     throw new Error('skillCgroupPath is undefined after prepare — the concrete getter contract broke');
   }
@@ -110,7 +123,7 @@ async function startTopologySandbox(opts: Parameters<typeof setupLinuxSandbox>[0
     proc,
     skillCgroupPath,
     cleanup: async () => {
-      await proc.close().catch(() => {});
+      await proc?.close().catch(() => {});
       await sandbox.cleanup();
     },
   };
@@ -132,7 +145,9 @@ describe('Linux lane — netns topology', () => {
       expect(routes.stdout).toContain(t.sandbox.proxyIp);
       expect(routes.stdout).not.toMatch(/^default /m);
       // The proxy is reachable at its link-local address:port from inside.
-      const listeners = await ssListenCount(t.sandbox.netnsName, t.sandbox.proxyIp, t.sandbox.proxyPort);
+      // The proxy binds HOST-SIDE (proxyIp is on the host-side veth), so its
+      // listener is visible to `ss` on the host, not inside the skill netns.
+      const listeners = await hostSsListenCount(t.sandbox.proxyIp, t.sandbox.proxyPort);
       expect(listeners).toBe(1);
     } finally {
       await t.cleanup();
@@ -156,16 +171,17 @@ describe('Linux lane — netns topology', () => {
       const flags = caLine!.split(' ')[5] ?? '';
       expect(flags.split(',')).toContain('ro');
 
-      // Behavioral proof from inside the sandbox: the probe reads the CA and
+      // Behavioral proof from inside a sandbox: the probe reads the CA and
       // attempts a write; the write must be denied (ok=true only when the
-      // write FAILED).
-      const result = await t.sandbox.backend.run({
-        command: [LANE_NODE, '/skill/probe.js', 'ca-ro-probe'],
-        timeoutMs: 30_000,
-      });
-      const json = parseProbeJson(result.stdout);
-      expect(json.ok).toBe(true);
-      expect(json.writeErr).not.toBe('none');
+      // write FAILED). Run on a FRESH sandbox (runLinuxProbe) rather than this
+      // one: this sandbox holds the persistent `block` probe (needed for the
+      // nsenter PID above), and a one-shot backend.run() here would fail run()'s
+      // "cgroup is empty" containment check against that persistent process.
+      // Every sandbox mounts its session CA read-only at the same contract
+      // path, so a separate sandbox proves the identical read-only behavior.
+      const probe = await runLinuxProbe('ca-ro-probe', { timeoutMs: 30_000 });
+      expect(probe.json.ok).toBe(true);
+      expect(probe.json.writeErr).not.toBe('none');
     } finally {
       await t.cleanup();
     }
@@ -177,6 +193,12 @@ describe('Linux lane — netns topology', () => {
     // the table (the initial ruleset's input default-drop would otherwise
     // cut it off). The proxy runs on the HOST, so it can reach a loopback
     // upstream; the skill can only reach it through the proxy.
+    //
+    // spawnBlock=false: this test drives its own one-shot backend.run() probe
+    // through the proxy, so it must NOT keep a persistent `block` process in
+    // the shared session cgroup (that would fail run()'s post-exit "cgroup is
+    // empty" containment check). The proxy + grants this test verifies come
+    // from setupLinuxSandbox, independent of any persistent probe.
     let upstream: ReturnType<typeof createServer> | undefined;
     let upstreamUrl = '';
     const t = await startTopologySandbox({
@@ -194,7 +216,7 @@ describe('Linux lane — netns topology', () => {
         upstreamUrl = `http://127.0.0.1:${addr.port}/`;
         return ['127.0.0.1'];
       },
-    });
+    }, false);
     try {
       const result = await t.sandbox.backend.run({
         command: [LANE_NODE, '/skill/http-probe.js', t.sandbox.proxy.reachableAddr, upstreamUrl],
@@ -255,8 +277,10 @@ describe('Linux lane — netns topology', () => {
     if (!needLinux(ctx)) return;
     const t = await startTopologySandbox();
     try {
-      // ss inside the netns: exactly one listener on proxyIp:proxyPort.
-      const listeners = await ssListenCount(t.sandbox.netnsName, t.sandbox.proxyIp, t.sandbox.proxyPort);
+      // The proxy binds HOST-SIDE (proxyIp is on the host-side veth), so its
+      // single listener is visible to `ss` on the host: exactly one on
+      // proxyIp:proxyPort.
+      const listeners = await hostSsListenCount(t.sandbox.proxyIp, t.sandbox.proxyPort);
       expect(listeners).toBe(1);
 
       // A second bind of the same addr:port must fail EADDRINUSE — the
