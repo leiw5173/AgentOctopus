@@ -502,10 +502,24 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
         die_errno("unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
     /* uid_map/gid_map: in-ns uid 0 → real uid, so root-owned files (the
-     * verified runtime root) remain accessible. setgroups must be denied
-     * before writing gid_map. */
+     * verified runtime root) remain accessible.
+     *
+     * /proc/self/setgroups "deny" is required ONLY for an UNPRIVILEGED caller:
+     * without CAP_SETGID in the parent user namespace the kernel refuses the
+     * gid_map write until setgroups is denied (user_namespaces(7)). "deny" is
+     * a per-userns, IRREVERSIBLE flag (USERNS_SETGROUPS_ALLOWED): once written
+     * it permanently disables setgroups(2) for every process in the namespace,
+     * which would kill the child's setgroups(0, NULL) drop in phase 3 with
+     * EPERM (and cannot be undone — writing "allow" back is EPERM).
+     *
+     * A root caller (the privileged-CI runner runs as root) holds CAP_SETGID in
+     * the parent userns and writes gid_map WITHOUT needing "deny". So write
+     * "deny" only when we actually lack that capability — i.e. when non-root.
+     * This keeps setgroups available for the phase-3 supplementary-group drop
+     * while still letting an unprivileged user map its gid. */
     char map[64];
-    xwrite_file("/proc/self/setgroups", "deny");
+    if (ruid != 0)
+        xwrite_file("/proc/self/setgroups", "deny");
     snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
     xwrite_file("/proc/self/uid_map", map);
     snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
