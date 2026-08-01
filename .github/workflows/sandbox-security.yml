@@ -334,10 +334,16 @@ jobs:
         run: pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
       - name: Run privileged Linux lanes with zero skips
         run: |
+          # default reporter -> stdout (CI log), json -> file (assert-no-skipped).
+          # --outputFile.json scopes the file to the json reporter only, so the
+          # default reporter's failures/assertions still reach the workflow log;
+          # json-only would swallow every assertion into a runner-local file and
+          # leave each failure a black box.
           pnpm --filter @agentoctopus/sandbox exec vitest run \
             tests/security/linux-lane.test.ts \
             tests/security/linux-topology.test.ts \
-            --reporter=json --outputFile=/tmp/linux-security.json
+            --reporter=json --reporter=default \
+            --outputFile.json=/tmp/linux-security.json
           node packages/sandbox/scripts/assert-no-skipped-tests.mjs /tmp/linux-security.json
       # F3: qualify + sign the linux-x64 VM TCB. This is the ONLY lane with
       # KVM — run-vm-gates' G1/G2 boot a real guest — so the linux-x64
@@ -565,10 +571,14 @@ jobs:
           OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
       - name: Run VM L3 + L4 (fail-closed on any skip)
         run: |
+          # default reporter -> stdout (CI log), json -> file (assert-no-skipped).
+          # Same rationale as the privileged-linux lane above: keep the failing
+          # assertions visible in the workflow log instead of a runner-local file.
           pnpm --filter @agentoctopus/sandbox exec vitest run \
             tests/security/vm-lane.test.ts \
             tests/security/vm-escape-matrix.test.ts \
-            --reporter=json --outputFile=/tmp/vm-security.json
+            --reporter=json --reporter=default \
+            --outputFile.json=/tmp/vm-security.json
           node packages/sandbox/scripts/assert-no-skipped-tests.mjs /tmp/vm-security.json
       # F3: upload the qualified + tested darwin-arm64 TCB (helper, libs, image
       # builder, TCB/gate/release manifests, sealed rootfs). Release Preflight's
