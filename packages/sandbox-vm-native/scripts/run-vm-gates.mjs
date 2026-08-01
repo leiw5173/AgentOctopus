@@ -319,15 +319,27 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
     let stderr = '';
     child.stdout?.on('data', (c) => { stdout += c.toString('utf8'); });
     child.stderr?.on('data', (c) => { stderr += c.toString('utf8'); });
+    let exitInfo = 'exit: unknown';
     try {
       await child;
+      exitInfo = 'exit: 0';
     } catch (err) {
       // Non-zero exit is expected for probe scripts that encounter failures;
       // treat the captured stdout as the result regardless.
       if (err.stdout) stdout += err.stdout.toString('utf8');
       if (err.stderr) stderr += err.stderr.toString('utf8');
+      // Record HOW the helper died. A helper that produces ZERO output died
+      // before main() — almost always a dyld load failure or a codesign /
+      // entitlement SIGKILL. err.code is the exit status (or the spawn errno),
+      // err.signal the killing signal; err.errno/err.syscall identify a spawn
+      // failure (e.g. ENOENT/EACCES) where the process never ran at all.
+      exitInfo = `exit: code=${err.code ?? 'n/a'} signal=${err.signal ?? 'none'} errno=${err.errno ?? 'n/a'} syscall=${err.syscall ?? 'n/a'}`;
     }
-    return stderr.trim() ? `${stdout}\n[helper stderr]\n${stderr}` : stdout;
+    const tail = [];
+    if (stderr.trim()) tail.push(`[helper stderr]\n${stderr.trim()}`);
+    if (!stdout.trim()) tail.push(`[helper produced no stdout — died before main()]\n[helper ${exitInfo}]`);
+    else tail.push(`[helper ${exitInfo}]`);
+    return `${stdout}\n${tail.join('\n')}`;
   } finally {
     if (serverReady) {
       await new Promise((r) => vsockServer.close(r));
