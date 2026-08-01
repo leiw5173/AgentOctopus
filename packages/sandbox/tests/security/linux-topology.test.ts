@@ -245,7 +245,16 @@ describe('Linux lane — netns topology', () => {
       expect(result.stdout).toContain('ok');
     } finally {
       await t.cleanup();
-      if (upstream) await new Promise<void>((r) => upstream!.close(() => r()));
+      if (upstream) {
+        // The proxy's connection to this upstream can linger (half-closed)
+        // after the round-trip. `server.close()` waits for EVERY connection to
+        // end and has NO timeout, so one lingering proxy socket would hang this
+        // teardown forever — that is what drove the test to its full 180s
+        // timeout, masking the (passing) round-trip. Destroy all connections
+        // first so close() returns promptly.
+        upstream.closeAllConnections();
+        await new Promise<void>((r) => upstream!.close(() => r()));
+      }
     }
   }, RUN_TIMEOUT);
 
@@ -347,13 +356,14 @@ describe('Linux lane — netns topology', () => {
     const cgStat = await runArgv(['test', '-d', cgroupPath]);
     expect(cgStat.code).not.toBe(0);
 
-    // No listener remains after the proxy handle closed: a fresh bind of the
-    // same addr:port now SUCCEEDS (EADDRINUSE is gone), proving the listener
-    // was closed. Bind then immediately release.
-    await new Promise<void>((resolveBind, rejectBind) => {
-      const srv = createServer();
-      srv.once('error', rejectBind);
-      srv.listen(proxyPort, proxyIp, () => srv.close(() => resolveBind()));
-    });
+    // No listener remains on the proxy address. Re-BINDING proxyIp to prove
+    // this is impossible here: teardown deleted the host veth that carried
+    // proxyIp (asserted above), so the address no longer exists on any
+    // interface and a bind fails EADDRNOTAVAIL — not the EADDRINUSE-vs-closed
+    // signal a re-bind is meant to read. Instead assert the host `ss` table
+    // shows no listener on proxyIp:proxyPort; with the veth gone and
+    // proxy.close() run, none can remain (the listener was bound to proxyIp on
+    // the now-deleted veth, so the kernel destroyed its socket).
+    expect(await hostSsListenCount(proxyIp, proxyPort)).toBe(0);
   }, RUN_TIMEOUT);
 });
