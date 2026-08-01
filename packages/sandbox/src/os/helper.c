@@ -634,40 +634,43 @@ static void phase2_tmpfs_and_devices(const LaunchSpec *spec) {
 /* ------------------------------------------------------------------ */
 
 /* Verify a mount is read-only by inspecting /proc/self/mountinfo. Dies if
- * the mount is absent or not flagged ro. Fields: see proc_pid_mountinfo(5). */
+ * the mount is absent or not flagged ro.
+ *
+ * mountinfo fields (proc_pid_mountinfo(5)):
+ *   (1) mnt ID  (2) parent ID  (3) major:minor  (4) root  (5) mount point
+ *   (6) per-mount vfs options  (7) optional tags...  "-"  (8) fs-type
+ *   (9) mount-source  (10) superblock options
+ *
+ * The read-only flag we assert is a PER-MOUNT vfs flag (MNT_READONLY), set by
+ * the bind's ro-remount. It appears in field (6), BEFORE the "-" separator —
+ * e.g. "... / rw ro,nosuid,nodev ... - ext4 /dev/root rw,...". Field (10), the
+ * SUPERBLOCK options, reflects the underlying filesystem (the rw ext4 the
+ * runtime root was bound FROM) and stays "rw" for a read-only bind. Reading
+ * field (10) here would ALWAYS report a ro-remounted bind as writable, so we
+ * parse field (6). */
 static void require_mount_ro(const char *inRootPath) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
     if (!f) die_errno("fopen mountinfo");
     char line[8192];
     int found = 0;
     while (fgets(line, sizeof(line), f)) {
-        /* mount point is field 5 (1-based). Optional fields follow field 6,
-         * terminated by a literal "-". After "-": fs-type, mount-source,
-         * super-opts — so super-opts is the 3rd token after the dash. */
         char *save = NULL;
         char *tok = strtok_r(line, " \n", &save);
         int field = 0;
         char mountPoint[OCT_PATH_MAX_LEN] = {0};
-        char superOpts[1024] = {0};
-        int afterDash = 0; /* count of tokens seen after the "-" separator */
+        char mountOpts[1024] = {0};
         while (tok) {
-            if (afterDash == 0) {
-                field++;
-                if (field == 5) {
-                    snprintf(mountPoint, sizeof(mountPoint), "%s", tok);
-                }
-                if (strcmp(tok, "-") == 0) afterDash = 1;
-            } else {
-                if (afterDash == 3) snprintf(superOpts, sizeof(superOpts), "%s", tok);
-                afterDash++;
-            }
+            field++;
+            if (field == 5) snprintf(mountPoint, sizeof(mountPoint), "%s", tok);
+            if (field == 6) snprintf(mountOpts, sizeof(mountOpts), "%s", tok);
+            if (field >= 6) break; /* only need through field 6 */
             tok = strtok_r(NULL, " \n", &save);
         }
         if (strcmp(mountPoint, inRootPath) == 0) {
             found = 1;
-            /* super options must contain "ro". */
+            /* per-mount vfs options (field 6) must contain "ro". */
             int isRo = 0;
-            char *o = superOpts, *next;
+            char *o = mountOpts, *next;
             while ((next = strchr(o, ',')) != NULL || *o) {
                 size_t len = next ? (size_t)(next - o) : strlen(o);
                 if (len == 2 && o[0] == 'r' && o[1] == 'o') { isRo = 1; break; }
