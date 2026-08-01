@@ -334,14 +334,26 @@ export async function probeDocker(): Promise<CapabilityResult> {
  * spuriously. Gate those suites on this stricter probe so they skip cleanly.
  */
 export async function probeDockerImages(refs: string[]): Promise<CapabilityResult> {
-  const base = await probeDocker();
-  if (!base.available) return base;
+  // Cheap local-existence check FIRST. Every caller requires images that were
+  // built locally (security:images), so if any ref is absent from the image
+  // store we can report unavailable WITHOUT running a container. This matters
+  // on a plain network-restricted runner (the ci.yml unit-test job): the refs
+  // are absent there, and probing the daemon first would make probeDocker() run
+  // `docker run --rm hello-world` — hello-world is NOT cached, so it blocks on
+  // a network pull that never completes, exceeding vitest's 10s hookTimeout and
+  // failing the whole suite instead of skipping cleanly. The hosted-docker-proxy
+  // lane builds the images first, so they exist locally and this check passes
+  // through to the full daemon probe there (fail-closed contract intact).
   for (const ref of refs) {
-    const inspect = await runArgv(['docker', 'image', 'inspect', '--format', '{{.Id}}', ref], 30_000);
-    if (inspect.code !== 0) {
-      return { available: false, reason: `docker image inspect ${ref} failed: ${inspect.stderr.trim() || inspect.stdout.trim()}` };
+    if (!ref) return { available: false, reason: 'image ref unset (immutable env ref required)' };
+    const present = await runArgv(['docker', 'image', 'inspect', '--format', '{{.Id}}', ref], 30_000);
+    if (present.code !== 0) {
+      return { available: false, reason: `docker image ${ref} not present locally: ${present.stderr.trim() || present.stdout.trim()}` };
     }
   }
+  // All refs exist locally — now confirm the daemon can actually run them.
+  const base = await probeDocker();
+  if (!base.available) return base;
   return { available: true };
 }
 

@@ -43,9 +43,19 @@ beforeAll(async () => {
   // both env refs must be set AND the images present locally (security:images
   // built them). On a plain runner the daemon may be reachable via hello-world
   // while the trusted images are absent — docker run would exit 125 spuriously.
+  //
+  // Skip the probe entirely when the immutable env refs are absent. This suite
+  // can ONLY run against the pinned trusted images, so a plain runner (ci.yml
+  // unit-test job) has no business probing the daemon at all. Probing anyway
+  // would make probeDocker() run `docker run --rm hello-world` — hello-world is
+  // NOT cached there, so it blocks on a network pull that the restricted runner
+  // never completes, exceeding vitest's default 10s hookTimeout and failing the
+  // whole file. Absence of the refs is the intended skip signal (fail-closed:
+  // the hosted-docker-proxy lane sets them, so it still runs for real).
+  if (!process.env.OCTOPUS_TEST_RUNTIME_IMAGE || !process.env.OCTOPUS_TEST_PROXY_IMAGE) return;
   dockerAvailable = (await probeDockerImages([
-    process.env.OCTOPUS_TEST_RUNTIME_IMAGE!,
-    process.env.OCTOPUS_TEST_PROXY_IMAGE!,
+    process.env.OCTOPUS_TEST_RUNTIME_IMAGE,
+    process.env.OCTOPUS_TEST_PROXY_IMAGE,
   ])).available;
 });
 
