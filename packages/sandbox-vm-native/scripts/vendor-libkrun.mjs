@@ -314,6 +314,51 @@ async function writeArtifactManifest(libPath, manifestPath, pin) {
 }
 
 // ---------------------------------------------------------------------------
+// Versioned-SONAME shims. libkrun's Makefile bakes a versioned DT_SONAME into
+// the built library (libkrun.so.1 for the v1.19.4 pin), and the libkrunfw
+// prebuilt ships the standard versioned layout (SONAME libkrunfw.so.5). We copy
+// each lib into prebuilds under its UNVERSIONED link-time name (libkrun.so /
+// libkrunfw.so). Linking `-lkrun -lkrunfw` resolves those unversioned files,
+// but the linker records DT_NEEDED=<SONAME>, and the runtime loader resolves
+// that SONAME by FILENAME — so libkrun.so.1 / libkrunfw.so.5 must also exist
+// alongside the unversioned files, or every consumer (this script's link smoke
+// test now, the vm-helper at runtime later) dies with
+// "error while loading shared libraries: libkrun.so.1: cannot open shared
+// object file".
+//
+// The versioned name is created as a SYMLINK to the unversioned lib, NOT a
+// second real copy: prebuilds keeps exactly ONE digest-verified real file per
+// lib (the one writeArtifactManifest hashes), and the loader follows the
+// versioned symlink to those verified bytes. A second real copy would be
+// loaded by the OS WITHOUT any digest check — a TCB gap. Darwin dylibs use an
+// unversioned install_name, so this is a no-op there.
+// ---------------------------------------------------------------------------
+
+async function linkVersionedSonames(libPaths) {
+  if (process.platform === 'darwin') return [];
+  const created = [];
+  // Pinned fallback SONAMEs, used only if readelf is unavailable on the lane.
+  const FALLBACK_SONAME = { 'libkrun.so': 'libkrun.so.1', 'libkrunfw.so': 'libkrunfw.so.5' };
+  for (const libPath of libPaths) {
+    const base = path.basename(libPath);
+    let soname = null;
+    try {
+      const { stdout } = await execFileAsync('readelf', ['-d', libPath]);
+      const m = stdout.match(/\(SONAME\)\s+Library soname: \[([^\]]+)\]/);
+      if (m) soname = m[1];
+    } catch { /* readelf missing — fall back to the pinned SONAME below */ }
+    if (!soname) soname = FALLBACK_SONAME[base] ?? null;
+    if (!soname || soname === base) continue; // unversioned SONAME — nothing to shim
+    const linkPath = path.join(path.dirname(libPath), soname);
+    await fs.rm(linkPath, { force: true }).catch(() => {});
+    await fs.symlink(base, linkPath); // relative: resolves within the same dir
+    created.push(linkPath);
+    console.log(`vendor-libkrun: ${soname} -> ${base} (versioned SONAME shim)`);
+  }
+  return created;
+}
+
+// ---------------------------------------------------------------------------
 // Minimal link test: compile a tiny C program that includes the vendored
 // libkrun.h and links -lkrun -lkrunfw, proving the dylibs are loadable and
 // ABI-compatible with the header pin. This mirrors build-vm-helper.mjs's
@@ -401,6 +446,10 @@ catch { console.error('vendor-libkrun: WARNING — make not on PATH; libkrun bui
 
 const workDir = path.join(os.tmpdir(), `octopus-vendor-libkrun-${process.pid}-${Date.now()}`);
 await fs.mkdir(workDir, { recursive: true });
+// Versioned-SONAME shims created below; tracked here so the fail-closed path
+// removes them alongside the libs (never leave a stale soname pointing at a
+// removed lib).
+let sonameLinks = [];
 
 try {
   // libkrunfw FIRST: the libkrun build links against it (libkrun's build
@@ -433,6 +482,11 @@ try {
   console.log(`  sha256: ${krunManifest.artifact.sha256}`);
   console.log(`  size:   ${krunManifest.artifact.size}`);
 
+  // Create the versioned-SONAME shims (libkrun.so.1 / libkrunfw.so.5) the
+  // runtime loader resolves DT_NEEDED against — BEFORE the smoke test links
+  // and runs a binary against these libs.
+  sonameLinks = await linkVersionedSonames([libkrunPath, libkrunfwPath]);
+
   // Link + runtime smoke test: proves the vendored libs are loadable and
   // ABI-compatible with the header pin. Fail-closed if they are not.
   await linkSmokeTest(targetDir);
@@ -448,6 +502,7 @@ try {
   await fs.rm(path.join(targetDir, libkrunfwName), { force: true }).catch(() => {});
   await fs.rm(path.join(targetDir, 'libkrun.manifest.json'), { force: true }).catch(() => {});
   await fs.rm(path.join(targetDir, 'libkrunfw.manifest.json'), { force: true }).catch(() => {});
+  for (const link of sonameLinks) await fs.rm(link, { force: true }).catch(() => {});
   throw err;
 } finally {
   await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
