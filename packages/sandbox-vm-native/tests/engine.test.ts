@@ -794,9 +794,68 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     expect(r.blkFeature).toBe('present');
     expect(r.gateManifest).toBe('verified');
     expect(r.releaseManifest).toBe('missing');
-    // F1: the BLK probe execs the realpath'd VERIFIED helper, never the raw
-    // configured path.
-    expect(spy).toHaveBeenCalledWith(await fsPromises.realpath(harness.helperPath));
+    // F2 (round 6): the BLK probe execs the PRIVATE verified copy with the
+    // loader path pointed at the private dir — NEVER the original path
+    // (a realpath→exec swap of the original would otherwise run unverified).
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [calledHelper, calledLibDir] = spy.mock.calls[0] as unknown as [string, string];
+    expect(calledHelper).not.toBe(harness.helperPath);
+    expect(path.basename(calledHelper)).toBe('sandbox-vm-helper');
+    expect(calledHelper.startsWith(tempDir)).toBe(true); // privateDirBase
+    expect(calledLibDir).toBe(path.dirname(calledHelper));
+    expect(await fsPromises.readFile(calledHelper, 'utf8')).toBe('HELPER');
+  });
+
+  // F2 (round 6): any probe failure AFTER the private copies are created
+  // must discard the private dir — no half-verified private TCB left behind.
+  it('F2: a probe failure after private-copy creation discards the private dir', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    // Gate verification fails AFTER the copies are made (copies precede the
+    // gate check in the reordered probe).
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: false, reasons: ['tampered'] });
+    const engine = await makeProbeEngine();
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    const leftovers = (await fsPromises.readdir(tempDir)).filter((e) => e.startsWith('oct-vm-tcb-'));
+    expect(leftovers).toEqual([]);
+  });
+
+  // F3 (round 6): the private dir must recreate the versioned SONAME shims
+  // (libkrun.so.1 → libkrun.so) pointing at the VERIFIED private copies —
+  // the helper's DT_NEEDED uses versioned names, so without them the loader
+  // misses (or falls back to unverified system libs). An attacker-crafted
+  // link target in the artifacts dir must NOT be honored.
+  it('F3: private dir recreates versioned SONAME links at the verified copies', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    // Simulate the vendor-created versioned shims — one legit, one hostile
+    // (points at an arbitrary file; the recreated link must NOT follow it).
+    await fsPromises.symlink(
+      path.basename(harness.libkrunPath),
+      path.join(harness.artifactsDir, 'libkrun.so.1'),
+    );
+    await fsPromises.symlink(
+      '/etc/passwd',
+      path.join(harness.artifactsDir, 'libkrunfw.so.5'),
+    );
+    const engine = await makeProbeEngine();
+    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(true);
+    const cached = (engine as unknown as { verifiedProbe?: { privateDir: string; tcbPaths: { libkrun: string; libkrunfw: string } } }).verifiedProbe!;
+    for (const [link, libKey] of [['libkrun.so.1', 'libkrun'], ['libkrunfw.so.5', 'libkrunfw']] as const) {
+      const linkPath = path.join(cached.privateDir, link);
+      // A relative symlink whose target is the private copy's basename…
+      expect(await fsPromises.readlink(linkPath)).toBe(path.basename(cached.tcbPaths[libKey]));
+      // …resolving to the verified bytes (never the hostile /etc/passwd).
+      expect(await fsPromises.readFile(linkPath, 'utf8')).toBe(libKey === 'libkrun' ? 'LIBKRUN' : 'LIBKRUNFW');
+    }
+    await engine.close();
   });
 
   it('fails closed when the BLK probe itself throws', async () => {

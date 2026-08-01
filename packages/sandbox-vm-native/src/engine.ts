@@ -38,7 +38,7 @@ import { PassThrough } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { execFile } from 'node:child_process';
 import { constants, createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, open, readdir, readFile, realpath, rm, symlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -307,9 +307,42 @@ export class VmEngineImpl implements VmEnginePort {
     }
   }
 
-  private probeBlkFeature(helperPath: string): Promise<boolean> {
+  /**
+   * Recreate the versioned SONAME shims (Linux: `libkrun.so.1 → libkrun.so`,
+   * `libkrunfw.so.5 → libkrunfw.so`, created by vendor-libkrun.mjs in the
+   * artifacts dir) inside the engine-private dir, pointing at the VERIFIED
+   * private copies. The helper's DT_NEEDED entries use the versioned names;
+   * without these links the loader cannot find the libraries in the private
+   * dir — or worse, falls back to an UNVERIFIED same-named system library.
+   * Link targets are always the private copy's basename (never the original
+   * symlink's target), so an attacker-crafted link in the artifacts dir only
+   * controls which NAMES we create, not what they resolve to. No-op on
+   * Darwin (unversioned .dylib names don't match the pattern).
+   */
+  private async mirrorSonameLinks(
+    privateDir: string,
+    privatePaths: VmTcbArtifacts,
+  ): Promise<void> {
+    const entries = await readdir(this.opts.artifactsDir).catch(() => [] as string[]);
+    for (const entry of entries) {
+      if (!/^libkrun(fw)?\.so\..+$/.test(entry)) continue;
+      const base = entry.startsWith('libkrunfw') ? 'libkrunfw' : 'libkrun';
+      await symlink(path.basename(privatePaths[base]), path.join(privateDir, entry));
+    }
+  }
+
+  private probeBlkFeature(helperPath: string, libDir: string): Promise<boolean> {
+    // The probe execs the PRIVATE verified copy with the loader path pointed
+    // at the private dir — the helper is dynamically linked against libkrun
+    // (krun_has_feature), so the verified libs must be the ones loaded.
+    const libPathVar =
+      this.deps.platform === 'darwin-arm64' ? 'DYLD_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
+    const env: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH ?? '',
+      [libPathVar]: libDir,
+    };
     return new Promise((resolve, reject) => {
-      execFile(helperPath, ['--has-blk'], { timeout: 10_000 }, (err, _stdout, _stderr) => {
+      execFile(helperPath, ['--has-blk'], { timeout: 10_000, env }, (err, _stdout, _stderr) => {
         if (err) {
           // execFile sets err.code to the exit status for non-zero exits.
           if (typeof err.code === 'number') {
@@ -381,6 +414,36 @@ export class VmEngineImpl implements VmEnginePort {
         helper: 'sha256:' + verified.manifest.artifacts.helper.sha256,
         imageBuilder: 'sha256:' + verified.manifest.artifacts.imageBuilder.sha256,
       };
+      // (1c) OBJECT BINDING FIRST: copy the four verified artifacts into an
+      //     engine-private 0700 directory — hashing the bytes AS THEY ARE
+      //     READ FOR THE COPY from a single O_NOFOLLOW fd
+      //     (copyVerifiedArtifact), each digest must equal the manifest
+      //     verifyVmTcb() verified — and recreate the versioned SONAME links
+      //     pointing at the private copies (mirrorSonameLinks). This happens
+      //     BEFORE the BLK probe so the probe (and every later phase)
+      //     executes ONLY the private verified copies: a swap of the
+      //     original paths after this point is irrelevant.
+      const privateDir = await mkdtemp(
+        path.join(this.opts.privateDirBase ?? tmpdir(), 'oct-vm-tcb-'),
+      ); // mkdtemp creates 0700
+      let privatePaths: VmTcbArtifacts;
+      try {
+        privatePaths = {
+          helper: await this.copyVerifiedArtifact('helper', verified.paths.helper, verified.manifest.artifacts.helper.sha256, privateDir),
+          libkrun: await this.copyVerifiedArtifact('libkrun', verified.paths.libkrun, verified.manifest.artifacts.libkrun.sha256, privateDir),
+          libkrunfw: await this.copyVerifiedArtifact('libkrunfw', verified.paths.libkrunfw, verified.manifest.artifacts.libkrunfw.sha256, privateDir),
+          imageBuilder: await this.copyVerifiedArtifact('imageBuilder', verified.paths.imageBuilder, verified.manifest.artifacts.imageBuilder.sha256, privateDir),
+        };
+        await this.mirrorSonameLinks(privateDir, privatePaths);
+      } catch (err) {
+        await rm(privateDir, { recursive: true, force: true }).catch(() => {});
+        throw err;
+      }
+      // From here on, ANY exit path that does not cache the verified state
+      // must discard the private dir (no half-verified private TCB left
+      // behind) — the finally below is the single cleanup point.
+      let cachedVerifiedState = false;
+      try {
       // (2) Load + verify the gate manifest. It carries the qualified rootfs
       //     digests list and pins libkrunAbi='v1.19.4' + blkFeatureRequired.
       let gateManifest: GateManifest;
@@ -517,13 +580,16 @@ export class VmEngineImpl implements VmEnginePort {
           releaseManifest: 'missing',
         };
       }
-      // (4) Real BLK feature probe via the TCB-verified helper — executed at
-      //     its realpath'd VERIFIED path (step 1a bound opts.helperPath to
-      //     it), never at an independently configured path. Fail-closed: if
-      //     libkrun was not built with KRUN_FEATURE_BLK, the helper exits 1.
+      // (4) Real BLK feature probe via the PRIVATE verified helper copy
+      //     (step 1c), with the loader path pointed at the private dir so the
+      //     verified libkrun/libkrunfw are the ones loaded. The ORIGINAL path
+      //     is never executed — realpath only pins a path at check time, and
+      //     executing the original would leave a realpath→exec swap window.
+      //     Fail-closed: if libkrun was not built with KRUN_FEATURE_BLK, the
+      //     helper exits 1.
       let blkFeature: 'present' | 'absent';
       try {
-        blkFeature = (await this.probeBlkFeature(verifiedHelper)) ? 'present' : 'absent';
+        blkFeature = (await this.probeBlkFeature(privatePaths.helper, privateDir)) ? 'present' : 'absent';
       } catch (err) {
         return {
           available: false,
@@ -542,44 +608,21 @@ export class VmEngineImpl implements VmEnginePort {
           blkFeature: 'absent',
         };
       }
-      // (5) OBJECT BINDING: copy the four verified artifacts into an
-      //     engine-private 0700 directory, hashing the bytes AS THEY ARE READ
-      //     FOR THE COPY from a single O_NOFOLLOW fd (copyVerifiedArtifact) —
-      //     each copy's digest must equal the manifest verifyVmTcb() verified.
-      //     After this point ONLY the private copies are executed/loaded
-      //     (start() execs the private helper with the loader path pointed at
-      //     the private dir; getVerifiedImageBuilderPath() hands out the
-      //     private builder). "Verified object" and "used object" are the same
-      //     inode — a post-probe swap of the original paths is irrelevant, so
-      //     there is no hash→exec TOCTOU window left to close.
-      const privateDir = await mkdtemp(
-        path.join(this.opts.privateDirBase ?? tmpdir(), 'oct-vm-tcb-'),
-      ); // mkdtemp creates 0700
-      let privatePaths: VmTcbArtifacts;
-      try {
-        privatePaths = {
-          helper: await this.copyVerifiedArtifact('helper', verified.paths.helper, verified.manifest.artifacts.helper.sha256, privateDir),
-          libkrun: await this.copyVerifiedArtifact('libkrun', verified.paths.libkrun, verified.manifest.artifacts.libkrun.sha256, privateDir),
-          libkrunfw: await this.copyVerifiedArtifact('libkrunfw', verified.paths.libkrunfw, verified.manifest.artifacts.libkrunfw.sha256, privateDir),
-          imageBuilder: await this.copyVerifiedArtifact('imageBuilder', verified.paths.imageBuilder, verified.manifest.artifacts.imageBuilder.sha256, privateDir),
-        };
-      } catch (err) {
-        await rm(privateDir, { recursive: true, force: true }).catch(() => {});
-        throw err;
-      }
-      // Cache the fully-verified state: resolveRootfs()/assertRootfsQualified()/
+      // (5) Cache the fully-verified state: resolveRootfs()/assertRootfsQualified()/
       // start() consume ONLY this instance. The gate manifest here is the one
       // the release signature bound to; the TCB paths are the engine-private
       // copies of the bytes verifyVmTcb verified. A post-probe on-disk swap of
       // gate-manifest.json is invisible to the prepare/start phases (they never
       // re-read it), and swaps of the original TCB paths cannot affect the
-      // private copies.
+      // private copies — "verified object" and "used object" are the same
+      // inode, so there is no hash→exec TOCTOU window left to close.
       this.verifiedProbe = {
         gateManifest,
         tcbManifest: verified.manifest,
         tcbPaths: privatePaths,
         privateDir,
       };
+      cachedVerifiedState = true;
       return {
         available: true,
         platform: this.deps.platform,
@@ -587,6 +630,11 @@ export class VmEngineImpl implements VmEnginePort {
         blkFeature: 'present',
         releaseManifest,
       };
+      } finally {
+        if (!cachedVerifiedState) {
+          await rm(privateDir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
     } catch (err) {
       return {
         available: false,

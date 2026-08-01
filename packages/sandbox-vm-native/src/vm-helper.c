@@ -117,8 +117,16 @@
 #define H2G_READ_FD   3
 #define G2H_WRITE_FD  4
 
-/* Stdio FDs preserved by mass_close_fds(). */
+/* Fixed fd slot the engine inherits the PINNED, verified rootfs image at
+ * (the launch spec references it as /dev/fd/5). Launch mode MUST preserve it
+ * across mass_close_fds() or krun_add_disk() gets a dead path. */
+#define ROOTFS_INHERIT_FD 5
+
+/* Stdio+control FDs preserved by mass_close_fds() in BLK-probe mode (fds
+ * 0-4; there is no inherited rootfs fd on the --has-blk path). */
 #define FD_LOW_WATERMARK 5
+/* Launch mode preserves the rootfs fd too (fds 0-5). */
+#define FD_LOW_WATERMARK_LAUNCH (ROOTFS_INHERIT_FD + 1)
 
 /* Defensive cap for fallback close loops so a huge/INFINITY rlim_cur
  * cannot cause millions of EBADF close() iterations. */
@@ -161,13 +169,13 @@ static void krun_check(int32_t rc, const char *what) {
 /* Return the inclusive-exclusive upper bound for the fallback close
  * loops. Uses RLIMIT_NOFILE when available, otherwise _SC_OPEN_MAX,
  * capped defensively at FD_CEILING_MAX. The bound is clamped to at
- * least FD_LOW_WATERMARK so the fallback loop never runs zero
+ * least `lowWatermark` so the fallback loop never runs zero
  * iterations. When rlim_cur is below the old hard-coded 4096, the
- * loop closes exactly [FD_LOW_WATERMARK, rlim_cur) -- this is the
+ * loop closes exactly [lowWatermark, rlim_cur) -- this is the
  * intended design (bound by the real fd ceiling, not an arbitrary
  * constant). Comparisons against rlim_cur are done in the unsigned
  * rlim_t domain to avoid sign-wrap on pathological limits. */
-static int fd_ceiling(void) {
+static int fd_ceiling(int lowWatermark) {
     long max_fds;
     struct rlimit rl;
 
@@ -187,21 +195,25 @@ static int fd_ceiling(void) {
     if (max_fds > FD_CEILING_MAX) {
         max_fds = FD_CEILING_MAX;
     }
-    if (max_fds < FD_LOW_WATERMARK) {
-        max_fds = FD_LOW_WATERMARK;
+    if (max_fds < lowWatermark) {
+        max_fds = lowWatermark;
     }
     return (int)max_fds;
 }
 
-static void mass_close_fds(void) {
+/* Close every fd >= lowWatermark. Launch mode passes
+ * FD_LOW_WATERMARK_LAUNCH (6) so the inherited pinned rootfs fd 5
+ * survives for krun_add_disk("/dev/fd/5"); BLK-probe mode passes
+ * FD_LOW_WATERMARK (5) — it has no rootfs fd to keep. */
+static void mass_close_fds(int lowWatermark) {
 #ifdef __linux__
     /* Prefer close_range (Linux 5.9+). ~0u is the inclusive upper bound. */
-    if (close_range(FD_LOW_WATERMARK, ~0u, 0) == 0) {
+    if (close_range((unsigned int)lowWatermark, ~0u, 0) == 0) {
         return;
     }
     /* Fallback: ENOSYS on older kernels, or other error. Close a bounded
      * range. RLIMIT_NOFILE bounds this; cap defensively at a high int. */
-    for (int fd = FD_LOW_WATERMARK; fd < fd_ceiling(); fd++) {
+    for (int fd = lowWatermark; fd < fd_ceiling(lowWatermark); fd++) {
         (void)close(fd);
     }
 #else
@@ -209,9 +221,9 @@ static void mass_close_fds(void) {
      * bounded close loop. closefrom is available on macOS but may be
      * gated behind SDK feature macros, so we also fall back to the loop. */
 #ifdef HAVE_CLOSEFROM
-    closefrom(FD_LOW_WATERMARK);
+    closefrom(lowWatermark);
 #else
-    for (int fd = FD_LOW_WATERMARK; fd < fd_ceiling(); fd++) {
+    for (int fd = lowWatermark; fd < fd_ceiling(lowWatermark); fd++) {
         (void)close(fd);
     }
 #endif
@@ -587,6 +599,13 @@ static void parse_launch_spec(const char *json, size_t len, VmLaunchSpec *out) {
         die("control fd %d (h2gRead) not open -- engine did not dup2 it", H2G_READ_FD);
     if (fcntl(G2H_WRITE_FD, F_GETFD) < 0)
         die("control fd %d (g2hWrite) not open -- engine did not dup2 it", G2H_WRITE_FD);
+    /* The engine inherits the PINNED verified rootfs image at fd 5 and the
+     * launch spec references it as /dev/fd/5 — verify it survived the
+     * mass-close (and the engine's dup2) before krun_add_disk would get a
+     * dead path. */
+    if (fcntl(ROOTFS_INHERIT_FD, F_GETFD) < 0)
+        die("rootfs fd %d not open -- engine did not dup2 it (or mass-close dropped it)",
+            ROOTFS_INHERIT_FD);
 }
 
 /* ------------------------------------------------------------------ */
@@ -599,15 +618,18 @@ int main(int argc, char **argv) {
     return vm_helper_main(argc, argv);
 }
 int vm_helper_main(int argc, char **argv) {
-    /* R10 P1-2: mass-close every fd >= 5 BEFORE any krun_* call. fd 0-4
-     * (stdio + control pipes) are below the watermark and preserved. */
-    mass_close_fds();
+    /* Decide the mode BEFORE mass-closing: the BLK probe has no inherited
+     * rootfs fd, so it may close everything >= FD_LOW_WATERMARK (5); launch
+     * mode must preserve the pinned rootfs fd 5 that the launch spec
+     * references as /dev/fd/5, so its watermark is 6. */
+    const int isBlkProbe = (argc >= 2 && strcmp(argv[1], "--has-blk") == 0);
+    mass_close_fds(isBlkProbe ? FD_LOW_WATERMARK : FD_LOW_WATERMARK_LAUNCH);
 
     /* Early-return subcommand: probe whether the linked libkrun was built
      * with block-device (BLK) support. The engine uses this to fail-closed
      * when KRUN_FEATURE_BLK is unavailable. This path MUST NOT parse argv[1]
      * as a launch spec. */
-    if (argc >= 2 && strcmp(argv[1], "--has-blk") == 0) {
+    if (isBlkProbe) {
         return krun_has_feature(KRUN_FEATURE_BLK) ? 0 : 1;
     }
 

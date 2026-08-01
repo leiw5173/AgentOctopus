@@ -114,16 +114,28 @@ later phases never trust an on-disk path again:
 - **Private verified copies:** `probe()` copies the helper, libkrun,
   libkrunfw, and image-builder into an engine-private 0700 directory, hashing
   the bytes *as they are read for the copy* from a single `O_NOFOLLOW` file
-  descriptor — the copy's digest must equal the verified manifest entry. Only
-  those copies are ever executed or loaded (`start()` execs the private
-  helper with the dynamic-loader path pointed at the private directory), so a
-  post-probe swap of the original files is irrelevant.
+  descriptor — the copy's digest must equal the verified manifest entry. This
+  happens **before** the BLK capability probe, which executes the private
+  helper copy with the loader path pointed at the private directory (the
+  original path is never executed — a realpath→exec swap cannot smuggle in
+  unverified code). On Linux the versioned SONAME shims
+  (`libkrun.so.1 → libkrun.so`, `libkrunfw.so.5 → libkrunfw.so`) are
+  recreated inside the private directory pointing at the verified copies, so
+  the helper's versioned `DT_NEEDED` entries resolve to the verified
+  libraries rather than missing — or falling back to unverified system
+  copies. Any probe failure after the copies are made discards the private
+  directory. Only those copies are ever executed or loaded (`start()` execs
+  the private helper with the dynamic-loader path pointed at the private
+  directory), so a post-probe swap of the original files is irrelevant.
 - **Pinned rootfs fd:** `resolveRootfs()` opens the rootfs image
   `O_RDONLY|O_NOFOLLOW`, hashes from that open descriptor, and keeps it
   pinned. `start()` inherits the descriptor into the helper at fd 5 and the
   launch spec references `/dev/fd/5` — the attached image is the verified
-  inode even if the path is replaced after resolution. `engine.close()`
-  (invoked by backend cleanup) releases the fd and the private directory.
+  inode even if the path is replaced after resolution. The helper's launch
+  mode preserves fd 5 across its startup mass-close (watermark 6; the
+  `--has-blk` probe mode still closes everything ≥ 5) and `fcntl`-checks the
+  fd before `krun_add_disk`. `engine.close()` (invoked by backend cleanup)
+  releases the fd and the private directory.
 - A helper, library, builder, or rootfs swapped after `probe()` is
   **neutralized** — the verified copy or pinned inode is what runs
   (regression-tested); a rootfs swapped *before* resolution still fails
