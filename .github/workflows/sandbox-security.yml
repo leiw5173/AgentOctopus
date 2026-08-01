@@ -213,12 +213,22 @@ jobs:
             test -f "$base/$arch/rootfs/$ref" || { echo "ERROR: missing runtime placement $base/$arch/rootfs/$ref" >&2; exit 1; }
             echo "VM rootfs present for $arch (ref $ref)"
           done
+      # upload-artifact rejects any file whose name contains a colon (NTFS-
+      # agnostic rule), and the runtime placement rootfs/sha256:<hex> carries a
+      # literal colon (engine.resolveRootfs joins rootfsDir + the ref verbatim).
+      # Pack the TCB into ONE tar so the colon lives inside the archive and the
+      # uploaded file is colon-free; every download site untars to restore the
+      # exact on-disk layout.
+      - name: Tar the linux-x64 VM TCB for colon-safe upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -cf vm-tcb-linux-x64.tar \
+            -C packages/sandbox-vm-native/prebuilds linux-x64 linux-arm64
       - uses: actions/upload-artifact@v4
         with:
           name: vm-tcb-linux-x64
-          path: |
-            packages/sandbox-vm-native/prebuilds/linux-x64/
-            packages/sandbox-vm-native/prebuilds/linux-arm64/
+          path: vm-tcb-linux-x64.tar
           if-no-files-found: error
           retention-days: 7
 
@@ -316,7 +326,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: vm-tcb-linux-x64
-          path: packages/sandbox-vm-native/prebuilds
+          path: /tmp/vm-tcb-linux-x64-dl
+      - name: Untar linux-x64 VM TCB into prebuilds
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf /tmp/vm-tcb-linux-x64-dl/vm-tcb-linux-x64.tar \
+            -C packages/sandbox-vm-native/prebuilds
       - name: Qualify linux-x64 VM TCB (G1/G2 under KVM, fail closed)
         run: pnpm --filter @agentoctopus/sandbox-vm-native security:probe-vm
       - name: Sign linux-x64 release manifest (fail closed)
@@ -329,11 +345,19 @@ jobs:
           pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/sign-release-manifest.mjs
         env:
           OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
+      # Same colon-safe transport as the producer: linux-x64/rootfs/sha256:<hex>
+      # would otherwise fail the upload.
+      - name: Tar the qualified linux-x64 VM TCB for colon-safe upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -cf vm-tcb-linux-x64-qualified.tar \
+            -C packages/sandbox-vm-native/prebuilds linux-x64
       - name: Upload qualified linux-x64 VM TCB
         uses: actions/upload-artifact@v4
         with:
           name: vm-tcb-linux-x64-qualified
-          path: packages/sandbox-vm-native/prebuilds/linux-x64/
+          path: vm-tcb-linux-x64-qualified.tar
           if-no-files-found: error
           retention-days: 7
       - name: Clean stale privileged state after the lane
@@ -413,7 +437,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: vm-tcb-linux-x64
-          path: packages/sandbox-vm-native/prebuilds
+          path: /tmp/vm-tcb-linux-x64-dl
+      - name: Untar VM TCB into prebuilds
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf /tmp/vm-tcb-linux-x64-dl/vm-tcb-linux-x64.tar \
+            -C packages/sandbox-vm-native/prebuilds
       - name: Place the linux-arm64 rootfs under the darwin-arm64 prebuilds dir
         shell: bash
         run: |

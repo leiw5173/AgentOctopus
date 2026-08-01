@@ -105,15 +105,13 @@ jobs:
       # lanes in THIS run (vm-lane: darwin-arm64; privileged-linux: linux-x64).
       # Any missing artifact fails the pack job before anything is published.
       #
-      # Layout note (F4): both qualified artifacts were uploaded from a SINGLE
-      # platform directory, so upload-artifact stored the directory CONTENTS
-      # with that directory as the artifact root (the platform prefix is NOT
-      # preserved). Each must therefore be downloaded into its OWN platform
-      # directory to restore prebuilds/<platform>/... — a shared download path
-      # would scatter files at prebuilds/* and break both the TCB enforcement
-      # step and the packed tarball layout. (The producer's vm-tcb-linux-x64
-      # artifact uses two input paths, so its least-common ancestor preserves
-      # structure and it downloads correctly into the shared prebuilds/.)
+      # Layout note (F4): the darwin-arm64 qualified artifact was uploaded from a
+      # SINGLE platform directory, so upload-artifact stored the directory
+      # CONTENTS with that directory as the artifact root (the platform prefix is
+      # NOT preserved) — it must download into its OWN platform directory to
+      # restore prebuilds/darwin-arm64/... The linux-x64 qualified artifact is
+      # tarred (colon-safe transport for rootfs/sha256:<hex>); the untar step
+      # below restores prebuilds/linux-x64/... into the shared prebuilds/ tree.
       - name: Download qualified darwin-arm64 VM TCB (vm-lane)
         uses: actions/download-artifact@v4
         with:
@@ -123,7 +121,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: vm-tcb-linux-x64-qualified
-          path: packages/sandbox-vm-native/prebuilds/linux-x64
+          path: /tmp/vm-tcb-linux-x64-qualified-dl
+      # The qualified artifact is tarred (colon-safe transport for
+      # linux-x64/rootfs/sha256:<hex>); untar into the linux-x64 platform dir.
+      - name: Untar qualified linux-x64 VM TCB into prebuilds
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf /tmp/vm-tcb-linux-x64-qualified-dl/vm-tcb-linux-x64-qualified.tar \
+            -C packages/sandbox-vm-native/prebuilds
       - name: Enforce complete signed VM TCB in both platform prebuilds (fail closed)
         shell: bash
         run: |
