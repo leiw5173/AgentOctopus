@@ -524,6 +524,32 @@ jobs:
             exit 1
           fi
           rmdir "$bindprobe" 2>/dev/null || true
+          # DIAGNOSTIC (this run): the disk-backed TMPDIR fixed the bind +
+          # ENOSPC failures, but the helper now dies LATER at
+          #   mknod <root>/dev/null: Operation not permitted
+          # — AFTER it successfully mounts a private tmpfs on <root>/dev with
+          # MS_NOSUID (no MS_NODEV). On a fresh tmpfs inside a userns, mknod
+          # EPERM is NOT a mount-option nodev issue; the two candidate
+          # mechanisms are (a) a DEVICE CGROUP denying mknod, or (b) a
+          # kernel/AppArmor userns-mknod restriction. Replicate the helper's
+          # EXACT /dev sequence (mount tmpfs nosuid + mknod null/zero/random)
+          # inside unshare -Umr at the disk path, and dump the device-cgroup
+          # state, to isolate which. Diagnostic only; never fails the step.
+          devprobe="${TMPDIR}/.oct-dev-probe"
+          mkdir -p "$devprobe"
+          echo "=== device-cgroup state (best-effort) ==="
+          cat /sys/fs/cgroup/devices/devices.allow 2>/dev/null || echo "  (no v1 devices.allow)"
+          cat /sys/fs/cgroup/devices.list 2>/dev/null || echo "  (no v2 devices.list)"
+          echo "=== replicate helper /dev sequence: mount tmpfs(nosuid) + mknod ==="
+          unshare -Umr sh -c "
+            set -x
+            mount -t tmpfs -o nosuid,size=1m tmpfs '$devprobe' &&
+            mknod '$devprobe/null' c 1 3 &&
+            mknod '$devprobe/zero' c 1 5 &&
+            mknod '$devprobe/random' c 1 8 &&
+            echo 'DEVSEQ mknod-in-userns-tmpfs OK'
+          " 2>/tmp/oct-deverr && echo "DEVSEQ OK" || echo "DEVSEQ FAIL -> $(cat /tmp/oct-deverr)"
+          umount "$devprobe" 2>/dev/null || true; rmdir "$devprobe" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
