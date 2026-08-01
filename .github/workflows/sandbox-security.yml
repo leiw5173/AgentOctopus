@@ -524,6 +524,29 @@ jobs:
             exit 1
           fi
           rmdir "$bindprobe" 2>/dev/null || true
+          # DIAGNOSTIC (this run): the mknod→bind fix cleared /dev setup; the
+          # helper now dies LATER at phase-3 require_mount_ro("/") — "mount / is
+          # not read-only — refusing to exec". The self-bind + ro-remount
+          # (MS_BIND|MS_REMOUNT|MS_RDONLY, the 0x1021 that no longer EPERMs)
+          # SUCCEEDS, but the read-only flag apparently isn't visible on the root
+          # mount's mountinfo super-opts afterward. Replicate the helper's EXACT
+          # self-bind sequence inside unshare -Umr and dump the resulting
+          # mountinfo entry + findmnt for the root, to see whether `ro` lands.
+          # Diagnostic only; never fails the step.
+          roprobe="${TMPDIR}/.oct-ro-probe"
+          mkdir -p "$roprobe"
+          echo "=== replicate helper rootfs self-bind + ro-remount; dump mountinfo ==="
+          unshare -Umr sh -c "
+            set -x
+            mount --make-rprivate /
+            mount -o bind '$roprobe' '$roprobe'
+            mount -o remount,ro,bind '$roprobe' '$roprobe'
+            echo '--- findmnt for the remounted root ---'
+            findmnt '$roprobe' -o TARGET,SOURCE,FSTYPE,OPTIONS
+            echo '--- mountinfo line(s) for the path ---'
+            grep ' $roprobe ' /proc/self/mountinfo || echo '(no mountinfo entry)'
+          " 2>&1 || echo "ROPROBE FAIL"
+          umount "$roprobe" 2>/dev/null || true; rmdir "$roprobe" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
