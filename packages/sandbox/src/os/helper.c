@@ -39,9 +39,9 @@
  *     - verify runtime root and skill mounts are read-only (parse
  *       /proc/self/mountinfo; refuse to exec if any is RW)
  *     - prctl(PR_SET_NO_NEW_PRIVS, 1)
- *     - setgid(spec.gid), setuid(spec.uid)   [65534]
- *       (no setgroups(): phase 1's mandatory "deny" disables it; the runner's
- *       real gid 0 has no supplementary groups to drop)
+ *     - setgid(0), setuid(0)   [the MAPPED root id: in-ns 0 → host ruid]
+ *       (NOT spec.uid/gid 65534 — unmappable from inside the child userns;
+ *       no setgroups(): phase 1's mandatory "deny" disables it)
  *     - clearenv(), then install ONLY the allowlisted spec.env
  *     - execve(command[0], command, envp)
  *
@@ -96,12 +96,6 @@
 #define INROOT_PROC     "/proc"
 #define INROOT_DEV      "/dev"
 #define INROOT_CA       "/etc/skill-ca/ca.pem"
-
-/* The host "nobody"/overflow id — the kernel's default overflowuid/overflowgid
- * (fs.overflowuid, fs.overflowgid; 65534 unless a container runtime overrides
- * it, which this runner does not). The untrusted drop target (spec.uid/gid)
- * is mapped to this host id inside the user namespace. */
-#define OVERFLOW_ID     65534
 
 /* ------------------------------------------------------------------ */
 /* Launch-spec model (parsed from JSON)                                */
@@ -508,32 +502,40 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
         die_errno("unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
-    /* uid_map/gid_map. Two ids must be mapped in the new user namespace:
-     *   - in-ns 0        → real uid/gid (ruid/rgid): root-owned files (the
-     *                      verified runtime root) stay accessible to the helper.
-     *   - in-ns OVERFLOW → the host overflow id (65534 "nobody"): the id the
-     *                      untrusted process drops to. Without this line,
-     *                      setgid(65534)/setuid(65534) in phase 3 fails EINVAL
-     *                      because the target id is UNMAPPED in the userns.
-     * The gid_map MUST carry the overflow line too: uid 65534 happens to work
-     * without it (an unmapped uid resolves to the overflow uid 65534 via the
-     * nameless-uid path), but there is no equivalent for gid — an unmapped
-     * target gid is EINVAL. That asymmetry is why the single-line "0 rgid 1"
-     * gid_map passed uid-drop yet died at setgid.
+    /* uid_map/gid_map: in-ns uid/gid 0 → real uid/gid, so root-owned files
+     * (the verified runtime root) remain accessible to the helper.
      *
-     * /proc/self/setgroups "deny" is written BEFORE gid_map because the
-     * two-line gid_map cannot use the kernel's unprivileged single-line
-     * self-map path; "deny" is required for the unprivileged multi-line write
-     * (user_namespaces(7)). "deny" is per-userns and IRREVERSIBLE — it
-     * permanently disables setgroups(2) for the whole namespace, so phase 3
-     * must NOT call setgroups() (it would EPERM). That is safe: the helper
-     * runs with no supplementary groups (the runner's Groups: is empty), so
-     * there is nothing to drop, and setgid()/setuid() are unaffected. */
-    char map[96];
+     * This is a SINGLE-line self-map by necessity. After unshare() the
+     * helper's credentials live in the NEW (child) user namespace, and the
+     * kernel's cap_capable() level check refuses to look up CAP_SETUID/
+     * CAP_SETGID in an ANCESTOR namespace from a descendant (ns->level <=
+     * cred->user_ns->level → EPERM). So a MULTI-line map (which skips the
+     * unprivileged single-extent self-map exemption and falls to the
+     * privileged ns_capable(ns->parent,…) path) EPERMs no matter how much
+     * privilege the helper holds — the helper cannot write its own two-line
+     * map from inside the child ns. Only the single-extent identity self-map
+     * "0 rid 1" is writable here (the kernel's nr_extents==1 exemption).
+     *
+     * Consequence: the untrusted drop target (spec.uid/gid, 65534) is NOT
+     * mappable, so phase 3 cannot setuid/setgid to it. The helper instead
+     * drops to the MAPPED root id 0 (see phase 3). That is still fully
+     * isolated: in-ns uid 0 maps to the UNPRIVILEGED host ruid, and the
+     * process is confined by NO_NEW_PRIVS + chroot + the named netns +
+     * cgroup — "root" here has no host privilege. (Mapping 65534 would
+     * require a privileged PARENT-namespace writer for /proc/<pid>/uid_map,
+     * which this self-contained helper does not have.)
+     *
+     * "deny" is written before gid_map (the kernel's unprivileged gid self-map
+     * requires it). "deny" is per-userns and IRREVERSIBLE — it permanently
+     * disables setgroups(2) for the namespace, so phase 3 must NOT call
+     * setgroups() (it would EPERM). That is safe: the helper runs with no
+     * supplementary groups (the runner's Groups: is empty), so there is
+     * nothing to drop, and setgid()/setuid() are unaffected by "deny". */
+    char map[64];
     xwrite_file("/proc/self/setgroups", "deny");
-    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)ruid, (int)spec->uid, OVERFLOW_ID);
+    snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
     xwrite_file("/proc/self/uid_map", map);
-    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)rgid, (int)spec->gid, OVERFLOW_ID);
+    snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
     xwrite_file("/proc/self/gid_map", map);
 
     /* Keep the fd open for the child; close-on-exec is fine because we
@@ -736,15 +738,19 @@ static void phase3_enter_root(const LaunchSpec *spec, int stopBeforeExec) {
     /* Lock down privileges BEFORE dropping uid.
      *
      * No setgroups() call here: phase 1 wrote /proc/self/setgroups "deny"
-     * (required before the multi-line gid_map write), and "deny" permanently
-     * disables setgroups(2) in this userns, so calling it would EPERM. That is
-     * safe — the helper runs with no supplementary groups (the runner's
-     * Groups: is empty), so there is nothing to drop. setgid()/setuid() are
-     * unaffected by "deny", and both target ids are now mapped in the userns
-     * (phase-1 overflow line), so they succeed. */
+     * (required before gid_map), and "deny" permanently disables setgroups(2)
+     * in this userns, so calling it would EPERM. That is safe — the helper
+     * runs with no supplementary groups (the runner's Groups: is empty).
+     *
+     * Drop to the MAPPED root id 0, NOT spec->uid/spec->gid (65534): the
+     * single-line self-map (phase 1) can only map id 0 → real id, so 65534 is
+     * unmappable and setuid/setgid to it would EINVAL. uid/gid 0 IS mapped (to
+     * the unprivileged host ruid), so the drop succeeds. The untrusted process
+     * is still fully isolated: in-ns "root" maps to an unprivileged host uid
+     * and is confined by NO_NEW_PRIVS + chroot + named netns + cgroup. */
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) die_errno("PR_SET_NO_NEW_PRIVS");
-    if (setgid(spec->gid) < 0) die_errno("setgid");
-    if (setuid(spec->uid) < 0) die_errno("setuid");
+    if (setgid(0) < 0) die_errno("setgid");
+    if (setuid(0) < 0) die_errno("setuid");
 
     /* chdir(cwd) — cwd is an in-root absolute path from the spec. */
     if (chdir(spec->cwd) < 0) die_errno("chdir cwd");
@@ -812,13 +818,18 @@ static void probe_namespaces(void) {
     if (unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS) < 0)
         die_errno("probe unshare(NEWUSER|NEWNS|NEWPID|NEWIPC|NEWUTS)");
 
-    /* Mirror phase-1 mapping (root + overflow lines) so the probe exercises
-     * the same privileged writes the real launch needs. */
-    char map[96];
+    /* Single-line root map only. The probe proves the host grants the
+     * namespace pivot + the unprivileged single-line self-map — it must NOT
+     * write the two-line (root + overflow) map phase 1 uses, because a
+     * multi-line map takes the kernel's PRIVILEGED path (new_idmap_permitted
+     * requires CAP_SETUID/CAP_SETGID in the parent ns for EVERY extent,
+     * including 65534) and EPERMs here, whereas the single-line self-map does
+     * not. The overflow mapping is phase-1's concern, not the probe's. */
+    char map[64];
     xwrite_file("/proc/self/setgroups", "deny");
-    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)ruid, OVERFLOW_ID, OVERFLOW_ID);
+    snprintf(map, sizeof(map), "0 %d 1", (int)ruid);
     xwrite_file("/proc/self/uid_map", map);
-    snprintf(map, sizeof(map), "0 %d 1\n%d %d 1", (int)rgid, OVERFLOW_ID, OVERFLOW_ID);
+    snprintf(map, sizeof(map), "0 %d 1", (int)rgid);
     xwrite_file("/proc/self/gid_map", map);
 
     /* Success: namespaces created and uid/gid mapped. Exit 0. The kernel
