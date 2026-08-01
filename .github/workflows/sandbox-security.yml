@@ -375,6 +375,35 @@ jobs:
           ps -eo comm= 2>/dev/null | sort | uniq -c | sort -rn | head -15 || echo "  (ps unavailable)"
           echo "--- longest-lived processes (possible leaks) ---"
           ps -eo pid,ppid,etime,comm,args --sort=-etime 2>/dev/null | head -12 || true
+
+          # --- FIX: lift the overcommit heuristic so fork() stops failing -----
+          # Root cause (measured above): this runner has ~930MB RAM with
+          # Committed_AS ~5.9GB vs CommitLimit ~2.6GB — chronically 2.3x
+          # overcommitted by the .NET actions-runner + dockerd/containerd VSZ.
+          # With vm.overcommit_memory=0 (heuristic), the kernel REFUSES fork()
+          # once committed memory is far over the limit, so checkout's git/tar
+          # child fork dies EAGAIN ("Cannot fork: Resource temporarily
+          # unavailable") even though PIDs and RSS headroom exist. There is
+          # ~1.1GB FREE swap to back real allocations, so permitting overcommit
+          # is safe here. The lane runs as root (self-hosted privileged
+          # runner), so set overcommit_memory=1 (always) for the job. This is
+          # the minimal lever that lets fork proceed; the real long-term fix is
+          # a larger runner. Root-gated + best-effort: a non-root run logs and
+          # continues (the mount rescue above already did its job).
+          if [ "$(id -u 2>/dev/null)" = "0" ]; then
+            cur_oc=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo '?')
+            if [ "$cur_oc" != "1" ]; then
+              if sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1; then
+                echo "set vm.overcommit_memory: $cur_oc -> 1 (fork EAGAIN workaround for overcommitted 930MB runner)"
+              else
+                echo "WARN: could not set vm.overcommit_memory=1 (sysctl denied); checkout may still EAGAIN"
+              fi
+            else
+              echo "vm.overcommit_memory already 1"
+            fi
+          else
+            echo "not root (uid=$(id -u 2>/dev/null)); cannot adjust vm.overcommit_memory"
+          fi
           exit 0
       - uses: actions/checkout@v7
       - name: Diagnose disk layout + stage TMPDIR
