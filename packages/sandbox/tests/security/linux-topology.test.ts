@@ -26,7 +26,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createServer, type Socket } from 'node:net';
+import { connect, createServer, type Socket } from 'node:net';
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
   linuxLaneAvailability,
@@ -72,6 +72,36 @@ async function runArgv(argv: string[], timeoutMs = 15_000): Promise<ExecOut> {
       code: typeof e.code === 'number' ? e.code : -1,
     };
   }
+}
+
+/**
+ * Raw-socket absolute-form HTTP request through a proxy, using the SAME
+ * semantics as /skill/http-probe.js (waits for the socket 'close'; reports a
+ * 4-equivalent on the timeout ceiling). Runs HOST-SIDE (this test process is in
+ * the host netns) to isolate the proxy+upstream behavior from the skill-netns
+ * traversal: if this returns 0 while the in-sandbox probe does not, the break
+ * is the netns path, not the proxy.
+ */
+function rawHttpViaProxy(proxyAddr: string, targetUrl: string, timeoutMs = 8000): Promise<{ exitCode: number; body: string; head: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const proxy = new URL(proxyAddr);
+    const target = new URL(targetUrl);
+    const sock = connect({ host: proxy.hostname, port: Number(proxy.port) }, () => {
+      sock.write(`GET ${target.toString()} HTTP/1.1\r\nHost: ${target.host}\r\nConnection: close\r\n\r\n`);
+    });
+    let buf = '';
+    sock.on('data', (c) => { buf += c.toString('utf8'); });
+    sock.on('error', (e) => resolve({ exitCode: 2, body: buf, head: '', stderr: 'sock-error:' + (e as NodeJS.ErrnoException).code }));
+    sock.on('close', () => {
+      const sep = buf.indexOf('\r\n\r\n');
+      const head = sep === -1 ? buf : buf.slice(0, sep);
+      const body = sep === -1 ? '' : buf.slice(sep + 4);
+      const m = /^HTTP\/1\.1 (\d+)/.exec(head);
+      const status = m ? Number(m[1]) : 0;
+      resolve({ exitCode: status >= 200 && status < 300 ? 0 : 3, body, head, stderr: '' });
+    });
+    setTimeout(() => { sock.destroy(); resolve({ exitCode: 4, body: buf, head: '', stderr: 'timeout' }); }, timeoutMs).unref();
+  });
 }
 
 /** Read the first PID from a skill cgroup's cgroup.procs (the attached helper/skill). */
@@ -208,11 +238,13 @@ describe('Linux lane — netns topology', () => {
     // available on the runner's Node — so we destroy them explicitly
     // (version-independent) instead of letting close() hang the test.
     const upstreamSockets = new Set<Socket>();
+    let upstreamHits = 0;
     let upstreamUrl = '';
     const t = await startTopologySandbox({
       request: { hosts: ['127.0.0.1'], credentials: ['LANE_UPSTREAM'] },
       afterTopology: async () => {
         upstream = createServer((sock) => {
+          upstreamHits++;
           sock.end('HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok');
         });
         upstream.on('connection', (sock) => {
@@ -250,6 +282,20 @@ describe('Linux lane — netns topology', () => {
         command: [LANE_NODE, '/skill/http-probe.js', t.sandbox.proxy.reachableAddr, upstreamUrl],
         timeoutMs: 30_000,
       });
+      // DIAGNOSTIC (temporary): isolate where the round-trip breaks.
+      // (a) what the in-sandbox http-probe saw + whether the proxy forwarded to
+      //     the host-side upstream at all (upstreamHits).
+      // eslint-disable-next-line no-console
+      console.error('[diag] in-sandbox: exitCode=%s timedOut=%s stdout=%j stderr=%j upstreamHits=%d',
+        result.exitCode, result.timedOut, result.stdout, result.stderr, upstreamHits);
+      // (b) the SAME absolute-form request issued HOST-SIDE (this test process
+      //     is in the host netns) through the very same proxy listener. exit 0
+      //     here but not above ⇒ proxy+upstream are fine, the break is the
+      //     skill-netns traversal; non-zero both ⇒ proxy/upstream problem.
+      const hostSide = await rawHttpViaProxy(t.sandbox.proxy.reachableAddr, upstreamUrl);
+      // eslint-disable-next-line no-console
+      console.error('[diag] host-side: exitCode=%d body=%j head=%j stderr=%j upstreamHits=%d',
+        hostSide.exitCode, hostSide.body, hostSide.head, hostSide.stderr, upstreamHits);
       // http-probe exits 0 only on a 2xx from the upstream and prints the body.
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain('ok');
