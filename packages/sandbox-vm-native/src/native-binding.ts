@@ -261,6 +261,12 @@ function fdToWritable(fd: number): Writable {
   return createWriteStream('', { fd, autoClose: false });
 }
 
+// Exported for the VM gate script (run-vm-gates.mjs), which spawns the helper
+// directly via deps.spawn and must wrap its retained control fds (g2hRead /
+// h2gWrite) into streams to read the guest console — the same plumbing the
+// engine performs internally. NOT part of the leaf public surface (index.ts).
+export { fdToReadable, fdToWritable };
+
 function pollWaitpid(
   libc: LoadedLibc,
   pid: number,

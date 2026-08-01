@@ -56,6 +56,49 @@ import { readArtifactRefsFromTcbManifest, TCB_MANIFEST_NAME } from './tcb-manife
 
 const execFileAsync = promisify(execFile);
 
+// Control + rootfs fd slots the helper expects (must match vm-helper.c
+// H2G_READ_FD / G2H_WRITE_FD / ROOTFS_INHERIT_FD and engine.ts). The gate
+// spawns the helper directly (not through the engine), so it must wire these
+// itself — see bootVmAndCaptureStdout.
+const H2G_READ_FD = 3;
+const G2H_WRITE_FD = 4;
+const ROOTFS_INHERIT_FD = 5;
+const DUPFD_MIN = 10;
+
+// Lazily-loaded native-binding FD helpers (createNativeDeps / fdToReadable /
+// fdToWritable) from the built dist. Loaded on first use so the module-level
+// import graph of this script stays free of the dist-build requirement (the
+// gates already fail closed later if dist is missing, via buildHelperArgv).
+let nativeFd;
+async function loadNativeFd() {
+  if (nativeFd) return nativeFd;
+  const bindingPath = path.join(PKG_ROOT, 'dist', 'native-binding.js');
+  if (!existsSync(bindingPath)) {
+    die(`native-binding not found at ${bindingPath}\n` +
+      '  Run `pnpm --filter @agentoctopus/sandbox-vm-native build` first.');
+  }
+  const mod = await import(bindingPath);
+  if (typeof mod.createNativeDeps !== 'function' ||
+      typeof mod.fdToReadable !== 'function' ||
+      typeof mod.fdToWritable !== 'function') {
+    die('native-binding.js did not export createNativeDeps/fdToReadable/fdToWritable.');
+  }
+  nativeFd = mod;
+  return nativeFd;
+}
+
+/** Open the verified rootfs image read-only (no symlink follow), for fd 5. */
+async function openRootfsReadOnly(rootfsImg) {
+  const handle = await fs.open(rootfsImg, 'r');
+  return handle.fd;
+}
+
+/** Close a raw fd, ignoring already-closed errors. */
+async function closeFd(fd) {
+  if (typeof fd !== 'number' || fd < 0) return;
+  try { await fs.close(fd); } catch { /* already closed */ }
+}
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(HERE, '..');
 const PREBUILDS_DIR = path.join(PKG_ROOT, 'prebuilds');
@@ -277,18 +320,67 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
   const vsockServer = net.createServer();
   let serverReady = false;
 
-  try {
-    await new Promise((resolve, reject) => {
-      vsockServer.once('error', reject);
-      vsockServer.listen(vsockHostSocket, () => {
-        vsockServer.removeListener('error', reject);
-        serverReady = true;
-        resolve();
-      });
+  await new Promise((resolve, reject) => {
+    vsockServer.once('error', reject);
+    vsockServer.listen(vsockHostSocket, () => {
+      vsockServer.removeListener('error', reject);
+      serverReady = true;
+      resolve();
     });
+  });
 
+  // --- Control + rootfs fd plumbing (mirrors engine.ts start(), R9/R10). ---
+  // The helper REQUIRES three inherited fds and silently no-ops without them:
+  //   fd 3 (H2G_READ_FD)      — host→guest control read end
+  //   fd 4 (G2H_WRITE_FD)     — guest→host console write end (the guest probe's
+  //                             console.log('G1-DONE') is relayed HERE, not to
+  //                             the helper's own stdout)
+  //   fd 5 (ROOTFS_INHERIT_FD)— the verified rootfs image, referenced in the
+  //                             spec as /dev/fd/5
+  // A plain execFile leaves 3/4/5 as inherited handles (typically /dev/null),
+  // so the helper boots, writes the guest console to nowhere, opens the WRONG
+  // rootfs inode, and exits 0 with empty captured stdout — the exact NO-GO
+  // "helper early-exit, no output" the lane hit. Spawn via deps.spawn with the
+  // same file_actions the engine installs, and read the guest output from fd 4.
+  const { createNativeDeps, fdToReadable, fdToWritable } = await loadNativeFd();
+  const deps = createNativeDeps();
+  const [h2gRead, h2gWrite] = await deps.pipe(); // host→guest
+  const [g2hRead, g2hWrite] = await deps.pipe(); // guest→host (fd 4 in helper)
+  const rootfsFd = await openRootfsReadOnly(rootfsImg);
+
+  let raw;
+  try {
+    // Move the ends the helper owns to cloexec temp slots >=10 so the adddup2
+    // into 3/4/5 is a REAL dup2 (clears FD_CLOEXEC on the target), never a
+    // no-op that would leave the cloexec bit set and drop the fd across exec.
+    const tempH2gRead = await deps.dupFdCloexec(h2gRead, DUPFD_MIN);
+    const tempG2hWrite = await deps.dupFdCloexec(g2hWrite, DUPFD_MIN);
+    const tempRootfs = await deps.dupFdCloexec(rootfsFd, DUPFD_MIN);
+
+    const fileActions = [
+      { kind: 'adddup2', src: tempH2gRead, target: H2G_READ_FD },
+      { kind: 'adddup2', src: tempG2hWrite, target: G2H_WRITE_FD },
+      { kind: 'adddup2', src: tempRootfs, target: ROOTFS_INHERIT_FD },
+    ];
+    // Darwin closes every other inherited fd across exec; Linux relies on the
+    // per-end cloexec bits plus the dup2'd 3/4/5 surviving.
+    const spawnAttrFlags = process.platform === 'darwin' ? ['POSIX_SPAWN_CLOEXEC_DEFAULT'] : [];
+    // After spawn the parent closes ITS copies of the ends the helper now owns
+    // (h2gRead→3, g2hWrite→4, rootfs→5) plus the temp slots. The parent RETAINS
+    // g2hRead (reads guest console), h2gWrite (control), and its own rootfsFd.
+    const parentCloseFds = [h2gRead, g2hWrite, tempH2gRead, tempG2hWrite, tempRootfs];
+
+    // Minimal env so the helper can find vendored libkrun/libkrunfw. The
+    // vendored dylibs carry bare/@rpath install names; *_LIBRARY_PATH is
+    // consulted before rpath resolution, pointing the loader at targetDir.
+    const env = { PATH: process.env.PATH ?? '' };
+    if (process.platform === 'darwin') {
+      env.DYLD_LIBRARY_PATH = targetDir;
+    } else {
+      env.LD_LIBRARY_PATH = targetDir;
+    }
     const argv = await buildHelperArgv(helperPath, {
-      rootfsImg,
+      rootfsImg: `/dev/fd/${ROOTFS_INHERIT_FD}`,
       skillBlockImg,
       caBlockImg,
       vsockPort,
@@ -298,54 +390,63 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
       launchSpecBlob,
     });
 
-    // Minimal env so the helper can find vendored libkrun/libkrunfw.
-    const env = { PATH: process.env.PATH ?? '' };
-    if (process.platform === 'darwin') {
-      env.DYLD_LIBRARY_PATH = targetDir;
-    } else {
-      env.LD_LIBRARY_PATH = targetDir;
-    }
+    raw = await deps.spawn(helperPath, argv, env, fileActions, spawnAttrFlags, parentCloseFds);
+  } catch (err) {
+    // Spawn (or fd setup) failed — close every parent fd and surface the error
+    // so the gate records a real boot failure, not a silent empty-output NO-GO.
+    await closeFd(rootfsFd);
+    await closeFd(h2gRead);
+    await closeFd(h2gWrite);
+    await closeFd(g2hRead);
+    await closeFd(g2hWrite);
+    if (serverReady) await new Promise((r) => vsockServer.close(r));
+    await fs.rm(vsockHostSocket, { force: true }).catch(() => {});
+    throw new Error(`helper spawn failed: ${err.message}`);
+  }
 
-    const child = execFile(helperPath, argv, {
-      env,
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    // Capture BOTH stdout and stderr. The helper writes every early-exit
-    // diagnostic to fd 2 via die() (e.g. "krun_set_root failed", dlopen/HVF
-    // errors) before _exit(127) — a NO-GO "helper early-exit" with only stdout
-    // captured hides that reason entirely. Append stderr so the gate NO-GO
-    // message carries the actual boot failure.
-    let stdout = '';
-    let stderr = '';
-    child.stdout?.on('data', (c) => { stdout += c.toString('utf8'); });
-    child.stderr?.on('data', (c) => { stderr += c.toString('utf8'); });
-    let exitInfo = 'exit: unknown';
-    try {
-      await child;
-      exitInfo = 'exit: 0';
-    } catch (err) {
-      // Non-zero exit is expected for probe scripts that encounter failures;
-      // treat the captured stdout as the result regardless.
-      if (err.stdout) stdout += err.stdout.toString('utf8');
-      if (err.stderr) stderr += err.stderr.toString('utf8');
-      // Record HOW the helper died. A helper that produces ZERO output died
-      // before main() — almost always a dyld load failure or a codesign /
-      // entitlement SIGKILL. err.code is the exit status (or the spawn errno),
-      // err.signal the killing signal; err.errno/err.syscall identify a spawn
-      // failure (e.g. ENOENT/EACCES) where the process never ran at all.
-      exitInfo = `exit: code=${err.code ?? 'n/a'} signal=${err.signal ?? 'none'} errno=${err.errno ?? 'n/a'} syscall=${err.syscall ?? 'n/a'}`;
-    }
-    const tail = [];
-    if (stderr.trim()) tail.push(`[helper stderr]\n${stderr.trim()}`);
-    if (!stdout.trim()) tail.push(`[helper produced no stdout — died before main()]\n[helper ${exitInfo}]`);
-    else tail.push(`[helper ${exitInfo}]`);
-    return `${stdout}\n${tail.join('\n')}`;
+  // Guest console = fd 4 (g2hRead); helper's own stdout/stderr = fd 1/2.
+  const controlRead = fdToReadable(g2hRead);
+  const h2gWriteStream = fdToWritable(h2gWrite);
+  let guestOut = '';
+  let helperStdout = '';
+  let helperStderr = '';
+  controlRead.on('data', (c) => { guestOut += c.toString('utf8'); });
+  raw.stdout?.on('data', (c) => { helperStdout += c.toString('utf8'); });
+  raw.stderr?.on('data', (c) => { helperStderr += c.toString('utf8'); });
+
+  let exitInfo = 'exit: unknown';
+  try {
+    const { exitCode } = await raw.exited;
+    exitInfo = `exit: ${exitCode}`;
+  } catch (err) {
+    exitInfo = `exit error: ${err.message}`;
   } finally {
-    if (serverReady) {
-      await new Promise((r) => vsockServer.close(r));
-    }
+    // Drain any trailing console bytes, then release the parent's retained fds.
+    await new Promise((r) => setTimeout(r, 50));
+    controlRead.destroy();
+    h2gWriteStream.destroy();
+    await closeFd(g2hRead);
+    await closeFd(h2gWrite);
+    await closeFd(rootfsFd);
+    await raw.close?.().catch(() => {});
+    if (serverReady) await new Promise((r) => vsockServer.close(r));
     await fs.rm(vsockHostSocket, { force: true }).catch(() => {});
   }
+
+  // The gate asserts on the GUEST console (fd 4). If that is empty the helper
+  // never relayed the probe — fall back to its own stdout/stderr + exit status
+  // so the NO-GO message shows WHY (die() writes early-exit reasons to fd 2).
+  const guest = guestOut.trim();
+  const tail = [];
+  if (helperStderr.trim()) tail.push(`[helper stderr]\n${helperStderr.trim()}`);
+  if (!guest) {
+    const fallback = helperStdout.trim();
+    if (fallback) tail.push(`[helper stdout]\n${fallback}`);
+    tail.push(`[guest console (fd 4) empty — no DONE marker relayed]\n[helper ${exitInfo}]`);
+  } else {
+    tail.push(`[helper ${exitInfo}]`);
+  }
+  return `${guestOut}\n${tail.join('\n')}`;
 }
 
 function cryptoRandomHex(bytes) {
