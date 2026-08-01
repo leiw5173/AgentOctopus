@@ -566,9 +566,26 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
 /* Phase 2 — still outside chroot                                      */
 /* ------------------------------------------------------------------ */
 
-static void make_device_node(const char *path, mode_t mode, unsigned major_, unsigned minor_) {
-    if (mknod(path, mode, makedev(major_, minor_)) < 0 && errno != EEXIST)
-        die("mknod %s: %s", path, strerror(errno));
+/* Bind a host device node (e.g. /dev/null) into the private /dev tmpfs.
+ *
+ * We deliberately do NOT mknod the node: the privileged-CI runner's kernel
+ * hardening denies mknod() inside an unprivileged user namespace outright
+ * (EPERM) even though the caller is root-in-userns with CAP_MKNOD, the target
+ * is a fresh tmpfs mounted WITHOUT MS_NODEV, and no device cgroup is attached
+ * (probed on the lane: `(no v1 devices.allow)`, `(no v2 devices.list)`, mknod
+ * still EPERMs). Bind-mounting the host's EXISTING node needs no CAP_MKNOD and
+ * is not subject to that restriction — this is the same technique bubblewrap
+ * uses (bind /dev/null etc. rather than recreating them).
+ *
+ * A bind mounts onto an existing path, so we first create an empty regular
+ * placeholder file, then bind the host device node over it. The mount is
+ * read-write and NOT nosuid/nodev — these ARE the devices the sandbox is meant
+ * to expose. The private /dev tmpfs superblock already carries nosuid. */
+static void bind_host_device(const char *hostPath, const char *destPath) {
+    int fd = open(destPath, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd < 0 && errno != EEXIST) die("create device placeholder %s: %s", destPath, strerror(errno));
+    if (fd >= 0 && close(fd) < 0) die_errno("close device placeholder");
+    xmount(hostPath, destPath, NULL, MS_BIND, NULL);
 }
 
 static void make_symlink(const char *target, const char *linkpath) {
@@ -595,13 +612,14 @@ static void phase2_tmpfs_and_devices(const LaunchSpec *spec) {
     xmount("tmpfs", devTarget, "tmpfs", MS_NOSUID, sizeArg);
     if (chmod(devTarget, 0755) < 0) die_errno("chmod dev");
 
-    /* Only the required device nodes. */
+    /* Only the required device nodes. Bind the host's existing nodes rather
+     * than mknod() — see bind_host_device() above. */
     char p[OCT_PATH_MAX_LEN];
-    snprintf(p, sizeof(p), "%s/null", devTarget);    make_device_node(p, S_IFCHR | 0666, 1, 3);
-    snprintf(p, sizeof(p), "%s/zero", devTarget);    make_device_node(p, S_IFCHR | 0666, 1, 5);
-    snprintf(p, sizeof(p), "%s/full", devTarget);    make_device_node(p, S_IFCHR | 0666, 1, 7);
-    snprintf(p, sizeof(p), "%s/random", devTarget);  make_device_node(p, S_IFCHR | 0666, 1, 8);
-    snprintf(p, sizeof(p), "%s/urandom", devTarget); make_device_node(p, S_IFCHR | 0666, 1, 9);
+    snprintf(p, sizeof(p), "%s/null", devTarget);    bind_host_device("/dev/null", p);
+    snprintf(p, sizeof(p), "%s/zero", devTarget);    bind_host_device("/dev/zero", p);
+    snprintf(p, sizeof(p), "%s/full", devTarget);    bind_host_device("/dev/full", p);
+    snprintf(p, sizeof(p), "%s/random", devTarget);  bind_host_device("/dev/random", p);
+    snprintf(p, sizeof(p), "%s/urandom", devTarget); bind_host_device("/dev/urandom", p);
 
     /* fd links: /dev/stdin,stdout,stderr → /proc/self/fd/{0,1,2}; /dev/fd
      * → /proc/self/fd. These point at the IN-ROOT /proc (mounted in phase 3). */
