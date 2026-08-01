@@ -145,10 +145,19 @@ const ENTITLEMENTS_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 
 async function codesignAdHoc(helperPath) {
   if (process.platform !== 'darwin') return;
+  // Availability probe: `codesign --version` is NOT a valid codesign flag —
+  // Apple's codesign rejects it with exit code 2 ("unrecognized option") even
+  // though the binary exists and is on PATH. So a non-zero exit here means the
+  // tool is PRESENT (it parsed and rejected the arg); only an ENOENT spawn
+  // failure means it is genuinely absent. Treat anything but ENOENT as available
+  // and let the real signing call below surface any actual codesign error.
   try {
     await execFileAsync('codesign', ['--version']);
-  } catch {
-    die("required tool 'codesign' is not on PATH on Darwin — install Xcode command line tools.");
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      die("required tool 'codesign' is not on PATH on Darwin — install Xcode command line tools.");
+    }
+    // present but rejected the probe flag (e.g. exit 2 on --version) — proceed.
   }
   const tmpEnt = path.join(
     os.tmpdir(),
