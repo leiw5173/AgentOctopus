@@ -3,7 +3,16 @@ name: Sandbox Security
 on:
   pull_request:
   push:
-    branches: [master, feat/sandbox]
+    # master only. PR branches (e.g. feat/sandbox) are covered by the
+    # pull_request trigger above. Listing a PR branch here makes every push
+    # fire BOTH events → two concurrent runs whose check runs collide in the PR
+    # rollup: the duplicate that gets cancelled (to free the single self-hosted
+    # runner) leaves CANCELLED/FAILURE check runs that mark the PR UNSTABLE even
+    # when the pull_request run is fully green. The concurrency group keys on
+    # github.ref, which differs between the push (refs/heads/<branch>) and
+    # pull_request (refs/pull/<n>/merge) events, so it does NOT dedupe them.
+    # Release invokes this workflow via workflow_call below, not the push trigger.
+    branches: [master]
   workflow_dispatch:
   workflow_call:
     outputs:
