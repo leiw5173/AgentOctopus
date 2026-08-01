@@ -126,6 +126,15 @@ describe('private TCB dir ELF loader (R6-F3)', () => {
       };
       vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
       vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+      // probe() readFile()s the gate manifest from DISK before passing the
+      // parsed body to the (mocked) schema — the mock only stubs parse/verify,
+      // not the filesystem read. Without the on-disk file the probe dies with
+      // ENOENT → available:false, gateManifest:'missing' (observed on the
+      // Linux CI lane). Write the body so the read succeeds.
+      await fsPromises.writeFile(
+        path.join(dir, 'gate-manifest.json'),
+        JSON.stringify(gateBody),
+      );
 
       const privateDirBase = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-elf-private-'));
       dirs.push(privateDirBase);
