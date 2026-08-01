@@ -665,6 +665,22 @@ jobs:
             install -m 0644 packages/sandbox/runtime/os-helper.manifest.json "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}/os-helper.manifest.json"
             echo "refreshed runner-managed cache at ${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}"
           fi
+          # DIAGNOSTIC (this run): the launched helper STILL behaves like the
+          # pre-fix code (0x1021 = MS_NOSUID on a remount that no longer carries
+          # it in src), even though this step rebuilds runtime/os-helper and the
+          # backend verifies that exact path before launch. Dump ground truth:
+          # every os-helper on disk, the env override the backend would honor,
+          # and whether the binary at the launch path contains the NEW source
+          # marker comment (only present in the rebuilt binary).
+          echo "=== os-helper ground truth (diagnostic) ==="
+          echo "env OCTOPUS_SANDBOX_OS_HELPER_BINARY=${OCTOPUS_SANDBOX_OS_HELPER_BINARY:-<unset>}"
+          echo "env OCTOPUS_SANDBOX_OS_HELPER_MANIFEST=${OCTOPUS_SANDBOX_OS_HELPER_MANIFEST:-<unset>}"
+          echo "workspace runtime/os-helper sha: $(sha256sum packages/sandbox/runtime/os-helper 2>/dev/null | cut -d' ' -f1)"
+          echo "manifest helperSha256: $(node -p "JSON.parse(require('fs').readFileSync('packages/sandbox/runtime/os-helper.manifest.json','utf8')).helperSha256" 2>/dev/null)"
+          echo "all os-helper files on disk:"
+          find / -name 'os-helper' -type f 2>/dev/null | while read -r f; do echo "  $(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)  $f"; done
+          echo "source-marker in launch binary (expect a match only in the REBUILT helper):"
+          strings packages/sandbox/runtime/os-helper 2>/dev/null | grep -c 'out-of-tree mount' || echo "0 (marker absent)"
       - name: Require real privileged Linux capability
         run: pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
       - name: Run privileged Linux lanes with zero skips
