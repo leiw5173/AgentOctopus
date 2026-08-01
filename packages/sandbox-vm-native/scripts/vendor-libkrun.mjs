@@ -243,8 +243,19 @@ async function buildLibkrunFromSource(workDir, targetDir, libName) {
 }
 
 // ---------------------------------------------------------------------------
-// libkrunfw: extract the prebuilt tarball (firmware blob). The tarball
-// contains libkrunfw.{so,dylib} at a known path; extract and copy.
+// libkrunfw: produce the firmware library for the lane. Two shapes:
+//   - linux-x64: the prebuilt tarball ships a ready lib64/libkrunfw.so.5.5.0
+//     (ELF) — extract and copy it.
+//   - darwin-arm64: NO prebuilt .dylib exists anywhere in the v5.5.0 line
+//     (all three assets — prebuilt-aarch64, aarch64, x86_64 — ship ELF .so or
+//     the kernel source). The prebuilt-aarch64 tarball instead ships the
+//     GENERATED kernel.c bundle (the aarch64 Linux kernel already compiled +
+//     serialized by bin2cbundle.py). We compile that bundle into
+//     libkrunfw.5.dylib natively — exactly libkrunfw's own Makefile final
+//     Darwin step (cc -fPIC -DABI_VERSION=5 -shared), then symlink
+//     libkrunfw.dylib -> libkrunfw.5.dylib (its `install` layout). This skips
+//     build_on_krunvm.sh (which would boot a nested VM to rebuild the kernel)
+//     because the bundle already contains the built kernel.
 // ---------------------------------------------------------------------------
 
 async function extractLibkrunfwPrebuilt(workDir, targetDir, tarballPin, libName) {
@@ -262,14 +273,18 @@ async function extractLibkrunfwPrebuilt(workDir, targetDir, tarballPin, libName)
     die(`libkrunfw tarball extract failed: ${err.stderr ?? err.message}`);
   }
 
-  // Find the .dylib/.so inside the extracted tree. The Linux prebuilt tarball
-  // ships the standard versioned layout (lib64/libkrunfw.so -> .so.5 ->
-  // .so.5.5.0): the only REGULAR file is the versioned `.so.5.5.0`, so an
+  // darwin: the tarball ships kernel.c (the pre-built aarch64 kernel bundle),
+  // NOT a dylib. Compile it into libkrunfw.5.dylib and symlink the base name.
+  if (process.platform === 'darwin') {
+    return await buildLibkrunfwDylibFromBundle(extractDir, targetDir);
+  }
+
+  // Linux: find the versioned .so inside the extracted tree. The prebuilt
+  // tarball ships the standard versioned layout (lib64/libkrunfw.so -> .so.5
+  // -> .so.5.5.0): the only REGULAR file is the versioned `.so.5.5.0`, so an
   // exact `-type f -name libkrunfw.so` matches nothing (the unversioned name
-  // is a symlink). The darwin prebuilt ships a plain libkrunfw.dylib regular
-  // file. Try the exact name first (darwin), then a versioned glob (linux).
-  // Trust is already established by downloadVerified()'s tarball SHA-256 check;
-  // this only locates the verified payload within the extracted tree.
+  // is a symlink). Trust is already established by downloadVerified()'s
+  // tarball SHA-256 check; this only locates the verified payload.
   let builtLib = null;
   for (const pattern of [libName, `${libName}*`]) {
     try {
@@ -287,6 +302,38 @@ async function extractLibkrunfwPrebuilt(workDir, targetDir, tarballPin, libName)
   await fs.copyFile(builtLib, destLib);
   await fs.chmod(destLib, 0o755);
   return destLib;
+}
+
+// Compile libkrunfw.5.dylib from the extracted kernel.c bundle on darwin.
+// Returns targetDir/libkrunfw.dylib (a symlink to libkrunfw.5.dylib) — the
+// ABI-versioned real file matches the SONAME the linker records and the
+// layout libkrunfw's `make install` produces. The real versioned file carries
+// the digest; the base-name symlink is the loader resolution name.
+async function buildLibkrunfwDylibFromBundle(extractDir, targetDir) {
+  const kernelC = path.join(extractDir, 'libkrunfw', 'kernel.c');
+  if (!existsSync(kernelC)) {
+    die(`libkrunfw darwin bundle missing ${kernelC} — the prebuilt-aarch64 tarball layout changed.`);
+  }
+  const ABI = '5'; // libkrunfw v5.5.0 ABI_VERSION (pinned with the tarball)
+  const versioned = path.join(targetDir, `libkrunfw.${ABI}.dylib`);
+  console.log('vendor-libkrun: no prebuilt darwin dylib exists — compiling kernel.c bundle into libkrunfw.5.dylib (native cc, the Makefile Darwin step)...');
+  try {
+    // Mirrors libkrunfw/Makefile $(KRUNFW_BINARY_Darwin): cc -fPIC
+    // -DABI_VERSION=$(ABI_VERSION) -shared -o libkrunfw.$(ABI).dylib kernel.c
+    // (SONAME_Darwin is empty, so no -install_name flag).
+    await execFileAsync('cc', ['-fPIC', `-DABI_VERSION=${ABI}`, '-shared', '-o', versioned, kernelC], {
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    die(`libkrunfw darwin dylib compile failed: ${err.stderr ?? err.message}\n` +
+      '  Ensure a C toolchain (clang/cc via Xcode CLT) is installed on the lane.');
+  }
+  await fs.chmod(versioned, 0o755);
+  // install layout: libkrunfw.dylib -> libkrunfw.5.dylib
+  const base = path.join(targetDir, 'libkrunfw.dylib');
+  await fs.rm(base, { force: true }).catch(() => {});
+  await fs.symlink(path.basename(versioned), base);
+  return base;
 }
 
 // ---------------------------------------------------------------------------
