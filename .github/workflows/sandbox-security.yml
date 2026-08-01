@@ -303,19 +303,42 @@ jobs:
           # The GHA runner forces `-e -o pipefail` on bash steps, so guard every
           # command with `|| true` and end with an explicit `exit 0`.
           ws="${{ github.workspace }}"
-          # Unmount stale tmpfs mounts under the workspace (deepest first),
-          # then remove the now-unmounted mountpoint dirs so checkout's rmdir
-          # succeeds. Only touch tmpfs targets; never the workspace root itself.
+          # A PRIOR run's leak holds the in-workspace .tmp busy: checkout then
+          # dies "EBUSY: resource busy or locked, rmdir '.../AgentOctopus/.tmp'"
+          # before ANY lane step runs. findmnt shows NO submount (the tmpfs was
+          # lazily umounted) yet rmdir still EBUSYs — so a leaked process holds
+          # either an open fd into .tmp or a bind/mount-namespace reference to
+          # it. Diagnose the holder, then clear it:
+          #   1. lazy-umount any mount whose target is under the workspace
+          #   2. list (diagnostic) processes with an open fd / cwd / root in .tmp
+          #   3. remove the directory so checkout's rmdir succeeds
+          echo "=== findmnt of workspace + .tmp (pre-rescue) ==="
+          findmnt -rn --submounts "$ws" -o TARGET,SOURCE,FSTYPE 2>/dev/null || true
+          findmnt -rn --target "$ws/.tmp" -o TARGET,SOURCE,FSTYPE 2>/dev/null || true
+          # Unmount any mount under the workspace (deepest first).
           findmnt -rn --submounts "$ws" -o TARGET 2>/dev/null | sort -r | while read -r t; do
             [ "$t" = "$ws" ] && continue
-            if findmnt -rn --target "$t" -o FSTYPE 2>/dev/null | grep -qx tmpfs; then
-              echo "rescuing stale tmpfs mount: $t"
-              umount -l "$t" 2>/dev/null || umount "$t" 2>/dev/null || true
-            fi
+            echo "rescuing stale mount: $t"
+            umount -l "$t" 2>/dev/null || umount "$t" 2>/dev/null || true
+          done || true
+          # Diagnose + kill any process holding .tmp open (fuser -k sends
+          # SIGKILL to processes with an open fd/cwd/root/mmap under the path).
+          if command -v fuser >/dev/null 2>&1; then
+            echo "=== fuser -vm on $ws/.tmp ==="
+            fuser -vm "$ws/.tmp" 2>&1 || true
+            fuser -km "$ws/.tmp" 2>/dev/null || true
+          fi
+          # Also sweep processes whose root or cwd is inside .tmp via /proc.
+          for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+            for link in root cwd; do
+              tgt=$(readlink "/proc/$pid/$link" 2>/dev/null || true)
+              case "$tgt" in
+                "$ws/.tmp"*|"$ws/.tmp") echo "pid $pid $link -> $tgt"; kill -9 "$pid" 2>/dev/null || true;;
+              esac
+            done
           done || true
           rm -rf "$ws/.tmp" 2>/dev/null || true
-          echo "rescue done; remaining mounts under workspace:"
-          { findmnt -rn --submounts "$ws" -o TARGET,FSTYPE 2>/dev/null || echo "  (none)"; } || true
+          echo "rescue done; .tmp present? $(test -e "$ws/.tmp" && echo yes || echo no)"
           exit 0
       - uses: actions/checkout@v7
       - name: Diagnose disk layout + stage TMPDIR
