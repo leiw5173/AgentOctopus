@@ -524,29 +524,43 @@ jobs:
             exit 1
           fi
           rmdir "$bindprobe" 2>/dev/null || true
-          # DIAGNOSTIC (this run): the mknod→bind fix cleared /dev setup; the
-          # helper now dies LATER at phase-3 require_mount_ro("/") — "mount / is
-          # not read-only — refusing to exec". The self-bind + ro-remount
-          # (MS_BIND|MS_REMOUNT|MS_RDONLY, the 0x1021 that no longer EPERMs)
-          # SUCCEEDS, but the read-only flag apparently isn't visible on the root
-          # mount's mountinfo super-opts afterward. Replicate the helper's EXACT
-          # self-bind sequence inside unshare -Umr and dump the resulting
-          # mountinfo entry + findmnt for the root, to see whether `ro` lands.
-          # Diagnostic only; never fails the step.
-          roprobe="${TMPDIR}/.oct-ro-probe"
-          mkdir -p "$roprobe"
-          echo "=== replicate helper rootfs self-bind + ro-remount; dump mountinfo ==="
-          unshare -Umr sh -c "
-            set -x
-            mount --make-rprivate /
-            mount -o bind '$roprobe' '$roprobe'
-            mount -o remount,ro,bind '$roprobe' '$roprobe'
-            echo '--- findmnt for the remounted root ---'
-            findmnt '$roprobe' -o TARGET,SOURCE,FSTYPE,OPTIONS
-            echo '--- mountinfo line(s) for the path ---'
-            grep ' $roprobe ' /proc/self/mountinfo || echo '(no mountinfo entry)'
-          " 2>&1 || echo "ROPROBE FAIL"
-          umount "$roprobe" 2>/dev/null || true; rmdir "$roprobe" 2>/dev/null || true
+          # DIAGNOSTIC (this run): the field-6 mountinfo fix cleared
+          # require_mount_ro (probe confirmed field6=ro / field10=rw); the helper
+          # now dies LATER at phase-3 `setgroups: Operation not permitted`. The
+          # phase-1 `setgroups:deny` is written to the PARENT's /proc/self/
+          # setgroups, but setgroups(0,NULL) runs in the FORKED child. Two
+          # candidate mechanisms, disambiguated here:
+          #   (a) setgroups:deny NOT inherited across fork → child must re-deny.
+          #   (b) PR_SET_NO_NEW_PRIVS (set just BEFORE setgroups in phase 3)
+          #       blocks setgroups() in a userns → must drop groups BEFORE NNP.
+          # Probe: in a userns with deny + gid_map set, try setgroups(0,NULL)
+          # WITHOUT no_new_privs, then WITH it. Diagnostic only; never fails.
+          echo "=== setgroups-in-userns probe (deny inherited? NNP blocks?) ==="
+          printf '%s\n' \
+            '#define _GNU_SOURCE' \
+            '#include <stdio.h>' \
+            '#include <string.h>' \
+            '#include <errno.h>' \
+            '#include <unistd.h>' \
+            '#include <grp.h>' \
+            '#include <sys/prctl.h>' \
+            '#include <sys/wait.h>' \
+            'static void wr(const char*p,const char*v){FILE*f=fopen(p,"w");if(!f){printf("open %s: %s\n",p,strerror(errno));return;}fputs(v,f);fclose(f);}' \
+            'int main(int argc,char**argv){' \
+            '  int nnp = argc>1 && strcmp(argv[1],"nnp")==0;' \
+            '  wr("/proc/self/setgroups","deny");' \
+            '  wr("/proc/self/uid_map","0 0 1");' \
+            '  wr("/proc/self/gid_map","0 0 1");' \
+            '  if(nnp) prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0);' \
+            '  pid_t c=fork();' \
+            '  if(c==0){ int r=setgroups(0,NULL); printf("child setgroups(0,NULL)%s -> %s\n", nnp?" after-NNP":"", r==0?"OK":strerror(errno)); _exit(0);}' \
+            '  int st; waitpid(c,&st,0); return 0;' \
+            '}' > /tmp/oct-sg.c
+          cc -O2 -static -o /tmp/oct-sg /tmp/oct-sg.c 2>/dev/null || cc -O2 -o /tmp/oct-sg /tmp/oct-sg.c
+          echo "--- without no_new_privs ---"
+          unshare -Umr /tmp/oct-sg 2>&1 || echo "probe-noNNP FAIL"
+          echo "--- with no_new_privs BEFORE setgroups ---"
+          unshare -Umr /tmp/oct-sg nnp 2>&1 || echo "probe-NNP FAIL"
       - name: Verify privileged Linux lane files are present
         shell: bash
         run: |
