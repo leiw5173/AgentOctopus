@@ -215,16 +215,24 @@ function baseConfig(rootfsArtifact?: {
   };
 }
 
-// --- Post-probe TOCTOU harness (R4) ---------------------------------------
-// start()/resolveRootfs() now RE-VERIFY the TCB binaries and rootfs image
-// against the probe()-cached state at the launch/prepare boundaries, so the
-// old '/fake/...' fixtures no longer work: the harness writes REAL tiny files,
-// computes their digests, and seeds the verifiedProbe cache exactly the way a
-// successful probe() would. The start-boundary helperPath check requires
-// opts.helperPath === the seeded TCB helper path, so engines are built with
-// harness.helperPath.
+// --- Verified-object binding harness (R5) ---------------------------------
+// start()/resolveRootfs() consume ONLY the probe()-verified state, and round 5
+// binds the USED object to the VERIFIED object: probe() copies the four TCB
+// artifacts into an engine-private 0700 dir (only those copies are executed/
+// loaded) and resolveRootfs() pins the rootfs fd (start() inherits it, launch
+// spec references /dev/fd/5). The harness writes REAL tiny files, computes
+// their digests, and seeds the verifiedProbe cache exactly the way a
+// successful probe() would — INCLUDING the private copies — and
+// makeStartEngine() pins the rootfs fd the way a prepare() would.
 const harnessDirs: string[] = [];
+// Engines that pinned a rootfs fd / created a private TCB dir — closed in
+// afterEach so no FileHandle is left for the GC to close (an unclosed
+// FileHandle is an unhandled ERR_INVALID_STATE, failing the run).
+const enginesToClose: { close(): Promise<void> }[] = [];
 afterEach(async () => {
+  while (enginesToClose.length) {
+    await enginesToClose.pop()!.close().catch(() => {});
+  }
   while (harnessDirs.length) {
     await fsPromises.rm(harnessDirs.pop()!, { recursive: true, force: true }).catch(() => {});
   }
@@ -282,20 +290,44 @@ async function makeStartHarness(extraQualifiedRootfsRefs: string[] = []) {
       ref: rootfsRef, absolutePath: rootfsPath, manifestDigest: rootfsRef,
       size: 'ROOTFS-BYTES'.length, mode: 0o444,
     },
-    /** Seed the probe-verified cache the way a successful probe() would. */
-    seed(engine: VmEngineImpl) {
+    /**
+     * Seed the probe-verified cache the way a successful probe() would —
+     * INCLUDING the engine-private copies round 5 binds execution to. The
+     * copies mirror probe()'s copyVerifiedArtifact: same basename, 0555,
+     * inside a private mkdtemp dir under the harness dir (cleaned up with it).
+     */
+    async seed(engine: VmEngineImpl) {
+      const privateDir = await fsPromises.mkdtemp(path.join(dir, 'oct-vm-tcb-'));
+      const copy = async (src: string) => {
+        const dst = path.join(privateDir, path.basename(src));
+        await fsPromises.copyFile(src, dst);
+        await fsPromises.chmod(dst, 0o555);
+        return dst;
+      };
+      const tcbPaths = {
+        helper: await copy(helperPath),
+        libkrun: await copy(libkrunPath),
+        libkrunfw: await copy(libkrunfwPath),
+        imageBuilder: await copy(imageBuilderPath),
+      };
       (engine as unknown as { verifiedProbe: unknown }).verifiedProbe = {
         gateManifest: gate,
         tcbManifest,
-        tcbPaths: { helper: helperPath, libkrun: libkrunPath, libkrunfw: libkrunfwPath, imageBuilder: imageBuilderPath },
+        tcbPaths,
+        privateDir,
       };
+      return { privateDir, tcbPaths };
     },
   };
 }
 
 type StartHarness = Awaited<ReturnType<typeof makeStartHarness>>;
 
-async function makeStartEngine(deps: VmEngineDeps): Promise<{ engine: VmEngineImpl; harness: StartHarness }> {
+async function makeStartEngine(deps: VmEngineDeps): Promise<{
+  engine: VmEngineImpl;
+  harness: StartHarness;
+  priv: { privateDir: string; tcbPaths: { helper: string; libkrun: string; libkrunfw: string; imageBuilder: string } };
+}> {
   const harness = await makeStartHarness();
   const engine = new VmEngineImpl(
     {
@@ -307,8 +339,12 @@ async function makeStartEngine(deps: VmEngineDeps): Promise<{ engine: VmEngineIm
     },
     deps,
   );
-  harness.seed(engine);
-  return { engine, harness };
+  const priv = await harness.seed(engine);
+  // Round 5: start() requires the rootfs fd pinned by resolveRootfs() for the
+  // same ref — a prepare() would have run first in production, so pin here.
+  await engine.resolveRootfs(harness.rootfsRef);
+  enginesToClose.push(engine);
+  return { engine, harness, priv };
 }
 
 describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
@@ -343,20 +379,22 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     const deps = makeDeps(binding, controlReadStream);
     // Wire the control stream: the fake child writes ready frames into
     // controlReadStream; the engine reads from it.
-    const { engine, harness } = await makeStartEngine(deps);
+    const { engine, harness, priv } = await makeStartEngine(deps);
     const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
 
     expect(recorded).toBeDefined();
     // Helper argv contract: [helperPath, helperSpecToken], length===2.
-    // The nested bootstrapArgv is inside the base64url(JSON) spec at argv[1].
-    expect(recorded.argv[0]).toBe(harness.helperPath);
+    // Round 5: the executed helper is the ENGINE-PRIVATE verified copy, and
+    // the nested bootstrapArgv is inside the base64url(JSON) spec at argv[1].
+    expect(recorded.argv[0]).toBe(priv.tcbPaths.helper);
     expect(recorded.argv.length).toBe(2);
     expect(typeof recorded.argv[1]).toBe('string');
     const spec = JSON.parse(Buffer.from(recorded.argv[1], 'base64url').toString('utf8'));
     expect(spec.helperPath).toBeUndefined();
     expect(spec.bootstrapPath).toBe('/usr/libexec/octopus-vm-init');
     expect(spec.bootstrapArgv).toEqual(['/usr/libexec/octopus-vm-init', 'PAYLOAD_BLOB']);
-    expect(spec.rootfsPath).toBe(harness.rootfsArtifact.absolutePath);
+    // Round 5: the rootfs is attached via the inherited pinned fd, not a path.
+    expect(spec.rootfsPath).toBe('/dev/fd/5');
     expect(spec.skillBlockPath).toBe('/fake/skill.img');
     expect(spec.caBlockPath).toBe('/fake/ca.img');
     expect(spec.vsockPort).toBe(1234);
@@ -366,17 +404,21 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     expect(spec.trustedEnv).toEqual([]);
 
     const dup2s = recorded.fileActions.filter((a) => a.kind === 'adddup2') as { src: number; target: number; kind: 'adddup2' }[];
-    // Exactly two adddup2: temp→3 (H2G read), temp→4 (G2H write).
-    expect(dup2s.length).toBe(2);
+    // Exactly three adddup2: temp→3 (H2G read), temp→4 (G2H write), temp→5 (rootfs fd).
+    expect(dup2s.length).toBe(3);
     const to3 = dup2s.find((d) => d.target === 3);
     const to4 = dup2s.find((d) => d.target === 4);
+    const to5 = dup2s.find((d) => d.target === 5);
     expect(to3, 'an adddup2 into fd 3 (H2G_READ)').toBeDefined();
     expect(to4, 'an adddup2 into fd 4 (G2H_WRITE)').toBeDefined();
-    // R10 P1-2: source must be the F_DUPFD_CLOEXEC temp (≥10), NOT the raw 3/4.
+    expect(to5, 'an adddup2 into fd 5 (ROOTFS_INHERIT_FD)').toBeDefined();
+    // R10 P1-2: source must be the F_DUPFD_CLOEXEC temp (≥10), NOT the raw 3/4/5.
     expect(to3!.src).toBeGreaterThanOrEqual(10);
     expect(to4!.src).toBeGreaterThanOrEqual(10);
+    expect(to5!.src).toBeGreaterThanOrEqual(10);
     expect(to3!.src).not.toBe(3);
     expect(to4!.src).not.toBe(4);
+    expect(to5!.src).not.toBe(5);
 
     // Darwin: POSIX_SPAWN_CLOEXEC_DEFAULT attr set.
     expect(recorded.spawnAttrFlags).toContain('POSIX_SPAWN_CLOEXEC_DEFAULT');
@@ -384,9 +426,10 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     // After spawn Node closes its own h2gRead (3) + g2hWrite (4) + temp slots.
     expect(recorded.parentCloseFds).toContain(H2G_READ_SRC);
     expect(recorded.parentCloseFds).toContain(G2H_WRITE_SRC);
-    // Temp slots closed too.
+    // Temp slots closed too (including the rootfs temp).
     expect(recorded.parentCloseFds).toContain(to3!.src);
     expect(recorded.parentCloseFds).toContain(to4!.src);
+    expect(recorded.parentCloseFds).toContain(to5!.src);
     // Node RETAINS g2hRead + h2gWrite (must NOT be in parentCloseFds).
     expect(recorded.parentCloseFds).not.toContain(G2H_READ_SRC);
     expect(recorded.parentCloseFds).not.toContain(H2G_WRITE_SRC);
@@ -401,7 +444,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
 
   async function runEnvAllowlistScenario(
     platform: VmEngineDeps['platform'],
-  ): Promise<NodeJS.ProcessEnv> {
+  ): Promise<{ env: NodeJS.ProcessEnv; privateDir: string }> {
     const controlReadStream = new PassThrough();
     let recordedEnv: NodeJS.ProcessEnv | undefined;
     const binding: FakeBinding = {
@@ -413,7 +456,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
       },
     };
     const deps = makeDeps(binding, controlReadStream, platform);
-    const { engine, harness } = await makeStartEngine(deps);
+    const { engine, harness, priv } = await makeStartEngine(deps);
 
     const hadPath = 'PATH' in process.env;
     const originalPath = process.env.PATH;
@@ -444,11 +487,11 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     }
 
     if (!recordedEnv) throw new Error('spawn was not called');
-    return recordedEnv;
+    return { env: recordedEnv, privateDir: priv.privateDir };
   }
 
   it('passes a minimal allowlisted env on darwin-arm64 (HI-1)', async () => {
-    const env = await runEnvAllowlistScenario('darwin-arm64');
+    const { env, privateDir } = await runEnvAllowlistScenario('darwin-arm64');
 
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.HOME).toBeUndefined();
@@ -468,11 +511,13 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     expect(env.OCTOPUS_VSOCK_HOST_SOCKET).toBe('/tmp/vsock.sock');
     expect(env.OCTOPUS_VM_MEM_MIB).toBe('512');
     expect(env.OCTOPUS_VM_CPUS).toBe('2');
-    expect(env.DYLD_LIBRARY_PATH).toBe('/test/dyld');
+    // Round 5: the loader path is FORCED to the engine-private verified copies
+    // (never an inherited/arbitrary path).
+    expect(env.DYLD_LIBRARY_PATH).toBe(privateDir);
   });
 
   it('passes a minimal allowlisted env on linux-x64 (HI-1)', async () => {
-    const env = await runEnvAllowlistScenario('linux-x64');
+    const { env, privateDir } = await runEnvAllowlistScenario('linux-x64');
 
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.HOME).toBeUndefined();
@@ -492,7 +537,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     expect(env.OCTOPUS_VSOCK_HOST_SOCKET).toBe('/tmp/vsock.sock');
     expect(env.OCTOPUS_VM_MEM_MIB).toBe('512');
     expect(env.OCTOPUS_VM_CPUS).toBe('2');
-    expect(env.LD_LIBRARY_PATH).toBe('/test/ld');
+    expect(env.LD_LIBRARY_PATH).toBe(privateDir);
   });
 
   it('rejects bootstrapArgv that violates the [path, blob] length===2 contract', async () => {
@@ -638,22 +683,24 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
 
 describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
   const sha = (c: string) => 'sha256:' + c.repeat(64);
-  const hex = (c: string) => c.repeat(64);
-  const helperPath = '/fake/helper';
-  const artifactsDir = '/fake/artifacts';
-  const rootfsDir = '/fake/rootfs';
   let tempDir: string;
   let tcbPath: string;
   let gatePath: string;
+  // Round 5: probe() realpath-enforces opts.helperPath === the verifyVmTcb
+  // path and copies the verified artifacts from disk, so the fixtures must be
+  // REAL files — reuse the start harness (real tiny binaries + real digests).
+  let harness: StartHarness;
 
-  function makeProbeEngine(opts: Partial<ConstructorParameters<typeof VmEngineImpl>[0]> = {}) {
+  async function makeProbeEngine(opts: Partial<ConstructorParameters<typeof VmEngineImpl>[0]> = {}) {
     return new VmEngineImpl(
       {
-        helperPath,
-        artifactsDir,
+        helperPath: harness.helperPath,
+        artifactsDir: harness.artifactsDir,
         tcbManifestPath: tcbPath,
         gateManifestPath: gatePath,
-        rootfsDir,
+        rootfsDir: harness.dir,
+        // Engine-private verified copies land inside tempDir (cleaned up).
+        privateDirBase: tempDir,
         ...opts,
       },
       {
@@ -687,6 +734,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    harness = await makeStartHarness();
     // Probe-time binding check (R3-F1) compares canonical digests of the
     // loaded gate manifest and the signed release-manifest body. Mirror the
     // real algorithm's observable behavior for these fixtures: the digest is
@@ -696,39 +744,23 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     vi.mocked(gateManifest.computeManifestDigest).mockImplementation(
       (m) => (m as { manifestDigest?: string }).manifestDigest ?? '',
     );
+    // verifyVmTcb returns the REAL harness paths + the manifest body it
+    // "verified" them against — probe() threads THESE digests into the gate
+    // check (never re-reads the manifest path) and realpath-binds
+    // opts.helperPath to paths.helper before any exec.
     vi.mocked(tcbManifest.verifyVmTcb).mockResolvedValue({
       paths: {
-        helper: '/fake/helper',
-        libkrun: '/fake/libkrun.dylib',
-        libkrunfw: '/fake/libkrunfw.dylib',
-        imageBuilder: '/fake/vm-image-builder',
+        helper: harness.helperPath,
+        libkrun: harness.libkrunPath,
+        libkrunfw: harness.libkrunfwPath,
+        imageBuilder: harness.imageBuilderPath,
       },
-      // The manifest body the files were "verified" against — probe() threads
-      // THESE digests into the gate check (never re-reads the manifest path).
-      manifest: {
-        artifacts: {
-          libkrun: { sha256: hex('a'), size: 1, mode: 0o555 },
-          libkrunfw: { sha256: hex('b'), size: 1, mode: 0o555 },
-          helper: { sha256: hex('c'), size: 1, mode: 0o555 },
-          imageBuilder: { sha256: hex('d'), size: 1, mode: 0o555 },
-        },
-      },
+      manifest: harness.tcbManifest,
     });
     tempDir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-probe-'));
     tcbPath = path.join(tempDir, 'tcb.json');
     gatePath = path.join(tempDir, 'gate.json');
-    await fsPromises.writeFile(
-      tcbPath,
-      JSON.stringify({
-        schemaVersion: 1,
-        artifacts: {
-          libkrun: { sha256: hex('a'), size: 1, mode: 0o555 },
-          libkrunfw: { sha256: hex('b'), size: 1, mode: 0o555 },
-          helper: { sha256: hex('c'), size: 1, mode: 0o555 },
-          imageBuilder: { sha256: hex('d'), size: 1, mode: 0o555 },
-        },
-      }),
-    );
+    await fsPromises.writeFile(tcbPath, JSON.stringify({ schemaVersion: 1, artifacts: harness.tcbManifest.artifacts }));
     await fsPromises.writeFile(gatePath, '{}');
   });
 
@@ -740,7 +772,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const gateBody = validGateBody();
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
     vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
-    const engine = makeProbeEngine();
+    const engine = await makeProbeEngine();
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(false);
 
     const r = await engine.probe();
@@ -754,27 +786,51 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const gateBody = validGateBody();
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
     vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
-    const engine = makeProbeEngine();
-    vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+    const engine = await makeProbeEngine();
+    const spy = vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
     expect(r.available).toBe(true);
     expect(r.blkFeature).toBe('present');
     expect(r.gateManifest).toBe('verified');
     expect(r.releaseManifest).toBe('missing');
+    // F1: the BLK probe execs the realpath'd VERIFIED helper, never the raw
+    // configured path.
+    expect(spy).toHaveBeenCalledWith(await fsPromises.realpath(harness.helperPath));
   });
 
   it('fails closed when the BLK probe itself throws', async () => {
     const gateBody = validGateBody();
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
     vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
-    const engine = makeProbeEngine();
+    const engine = await makeProbeEngine();
     vi.spyOn(engine as any, 'probeBlkFeature').mockRejectedValue(new Error('exec ENOENT'));
 
     const r = await engine.probe();
     expect(r.available).toBe(false);
     expect(r.blkFeature).toBe('absent');
     expect(r.reason).toMatch(/BLK|probe/i);
+  });
+
+  // F1 (round 5): a configured helperPath that does not realpath-resolve to
+  // the verifyVmTcb()-verified helper must fail closed BEFORE any exec —
+  // otherwise the BLK probe (and later start()) would execute an unverified
+  // binary while TCB verification covered a different file.
+  it('F1: a helperPath diverging from the verified helper fails closed before any exec', async () => {
+    const gateBody = validGateBody();
+    vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
+    vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
+    // A real file that is NOT the verified helper.
+    const otherHelper = path.join(tempDir, 'attacker-helper');
+    await fsPromises.writeFile(otherHelper, 'EVIL', { mode: 0o555 });
+    const engine = await makeProbeEngine({ helperPath: otherHelper });
+    const spy = vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
+
+    const r = await engine.probe();
+    expect(r.available).toBe(false);
+    expect(r.reason).toMatch(/does not resolve to the verified TCB helper/);
+    // Fail-closed BEFORE any exec — the divergent binary never ran.
+    expect(spy).not.toHaveBeenCalled();
   });
 
   // F3: when a release manifest is PRESENT (both files wired), the verifier's
@@ -793,7 +849,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
     await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
     vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: false, reason: 'bad-signature' });
-    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    const engine = await makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
@@ -811,7 +867,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
     await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
     vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: false, reason: 'no-key' });
-    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    const engine = await makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
@@ -829,7 +885,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
     await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
     vi.mocked(gateManifest.verifyOuterReleaseManifest).mockReturnValue({ ok: true, reason: 'ok' });
-    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    const engine = await makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
@@ -842,7 +898,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
     vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
     // No releaseManifestPath / releaseManifestSignaturePath in opts.
-    const engine = makeProbeEngine();
+    const engine = await makeProbeEngine();
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
@@ -863,7 +919,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const gateBody = validGateBody();
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
     vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
-    const engine = makeProbeEngine({
+    const engine = await makeProbeEngine({
       releaseManifestPath: path.join(tempDir, 'release-manifest.json'),
       releaseManifestSignaturePath: path.join(tempDir, 'release-manifest.json.sig'),
     });
@@ -889,7 +945,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const releaseManifest = path.join(tempDir, 'release-manifest.json');
     await fsPromises.writeFile(releaseManifest, JSON.stringify(gateBody));
     // Signature file deliberately absent.
-    const engine = makeProbeEngine({
+    const engine = await makeProbeEngine({
       releaseManifestPath: releaseManifest,
       releaseManifestSignaturePath: path.join(tempDir, 'release-manifest.json.sig'),
     });
@@ -909,7 +965,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
     await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
     // Manifest file deliberately absent.
-    const engine = makeProbeEngine({
+    const engine = await makeProbeEngine({
       releaseManifestPath: path.join(tempDir, 'release-manifest.json'),
       releaseManifestSignaturePath: releaseSig,
     });
@@ -931,7 +987,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const releaseManifest = path.join(tempDir, 'release-manifest.json');
     await fsPromises.mkdir(releaseManifest);
     await fsPromises.writeFile(releaseManifest + '.sig', Buffer.alloc(64, 0).toString('base64') + '\n');
-    const engine = makeProbeEngine({
+    const engine = await makeProbeEngine({
       releaseManifestPath: releaseManifest,
       releaseManifestSignaturePath: releaseManifest + '.sig',
     });
@@ -950,7 +1006,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     // Production assembly (core buildEngineOpts) sets requireReleaseSignature;
     // deleting BOTH files from an installed release must not roll it back to
     // the soft 'missing' dev-box path.
-    const engine = makeProbeEngine({
+    const engine = await makeProbeEngine({
       releaseManifestPath: path.join(tempDir, 'release-manifest.json'),
       releaseManifestSignaturePath: path.join(tempDir, 'release-manifest.json.sig'),
       requireReleaseSignature: true,
@@ -984,7 +1040,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
     await fsPromises.writeFile(releaseManifest, JSON.stringify(swappedBody));
     await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
-    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    const engine = await makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
@@ -1006,7 +1062,7 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     const releaseSig = path.join(tempDir, 'release-manifest.json.sig');
     await fsPromises.writeFile(releaseManifest, '{"not":"a gate manifest"}');
     await fsPromises.writeFile(releaseSig, Buffer.alloc(64, 0).toString('base64') + '\n');
-    const engine = makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
+    const engine = await makeProbeEngine({ releaseManifestPath: releaseManifest, releaseManifestSignaturePath: releaseSig });
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
@@ -1015,26 +1071,39 @@ describe('VmEngineImpl.probe() BLK feature check (HI-5)', () => {
     expect(r.reason).toMatch(/not a valid gate manifest/i);
   });
 
-  // R4: a successful probe caches the verified TCB/gate state — the ONLY
-  // source resolveRootfs()/assertRootfsQualified()/start() may consult.
-  it('R4: a successful probe caches the verified TCB/gate state for prepare/start', async () => {
+  // R4/R5: a successful probe caches the verified TCB/gate state — the ONLY
+  // source resolveRootfs()/assertRootfsQualified()/start() may consult — and
+  // round 5 binds execution to ENGINE-PRIVATE COPIES of the verified bytes.
+  it('R4/R5: a successful probe caches verified state + private TCB copies', async () => {
     const gateBody = validGateBody();
     vi.mocked(gateManifest.GateManifestSchema.parse).mockReturnValue(gateBody);
     vi.mocked(gateManifest.verifyGateManifest).mockReturnValue({ ok: true, reasons: [] });
-    const engine = makeProbeEngine();
+    const engine = await makeProbeEngine();
     vi.spyOn(engine as any, 'probeBlkFeature').mockResolvedValue(true);
 
     const r = await engine.probe();
     expect(r.available).toBe(true);
     const cached = (engine as unknown as { verifiedProbe?: {
       gateManifest: unknown;
-      tcbPaths: { helper: string };
+      tcbPaths: { helper: string; imageBuilder: string };
       tcbManifest: { artifacts: { helper: { sha256: string } } };
+      privateDir: string;
     } }).verifiedProbe;
     expect(cached).toBeDefined();
     expect(cached!.gateManifest).toBe(gateBody);
-    expect(cached!.tcbPaths.helper).toBe('/fake/helper');
-    expect(cached!.tcbManifest.artifacts.helper.sha256).toBe(hex('c'));
+    expect(cached!.tcbManifest.artifacts.helper.sha256).toBe(harness.tcbManifest.artifacts.helper.sha256);
+    // Round 5: tcbPaths are the engine-private COPIES (inside privateDirBase),
+    // NOT the original on-disk paths — and they carry the verified bytes.
+    expect(cached!.tcbPaths.helper).not.toBe(harness.helperPath);
+    expect(cached!.tcbPaths.helper.startsWith(cached!.privateDir)).toBe(true);
+    expect(cached!.privateDir.startsWith(tempDir)).toBe(true);
+    expect(await fsPromises.readFile(cached!.tcbPaths.helper, 'utf8')).toBe('HELPER');
+    expect(await fsPromises.readFile(cached!.tcbPaths.imageBuilder, 'utf8')).toBe('BUILDER');
+    // The private dir is engine-exclusive (0700).
+    const st = await fsPromises.stat(cached!.privateDir);
+    expect(st.mode & 0o777).toBe(0o700);
+    // getVerifiedImageBuilderPath hands out the private verified builder.
+    expect(await engine.getVerifiedImageBuilderPath()).toBe(cached!.tcbPaths.imageBuilder);
   });
 });
 
@@ -1048,7 +1117,7 @@ describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
     return { dir, ref, absolutePath };
   }
 
-  function makeResolveEngine(harness: StartHarness, gatePath: string, rootfsDir: string) {
+  async function makeResolveEngine(harness: StartHarness, gatePath: string, rootfsDir: string) {
     const engine = new VmEngineImpl(
       {
         helperPath: harness.helperPath,
@@ -1066,7 +1135,8 @@ describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
     );
     // resolveRootfs consumes ONLY the probe()-cached gate/TCB state (seeded
     // here) — it never re-reads the on-disk gate manifest.
-    harness.seed(engine);
+    await harness.seed(engine);
+    enginesToClose.push(engine);
     return engine;
   }
 
@@ -1077,7 +1147,7 @@ describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
     );
   });
 
-  it('hashes the rootfs with createReadStream instead of fs.readFile', async () => {
+  it('hashes the rootfs from an open O_NOFOLLOW fd (streaming, not readFile)', async () => {
     const content = Buffer.from('hello streaming rootfs');
     const { dir, ref, absolutePath } = await tempRootfs(content);
     const harness = await makeStartHarness([ref]);
@@ -1088,12 +1158,17 @@ describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
 
     const createReadStreamSpy = fs.createReadStream;
 
-    const engine = makeResolveEngine(harness, gatePath, dir);
+    const engine = await makeResolveEngine(harness, gatePath, dir);
     const artifact = await engine.resolveRootfs(ref);
 
     expect(artifact.ref).toBe(ref);
     expect(artifact.absolutePath).toBe(absolutePath);
-    expect(createReadStreamSpy).toHaveBeenCalledWith(absolutePath);
+    // Round 5: hashed FROM THE OPEN FD (createReadStream on an fd, not a path)
+    // so the hashed object IS the pinned object.
+    expect(createReadStreamSpy).toHaveBeenCalledWith('', expect.objectContaining({ autoClose: false }));
+    // The fd stays pinned on the instance (closed by engine.close()).
+    expect((engine as unknown as { resolvedRootfsHandle?: { fd: number } }).resolvedRootfsHandle?.fd).toBeTypeOf('number');
+    await engine.close();
   });
 
   it('matches the expected digest for a multi-chunk rootfs', async () => {
@@ -1103,10 +1178,11 @@ describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
     const { dir, ref } = await tempRootfs(content);
     const harness = await makeStartHarness([ref]);
 
-    const engine = makeResolveEngine(harness, path.join(dir, 'gate.json'), dir);
+    const engine = await makeResolveEngine(harness, path.join(dir, 'gate.json'), dir);
     const artifact = await engine.resolveRootfs(ref);
     expect(artifact.ref).toBe(ref);
     expect(artifact.size).toBe(content.length);
+    await engine.close();
   });
 
   it('fails closed when probe() never succeeded (no cached verified state)', async () => {
@@ -1132,19 +1208,25 @@ describe('VmEngineImpl.resolveRootfs() streaming digest (LO-1)', () => {
   });
 });
 
-// R4 (review round 4): probe() is the ONLY point that reads + verifies the
-// gate manifest (and binds the release signature to it). prepare()/start()
-// must consume the cached verified state and re-verify the TCB/rootfs files
-// at their consumption boundaries, so a file swapped after probe() fails
-// closed instead of being trusted.
-describe('VmEngineImpl post-probe TOCTOU hardening (R4)', () => {
-  function minimalDeps(): VmEngineDeps {
+// R5 (review round 5): probe() is the ONLY point that reads + verifies the
+// gate manifest (and binds the release signature to it), and it binds the
+// VERIFIED OBJECT to the USED OBJECT: the four TCB artifacts are copied into
+// an engine-private 0700 dir (only those copies are ever executed/loaded) and
+// the rootfs fd is pinned at resolveRootfs() (start() inherits it and the
+// launch spec references /dev/fd/5). A file swapped after probe() is therefore
+// NEUTRALIZED — the verified copy/pinned inode is what runs — while a swap
+// BEFORE the binding point still fails closed on the from-fd digest check.
+describe('VmEngineImpl post-probe object binding (R5)', () => {
+  function minimalDeps(recorded?: { argv?: string[]; fileActions?: FileAction[] }): VmEngineDeps {
     const crs = new PassThrough();
     return makeDeps(
       {
         pipe: () => [10, 11],
         dupFdCloexec: distinctDups(),
-        spawn: (_h, _a, _e, _f, _s, _p, c) => makeFakeChild(['{"ready":true}\n'], c),
+        spawn: (_h, argv, _e, fileActions, _s, _p, c) => {
+          if (recorded) { recorded.argv = argv; recorded.fileActions = fileActions; }
+          return makeFakeChild(['{"ready":true}\n'], c);
+        },
       },
       crs,
     );
@@ -1186,6 +1268,7 @@ describe('VmEngineImpl post-probe TOCTOU hardening (R4)', () => {
     // …and the probe-verified ref still resolves.
     const artifact = await engine.resolveRootfs(harness.rootfsRef);
     expect(artifact.ref).toBe(harness.rootfsRef);
+    await engine.close();
   });
 
   // Simulate an attacker with host fs write access swapping a file post-probe:
@@ -1195,36 +1278,102 @@ describe('VmEngineImpl post-probe TOCTOU hardening (R4)', () => {
     await fsPromises.writeFile(filePath, content, { mode });
   }
 
-  it('a helper binary swapped after probe() fails start() at the launch boundary', async () => {
-    const { engine, harness } = await makeStartEngine(minimalDeps());
+  it('a helper swapped after probe() is NEUTRALIZED: start() execs the verified private copy', async () => {
+    const recorded: { argv?: string[] } = {};
+    const { engine, harness, priv } = await makeStartEngine(minimalDeps(recorded));
     await tamper(harness.helperPath, 'EVIL-HELPER', 0o555);
-    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/helper changed since probe/);
+    // The swap does NOT fail start — it is irrelevant: the executed binary is
+    // the engine-private copy of the verified bytes.
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    expect(recorded.argv![0]).toBe(priv.tcbPaths.helper);
+    expect(await fsPromises.readFile(priv.tcbPaths.helper, 'utf8')).toBe('HELPER');
+    await inst.close();
+    await engine.close();
   });
 
-  it('a libkrun library swapped after probe() fails start() at the launch boundary', async () => {
-    const { engine, harness } = await makeStartEngine(minimalDeps());
+  it('a libkrun swapped after probe() is NEUTRALIZED: the private copy + loader path are used', async () => {
+    const recorded: { argv?: string[] } = {};
+    const { engine, harness, priv } = await makeStartEngine(minimalDeps(recorded));
     await tamper(harness.libkrunPath, 'EVIL-LIBKRUN', 0o555);
-    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/libkrun changed since probe/);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    // The private copy still carries the verified bytes…
+    expect(sha256Hex(await fsPromises.readFile(priv.tcbPaths.libkrun))).toBe(
+      harness.tcbManifest.artifacts.libkrun.sha256,
+    );
+    // …and the private dir IS the loader search path (both are under it).
+    expect(priv.tcbPaths.libkrun.startsWith(priv.privateDir)).toBe(true);
+    await inst.close();
+    await engine.close();
   });
 
-  it('an image-builder swapped after probe() fails resolveRootfs() at the prepare boundary', async () => {
-    const { engine, harness } = await makeStartEngine(minimalDeps());
+  it('an image-builder swapped after probe() is NEUTRALIZED: getVerifiedImageBuilderPath returns the private copy', async () => {
+    const { engine, harness, priv } = await makeStartEngine(minimalDeps());
     await tamper(harness.imageBuilderPath, 'EVIL-BUILDER', 0o555);
-    await expect(engine.resolveRootfs(harness.rootfsRef)).rejects.toThrow(/imageBuilder changed since probe/);
+    const builderPath = await engine.getVerifiedImageBuilderPath();
+    expect(builderPath).toBe(priv.tcbPaths.imageBuilder);
+    expect(sha256Hex(await fsPromises.readFile(builderPath))).toBe(
+      harness.tcbManifest.artifacts.imageBuilder.sha256,
+    );
+    await engine.close();
   });
 
-  it('a rootfs image swapped after resolveRootfs fails start() at the launch boundary', async () => {
-    const { engine, harness } = await makeStartEngine(minimalDeps());
-    await engine.resolveRootfs(harness.rootfsRef); // prepare phase resolves fine
+  it('a rootfs swapped after resolveRootfs is NEUTRALIZED: start() attaches the pinned inode via /dev/fd/5', async () => {
+    const recorded: { argv?: string[]; fileActions?: FileAction[] } = {};
+    const { engine, harness } = await makeStartEngine(minimalDeps(recorded));
     await tamper(harness.rootfsPath, 'EVIL-ROOTFS-BYTES', 0o444);
-    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/rootfs image changed since resolveRootfs/);
+    // The swap does NOT fail start — the launch spec references the pinned fd,
+    // and the fd (inherited at slot 5) still points at the verified inode.
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    const spec = JSON.parse(Buffer.from(recorded.argv![1], 'base64url').toString('utf8'));
+    expect(spec.rootfsPath).toBe('/dev/fd/5');
+    const to5 = (recorded.fileActions ?? []).find(
+      (a): a is { kind: 'adddup2'; src: number; target: number } => a.kind === 'adddup2' && a.target === 5,
+    );
+    expect(to5, 'the pinned rootfs fd is inherited at slot 5').toBeDefined();
+    await inst.close();
+    await engine.close();
+  });
+
+  it('a rootfs swapped BEFORE resolveRootfs fails closed on the from-fd digest check', async () => {
+    const harness = await makeStartHarness();
+    const engine = new VmEngineImpl(
+      {
+        helperPath: harness.helperPath,
+        artifactsDir: harness.artifactsDir,
+        tcbManifestPath: path.join(harness.dir, 'vm-tcb-manifest.json'),
+        gateManifestPath: path.join(harness.dir, 'gate-manifest.json'),
+        rootfsDir: harness.dir,
+      },
+      minimalDeps(),
+    );
+    await harness.seed(engine);
+    // Swap the bytes BEFORE the binding point: the from-fd hash no longer
+    // matches the ref — fail closed.
+    await tamper(harness.rootfsPath, 'EVIL-ROOTFS-BYTES', 0o444);
+    await expect(engine.resolveRootfs(harness.rootfsRef)).rejects.toThrow(/byte digest mismatch/);
+    await engine.close();
+  });
+
+  it('close() releases the pinned rootfs fd and the engine-private TCB dir', async () => {
+    const { engine, harness, priv } = await makeStartEngine(minimalDeps());
+    await engine.close();
+    // The private dir is removed…
+    await expect(fsPromises.stat(priv.privateDir)).rejects.toThrow();
+    // …the pinned fd state is cleared…
+    const e = engine as unknown as { resolvedRootfsHandle?: unknown; verifiedProbe?: unknown };
+    expect(e.resolvedRootfsHandle).toBeUndefined();
+    expect(e.verifiedProbe).toBeUndefined();
+    // …and start() after close() fails closed (no verified state remains).
+    await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/probe\(\) must succeed/);
   });
 
   it('start() succeeds when nothing changed post-probe (happy path sanity)', async () => {
-    const { engine, harness } = await makeStartEngine(minimalDeps());
-    await engine.resolveRootfs(harness.rootfsRef);
+    const recorded: { argv?: string[] } = {};
+    const { engine, harness, priv } = await makeStartEngine(minimalDeps(recorded));
     const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
     expect(inst.stdin).toBeDefined();
+    expect(recorded.argv![0]).toBe(priv.tcbPaths.helper);
     await inst.close();
+    await engine.close();
   });
 });

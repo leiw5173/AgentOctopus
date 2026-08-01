@@ -31,24 +31,32 @@ function parseByteDigest(stdout: string): string {
 
 export class VmImageBuilderImpl implements VmImageBuilderPort {
   /**
-   * @param builderBinaryPath absolute path to the compiled `vm-image-builder`.
-   * Empty string => reject every call (the engine must resolve a real path
-   * before constructing the backend; this guard keeps a misconfigured package
-   * fail-closed rather than silently shelling out to an empty argv[0]).
+   * @param builderBinaryPath absolute path to the compiled `vm-image-builder`,
+   * or a LAZY RESOLVER returning it. The resolver form lets the caller defer
+   * path selection until execution time — production assembly wires
+   * `() => engine.getVerifiedImageBuilderPath()`, so the executed binary is
+   * the engine-private copy of the artifact verifyVmTcb() verified, resolved
+   * AFTER probe() succeeded (never an independently configured path). Empty
+   * string/empty resolution => reject every call (fail-closed rather than
+   * silently shelling out to an empty argv[0]).
    */
-  constructor(private builderBinaryPath: string = '') {}
+  constructor(private builderBinaryPath: string | (() => Promise<string>) = '') {}
 
-  private assertBinary(): string {
-    if (!this.builderBinaryPath) {
+  private async resolveBinary(): Promise<string> {
+    const v =
+      typeof this.builderBinaryPath === 'function'
+        ? await this.builderBinaryPath()
+        : this.builderBinaryPath;
+    if (!v) {
       throw new Error('vm-image-builder: builder binary path not configured');
     }
-    return this.builderBinaryPath;
+    return v;
   }
 
   async buildSnapshotImage(input: {
     sourceDir: string; expectedSnapshotDigest: string; outDir: string;
   }): Promise<VerifiedArtifact> {
-    const bin = this.assertBinary();
+    const bin = await this.resolveBinary();
     const outPath = path.join(input.outDir, 'skill.img');
     // The C builder recomputes the canonical snapshot digest during copy and
     // asserts it == expectedSnapshotDigest; on mismatch it deletes the output
@@ -71,7 +79,7 @@ export class VmImageBuilderImpl implements VmImageBuilderPort {
   async buildSingleFileImage(input: {
     sourcePath: string; guestName: string; expectedFileDigest: string; outDir: string;
   }): Promise<VerifiedArtifact> {
-    const bin = this.assertBinary();
+    const bin = await this.resolveBinary();
     const outPath = path.join(input.outDir, 'ca.img');
     // The C builder re-reads the source via the SAME fd, recomputes its sha256,
     // and asserts == expectedFileDigest; on mismatch it deletes the output and

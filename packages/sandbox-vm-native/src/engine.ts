@@ -35,10 +35,12 @@
 //   and h2gWrite (to send future commands). The helper's fd0/fd4 are its own
 //   dup'd copies, independent of what Node does to the originals.
 import { PassThrough } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { execFile } from 'node:child_process';
-import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { lstat, readFile, stat } from 'node:fs/promises';
+import { constants, createReadStream, createWriteStream, existsSync } from 'node:fs';
+import { mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type {
   VmEnginePort,
@@ -72,14 +74,22 @@ type VmTcbManifestShape = {
  * gate manifest ↔ loaded digests, release signature ↔ loaded gate). Set once
  * per successful probe(). resolveRootfs()/assertRootfsQualified()/start()
  * consume ONLY this instance: they never re-read gate-manifest.json (a
- * post-probe swap with a self-consistent but UNSIGNED gate is invisible), and
- * they re-verify the TCB/rootfs files against THESE cached digests at the
- * prepare and launch boundaries.
+ * post-probe swap with a self-consistent but UNSIGNED gate is invisible).
+ *
+ * tcbPaths here are the ENGINE-PRIVATE COPIES probe() made of the verified
+ * artifacts (see copyVerifiedArtifact): the bytes hashed as they were copied
+ * from a single O_NOFOLLOW fd matched the manifest verifyVmTcb verified, and
+ * only these copies are ever executed/loaded afterwards. A post-probe swap of
+ * the original on-disk paths is therefore irrelevant — there is no
+ * hash→exec window to close because the used object IS the verified object.
  */
 interface VerifiedProbeState {
   gateManifest: GateManifest;
   tcbManifest: VmTcbManifestShape;
+  /** Engine-private copies (0700 dir) of the four verified TCB artifacts. */
   tcbPaths: VmTcbArtifacts;
+  /** The engine-private 0700 directory holding the tcbPaths copies. */
+  privateDir: string;
 }
 type GateManifest = {
   platform: 'darwin-arm64' | 'linux-x64';
@@ -135,7 +145,9 @@ const MAX_MALFORMED_FRAMES = 2;
 /** Helper fixed control-fd slots (must match vm-helper.c H2G_READ_FD/G2H_WRITE_FD). */
 const H2G_READ_FD = 3;
 const G2H_WRITE_FD = 4;
-/** Minimum temp slot for F_DUPFD_CLOEXEC — comfortably above 0/1/2/3/4. */
+/** Fixed fd slot the rootfs image is inherited at; the launch spec references /dev/fd/5. */
+const ROOTFS_INHERIT_FD = 5;
+/** Minimum temp slot for F_DUPFD_CLOEXEC — comfortably above 0/1/2/3/4/5. */
 const DUPFD_MIN = 10;
 
 /** A single file_actions entry handed to the spawn binding. */
@@ -204,6 +216,11 @@ export interface VmEngineOptions {
   requireReleaseSignature?: boolean;
   /** Directory holding the resolved rootfs artifact files (named by digest). */
   rootfsDir: string;
+  /**
+   * Base directory under which probe() mkdtemp()s the engine-private 0700
+   * directory for the verified TCB copies. Defaults to os.tmpdir(). Test seam.
+   */
+  privateDirBase?: string;
 }
 
 export class VmEngineImpl implements VmEnginePort {
@@ -217,6 +234,18 @@ export class VmEngineImpl implements VmEnginePort {
    * engine threads the resolved path between them.
    */
   private resolvedRootfsPath: string | undefined;
+  /**
+   * The open O_RDONLY|O_NOFOLLOW file handle resolveRootfs() pinned for the
+   * resolved rootfs. The digest was hashed FROM THIS FD and the fd is kept
+   * open until close() — start() inherits it into the helper (referenced as
+   * /dev/fd/N), so the attached image is the verified inode even if the path
+   * is replaced after resolveRootfs().
+   */
+  private resolvedRootfsHandle:
+    | Awaited<ReturnType<typeof open>>
+    | undefined;
+  /** The ref the pinned rootfs fd was resolved for (start() asserts equality). */
+  private resolvedRootfsRef: string | undefined;
   /** See VerifiedProbeState — the sole gate/TCB source after a successful probe(). */
   private verifiedProbe: VerifiedProbeState | undefined;
 
@@ -243,53 +272,44 @@ export class VmEngineImpl implements VmEnginePort {
     return v;
   }
 
-  private async hashFile(p: string, context: string): Promise<string> {
-    const hash = createHash('sha256');
-    try {
-      const stream = createReadStream(p);
-      for await (const chunk of stream) {
-        hash.update(chunk as Buffer);
-      }
-    } catch (err) {
-      throw new Error(`${context}: cannot read ${p}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    return hash.digest('hex');
-  }
-
   /**
-   * Re-verify one cached TCB artifact against the digest/size/mode probe()
-   * verified (lstat symlink check + sha256 + mode + not group/world-writable).
-   * Called at the prepare and launch boundaries so a binary swapped onto disk
-   * after probe() fails closed instead of being executed/loaded.
+   * Copy one probe-verified artifact into the engine-private directory,
+   * hashing the bytes AS THEY ARE READ FOR THE COPY from a single
+   * O_RDONLY|O_NOFOLLOW fd: the digest must equal the manifest entry
+   * verifyVmTcb() verified. Hash object == copied object == the object that
+   * will be executed/loaded — a swap of the source path between verifyVmTcb()
+   * and this copy fails closed on digest mismatch, and after the copy the
+   * original path is never used again (no hash→exec window).
    */
-  private async reVerifyTcbArtifact(
+  private async copyVerifiedArtifact(
     name: 'helper' | 'libkrun' | 'libkrunfw' | 'imageBuilder',
-    context: string,
-  ): Promise<void> {
-    const v = this.requireVerifiedProbe(context);
-    const entry = v.tcbManifest.artifacts[name];
-    const p = v.tcbPaths[name];
-    let lst: Awaited<ReturnType<typeof lstat>>;
+    srcPath: string,
+    expectedSha256: string,
+    destDir: string,
+  ): Promise<string> {
+    const src = await open(srcPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const destPath = path.join(destDir, path.basename(srcPath));
     try {
-      lst = await lstat(p);
-    } catch (err) {
-      throw new Error(`${context}: TCB artifact ${name} missing at ${p}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (!lst.isFile() || lst.isSymbolicLink()) {
-      throw new Error(`${context}: TCB artifact ${name} at ${p} is not a regular file (swapped post-probe?)`);
-    }
-    const digest = await this.hashFile(p, context);
-    if (digest !== entry.sha256) {
-      throw new Error(`${context}: TCB artifact ${name} changed since probe() verification (digest mismatch — swapped post-probe)`);
-    }
-    if ((lst.mode & 0o777) !== entry.mode || (lst.mode & 0o022) !== 0) {
-      throw new Error(`${context}: TCB artifact ${name} mode changed since probe() verification`);
+      const hash = createHash('sha256');
+      const readStream = createReadStream('', { fd: src.fd, autoClose: false });
+      readStream.on('data', (c: Buffer) => hash.update(c));
+      await pipeline(readStream, createWriteStream(destPath, { mode: 0o555 }));
+      const digest = hash.digest('hex');
+      if (digest !== expectedSha256) {
+        await rm(destPath, { force: true }).catch(() => {});
+        throw new Error(
+          `probe: TCB artifact ${name} changed between verification and copy (digest mismatch)`,
+        );
+      }
+      return destPath;
+    } finally {
+      await src.close().catch(() => {});
     }
   }
 
-  private async probeBlkFeature(): Promise<boolean> {
+  private probeBlkFeature(helperPath: string): Promise<boolean> {
     return new Promise((resolve, reject) => {
-      execFile(this.opts.helperPath, ['--has-blk'], { timeout: 10_000 }, (err, _stdout, _stderr) => {
+      execFile(helperPath, ['--has-blk'], { timeout: 10_000 }, (err, _stdout, _stderr) => {
         if (err) {
           // execFile sets err.code to the exit status for non-zero exits.
           if (typeof err.code === 'number') {
@@ -315,6 +335,13 @@ export class VmEngineImpl implements VmEnginePort {
       };
     }
     try {
+      // Re-probe invalidates previously verified state + its private copies:
+      // the new verification must not silently inherit a stale private dir.
+      if (this.verifiedProbe) {
+        const dir = this.verifiedProbe.privateDir;
+        this.verifiedProbe = undefined;
+        if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
       const sv = await this.sandbox();
       // (1) Verify TCB artifacts (helper, libkrun, libkrunfw, image-builder)
       //     against the on-disk vm-tcb-manifest — digest/size/mode/symlink/
@@ -323,6 +350,23 @@ export class VmEngineImpl implements VmEnginePort {
         artifactsDir: this.opts.artifactsDir,
         manifestPath: this.opts.tcbManifestPath,
       });
+      // (1a) EXECUTION-PATH BINDING: the ONLY helper binary that may ever
+      //     execute is the one verifyVmTcb just verified. A configured
+      //     opts.helperPath that resolves (realpath) to anything other than
+      //     the verified path fails closed BEFORE any exec — otherwise the
+      //     BLK probe below (and later start()) would exec an unverified
+      //     binary while the TCB verification covered a different file.
+      const [configuredHelper, verifiedHelper] = await Promise.all([
+        realpath(this.opts.helperPath).catch(() => null),
+        realpath(verified.paths.helper).catch(() => null),
+      ]);
+      if (!configuredHelper || !verifiedHelper || configuredHelper !== verifiedHelper) {
+        return {
+          available: false,
+          platform: this.deps.platform,
+          reason: `helperPath (${this.opts.helperPath}) does not resolve to the verified TCB helper (${verified.paths.helper}) — refusing to exec an unverified binary`,
+        };
+      }
       // (1b) verifyGateManifest compares the gate manifest's pinned
       //     `artifacts[k]` (sha256:<hex>) refs to `loadedArtifactDigests[k]`.
       //     Thread those digests from the EXACT manifest body verifyVmTcb just
@@ -473,11 +517,13 @@ export class VmEngineImpl implements VmEnginePort {
           releaseManifest: 'missing',
         };
       }
-      // (4) Real BLK feature probe via the TCB-verified helper. Fail-closed:
-      //     if libkrun was not built with KRUN_FEATURE_BLK, the helper exits 1.
+      // (4) Real BLK feature probe via the TCB-verified helper — executed at
+      //     its realpath'd VERIFIED path (step 1a bound opts.helperPath to
+      //     it), never at an independently configured path. Fail-closed: if
+      //     libkrun was not built with KRUN_FEATURE_BLK, the helper exits 1.
       let blkFeature: 'present' | 'absent';
       try {
-        blkFeature = (await this.probeBlkFeature()) ? 'present' : 'absent';
+        blkFeature = (await this.probeBlkFeature(verifiedHelper)) ? 'present' : 'absent';
       } catch (err) {
         return {
           available: false,
@@ -496,14 +542,44 @@ export class VmEngineImpl implements VmEnginePort {
           blkFeature: 'absent',
         };
       }
+      // (5) OBJECT BINDING: copy the four verified artifacts into an
+      //     engine-private 0700 directory, hashing the bytes AS THEY ARE READ
+      //     FOR THE COPY from a single O_NOFOLLOW fd (copyVerifiedArtifact) —
+      //     each copy's digest must equal the manifest verifyVmTcb() verified.
+      //     After this point ONLY the private copies are executed/loaded
+      //     (start() execs the private helper with the loader path pointed at
+      //     the private dir; getVerifiedImageBuilderPath() hands out the
+      //     private builder). "Verified object" and "used object" are the same
+      //     inode — a post-probe swap of the original paths is irrelevant, so
+      //     there is no hash→exec TOCTOU window left to close.
+      const privateDir = await mkdtemp(
+        path.join(this.opts.privateDirBase ?? tmpdir(), 'oct-vm-tcb-'),
+      ); // mkdtemp creates 0700
+      let privatePaths: VmTcbArtifacts;
+      try {
+        privatePaths = {
+          helper: await this.copyVerifiedArtifact('helper', verified.paths.helper, verified.manifest.artifacts.helper.sha256, privateDir),
+          libkrun: await this.copyVerifiedArtifact('libkrun', verified.paths.libkrun, verified.manifest.artifacts.libkrun.sha256, privateDir),
+          libkrunfw: await this.copyVerifiedArtifact('libkrunfw', verified.paths.libkrunfw, verified.manifest.artifacts.libkrunfw.sha256, privateDir),
+          imageBuilder: await this.copyVerifiedArtifact('imageBuilder', verified.paths.imageBuilder, verified.manifest.artifacts.imageBuilder.sha256, privateDir),
+        };
+      } catch (err) {
+        await rm(privateDir, { recursive: true, force: true }).catch(() => {});
+        throw err;
+      }
       // Cache the fully-verified state: resolveRootfs()/assertRootfsQualified()/
       // start() consume ONLY this instance. The gate manifest here is the one
-      // the release signature bound to; the TCB digests/paths are the ones
-      // verifyVmTcb verified. A post-probe on-disk swap of gate-manifest.json
-      // is invisible to the prepare/start phases (they never re-read it), and
-      // the TCB/rootfs files are re-verified against these cached digests at
-      // the prepare and launch boundaries.
-      this.verifiedProbe = { gateManifest, tcbManifest: verified.manifest, tcbPaths: verified.paths };
+      // the release signature bound to; the TCB paths are the engine-private
+      // copies of the bytes verifyVmTcb verified. A post-probe on-disk swap of
+      // gate-manifest.json is invisible to the prepare/start phases (they never
+      // re-read it), and swaps of the original TCB paths cannot affect the
+      // private copies.
+      this.verifiedProbe = {
+        gateManifest,
+        tcbManifest: verified.manifest,
+        tcbPaths: privatePaths,
+        privateDir,
+      };
       return {
         available: true,
         platform: this.deps.platform,
@@ -522,52 +598,62 @@ export class VmEngineImpl implements VmEnginePort {
 
   async resolveRootfs(ref: string): Promise<VerifiedArtifact> {
     // The rootfs ref is a block-image byte digest (sha256:<64hex>). Resolution
-    // re-hashes the on-disk file under rootfsDir and asserts equality with the
-    // ref. The returned artifact is STORED by the backend orchestrator as its
-    // rootfsArtifact, so this MUST return a real VerifiedArtifact — never
-    // throw on the success path.
+    // opens the on-disk file under rootfsDir ONCE with O_RDONLY|O_NOFOLLOW and
+    // hashes FROM THE OPEN FD, asserting equality with the ref — the object
+    // hashed is the object kept open, so a path swap between the hash and any
+    // later use is impossible by construction. The fd is then PINNED on the
+    // instance: start() inherits it into the helper and the launch spec
+    // references /dev/fd/N, so the attached image is the verified inode even
+    // if the path is replaced afterwards. The returned artifact is STORED by
+    // the backend orchestrator as its rootfsArtifact, so this MUST return a
+    // real VerifiedArtifact — never throw on the success path.
     //
     // QUALIFICATION consults ONLY the probe()-cached (signature-verified) gate
     // manifest — this method never re-reads gate-manifest.json, so a
     // post-probe swap with a self-consistent but UNSIGNED gate is invisible
-    // here. This is also the PREPARE BOUNDARY for the TCB: all four artifacts
-    // are re-verified against the probe-cached manifest because the image
-    // builder is consumed immediately after this method returns (backend
-    // prepare() builds the block images with it).
+    // here.
     const sv = await this.sandbox();
-    this.requireVerifiedProbe('resolveRootfs');
-    await this.reVerifyTcbArtifact('helper', 'resolveRootfs');
-    await this.reVerifyTcbArtifact('libkrun', 'resolveRootfs');
-    await this.reVerifyTcbArtifact('libkrunfw', 'resolveRootfs');
-    await this.reVerifyTcbArtifact('imageBuilder', 'resolveRootfs');
-    const v = this.verifiedProbe!;
+    const v = this.requireVerifiedProbe('resolveRootfs');
     if (!sv.isRootfsQualified(v.gateManifest, ref)) {
       throw new Error(`resolveRootfs: ref not in qualifiedRootfsDigests: ${ref}`);
     }
     const absolutePath = path.join(this.opts.rootfsDir, ref);
-    let st: Awaited<ReturnType<typeof stat>>;
+    let fdHandle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      st = await stat(absolutePath);
+      fdHandle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (err) {
-      throw new Error(`resolveRootfs: cannot stat rootfs file ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`resolveRootfs: cannot open rootfs file ${absolutePath}: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const recomputed = 'sha256:' + await this.hashFile(absolutePath, 'resolveRootfs');
-    if (recomputed !== ref) {
-      throw new Error(`resolveRootfs: byte digest mismatch (expected ${ref}, got ${recomputed})`);
+    try {
+      const st = await fdHandle.stat();
+      const hash = createHash('sha256');
+      const stream = createReadStream('', { fd: fdHandle.fd, autoClose: false });
+      for await (const chunk of stream) {
+        hash.update(chunk as Buffer);
+      }
+      const recomputed = 'sha256:' + hash.digest('hex');
+      if (recomputed !== ref) {
+        throw new Error(`resolveRootfs: byte digest mismatch (expected ${ref}, got ${recomputed})`);
+      }
+      // Replace any previously pinned rootfs fd, then pin THIS verified fd.
+      await this.resolvedRootfsHandle?.close().catch(() => {});
+      this.resolvedRootfsHandle = fdHandle;
+      this.resolvedRootfsPath = absolutePath;
+      this.resolvedRootfsRef = ref;
+      fdHandle = undefined; // ownership transferred to the instance
+      return {
+        ref,
+        absolutePath,
+        // The rootfs manifestDigest IS its byte ref — a rootfs is a sealed
+        // artifact whose tree identity is the sealed bytes themselves (there is
+        // no separate source tree to snapshot, unlike skill block images).
+        manifestDigest: ref,
+        size: st.size,
+        mode: st.mode & 0o777,
+      };
+    } finally {
+      if (fdHandle) await fdHandle.close().catch(() => {});
     }
-    // Stash the resolved path so the subsequent assertExecutablesQualified call
-    // can stat guest files against it without the backend re-threading it.
-    this.resolvedRootfsPath = absolutePath;
-    return {
-      ref,
-      absolutePath,
-      // The rootfs manifestDigest IS its byte ref — a rootfs is a sealed
-      // artifact whose tree identity is the sealed bytes themselves (there is
-      // no separate source tree to snapshot, unlike skill block images).
-      manifestDigest: ref,
-      size: st.size,
-      mode: st.mode & 0o777,
-    };
   }
 
   async assertRootfsQualified(ref: string): Promise<void> {
@@ -596,15 +682,22 @@ export class VmEngineImpl implements VmEnginePort {
       );
     }
     // Real stat seam (HI-2): mount the rootfs image read-only per call and stat
-    // the guest path. The loopback mount needs CAP_SYS_ADMIN, available on the
+    // the guest path. Mount from the PINNED FD via /proc/self/fd/N when the fd
+    // is pinned (Linux — the only platform where the loopback mount runs), so
+    // the mounted image is the verified inode rather than a possibly-swapped
+    // path. The loopback mount needs CAP_SYS_ADMIN, available on the
     // privileged-Linux CI lane where the VM backend's prepare() runs. The
     // factory is fail-closed: on non-Linux it throws rather than silently
     // returning null (a mount failure must never degrade to "all executables
     // qualified"). The VM lane on macOS cannot loopback-mount ext4, so the
     // production path that exercises this runs only where CAP_SYS_ADMIN is
     // available; the previous stub (always-null) is gone.
+    const mountSource =
+      this.resolvedRootfsHandle !== undefined && process.platform === 'linux'
+        ? `/proc/self/fd/${this.resolvedRootfsHandle.fd}`
+        : rootfsPath;
     await assertExecutablesQualified(ref, executables, bins, {
-      rootfsPath,
+      rootfsPath: mountSource,
       statRootfsFile: createLoopbackStatRootfsFile(),
     });
   }
@@ -630,37 +723,42 @@ export class VmEngineImpl implements VmEnginePort {
       );
     }
 
-    // LAUNCH BOUNDARY re-verification (fail closed, immediately before exec).
-    // probe() verified the TCB binaries + gate manifest and cached them; this
-    // re-check closes the probe→spawn window so a file swapped after probe()
-    // (or after prepare()'s boundary check) cannot be executed:
-    //   - helper / libkrun / libkrunfw re-hashed against the cached manifest
-    //     (the helper is exec'd below; the libs are loaded by the linker)
-    //   - rootfs image re-hashed against its ref (attached via krun_add_disk
-    //     inside the helper) AND gated against the cached signature-verified
-    //     qualifiedRootfsDigests
+    // LAUNCH BINDING (fail closed). Everything executed/attached here comes
+    // from the probe()-verified state — never from re-read paths:
+    //   - helper: the engine-private copy probe() made of the verified helper
+    //     (executed below; a post-probe swap of the original path is irrelevant)
+    //   - libkrun/libkrunfw: the private copies, via *_LIBRARY_PATH=privateDir
+    //   - rootfs: the fd pinned at resolveRootfs(), inherited at fd 5 and
+    //     referenced as /dev/fd/5 in the launch spec — the attached image is
+    //     the verified inode even if the path was swapped after resolveRootfs
     const v = this.requireVerifiedProbe('start');
-    if (this.opts.helperPath !== v.tcbPaths.helper) {
-      throw new Error(
-        'start: opts.helperPath diverges from the probe-verified TCB helper path — refusing to exec an unverified binary',
-      );
-    }
-    await this.reVerifyTcbArtifact('helper', 'start');
-    await this.reVerifyTcbArtifact('libkrun', 'start');
-    await this.reVerifyTcbArtifact('libkrunfw', 'start');
     const svStart = await this.sandbox();
     if (!svStart.isRootfsQualified(v.gateManifest, config.rootfsArtifact.ref)) {
       throw new Error(`start: rootfs ref not in the probe-verified gate manifest: ${config.rootfsArtifact.ref}`);
     }
-    const rootfsNow = await this.hashFile(config.rootfsArtifact.absolutePath, 'start');
-    if ('sha256:' + rootfsNow !== config.rootfsArtifact.ref) {
-      throw new Error('start: rootfs image changed since resolveRootfs (digest mismatch — swapped pre-launch)');
+    if (
+      this.resolvedRootfsHandle === undefined ||
+      config.rootfsArtifact.ref !== this.resolvedRootfsRef
+    ) {
+      throw new Error(
+        'start: rootfs fd not pinned — resolveRootfs must pin the same ref before start()',
+      );
     }
 
     // The helper's argv[1] is the base64url(JSON) helper launch spec, NOT the
     // guest bootstrapArgv. The guest bootstrapArgv is NESTED inside the spec.
-    const helperSpecToken = buildHelperLaunchSpec(config, config.trustedEnv ?? []);
-    const argv = [this.opts.helperPath, helperSpecToken];
+    // The spec references the rootfs via the inherited fd (/dev/fd/5), so the
+    // helper's krun_add_disk opens the PINNED verified inode — not whatever
+    // file the original path may now resolve to.
+    const specConfig: VmStartConfig = {
+      ...config,
+      rootfsArtifact: {
+        ...config.rootfsArtifact,
+        absolutePath: `/dev/fd/${ROOTFS_INHERIT_FD}`,
+      },
+    };
+    const helperSpecToken = buildHelperLaunchSpec(specConfig, config.trustedEnv ?? []);
+    const argv = [v.tcbPaths.helper, helperSpecToken];
 
     // --- R9 P1-1: two cloexec pipes, read end FIRST, write SECOND. ---
     const [h2gRead, h2gWrite] = await this.deps.pipe(); // host→guest
@@ -673,25 +771,33 @@ export class VmEngineImpl implements VmEnginePort {
     // the cloexec bit SET — the helper would lose the fd across exec. ---
     const tempH2gRead = await this.deps.dupFdCloexec(h2gRead, DUPFD_MIN);
     const tempG2hWrite = await this.deps.dupFdCloexec(g2hWrite, DUPFD_MIN);
-    if (tempH2gRead < DUPFD_MIN || tempG2hWrite < DUPFD_MIN) {
+    // The pinned rootfs fd is also moved to a cloexec temp slot ≥10 so its
+    // adddup2 below is a REAL dup2 (source ≠ target) that clears FD_CLOEXEC on
+    // the target — the helper keeps fd 5 across exec and opens the verified
+    // image via /dev/fd/5.
+    const tempRootfsRead = await this.deps.dupFdCloexec(this.resolvedRootfsHandle.fd, DUPFD_MIN);
+    if (tempH2gRead < DUPFD_MIN || tempG2hWrite < DUPFD_MIN || tempRootfsRead < DUPFD_MIN) {
       throw new Error(
-        `F_DUPFD_CLOEXEC returned a fd below ${DUPFD_MIN} (tempH2gRead=${tempH2gRead}, tempG2hWrite=${tempG2hWrite}); R10 P1-2 source≠target invariant cannot be guaranteed`,
+        `F_DUPFD_CLOEXEC returned a fd below ${DUPFD_MIN} (tempH2gRead=${tempH2gRead}, tempG2hWrite=${tempG2hWrite}, tempRootfsRead=${tempRootfsRead}); R10 P1-2 source≠target invariant cannot be guaranteed`,
       );
     }
-    if (tempH2gRead === tempG2hWrite) {
+    if (tempH2gRead === tempG2hWrite || tempH2gRead === tempRootfsRead || tempG2hWrite === tempRootfsRead) {
       throw new Error(
-        'F_DUPFD_CLOEXEC returned the same temp fd for h2gRead and g2hWrite; collision',
+        'F_DUPFD_CLOEXEC returned colliding temp fds for h2gRead/g2hWrite/rootfs; collision',
       );
     }
 
     // --- File actions installed in the helper (child) by posix_spawn. ---
     // Order matters: adddup2(tempH2gRead → 3) gives the helper its H2G read
     // end at fd 3; adddup2(tempG2hWrite → 4) gives it its G2H write end at
-    // fd 4. The temp fds themselves are cloexec so they DON'T survive exec —
-    // only the dup2'd targets at 3/4 do (dup2 clears cloexec on the target).
+    // fd 4; adddup2(tempRootfsRead → 5) gives it the verified rootfs image at
+    // fd 5 (the launch spec references /dev/fd/5). The temp fds themselves are
+    // cloexec so they DON'T survive exec — only the dup2'd targets at 3/4/5
+    // do (dup2 clears cloexec on the target).
     const fileActions: SpawnFileAction[] = [
       { kind: 'adddup2', src: tempH2gRead, target: H2G_READ_FD },
       { kind: 'adddup2', src: tempG2hWrite, target: G2H_WRITE_FD },
+      { kind: 'adddup2', src: tempRootfsRead, target: ROOTFS_INHERIT_FD },
     ];
 
     // --- Spawn attributes. Darwin uses POSIX_SPAWN_CLOEXEC_DEFAULT to close
@@ -704,10 +810,12 @@ export class VmEngineImpl implements VmEnginePort {
         : [];
 
     // --- fds the PARENT (Node) must close AFTER spawn: its own copies of the
-    // ends the helper now owns (h2gRead via temp→3, g2hWrite via temp→4) plus
-    // the temp slots themselves. Node RETAINS g2hRead (read frames) and
-    // h2gWrite (send commands). ---
-    const parentCloseFds = [h2gRead, g2hWrite, tempH2gRead, tempG2hWrite];
+    // ends the helper now owns (h2gRead via temp→3, g2hWrite via temp→4, the
+    // rootfs via temp→5) plus the temp slots themselves. Node RETAINS g2hRead
+    // (read frames), h2gWrite (send commands), and its OWN rootfs fd — the
+    // pinned verified inode stays open on the engine instance until close(),
+    // so it can serve a future start() and is released by backend cleanup. ---
+    const parentCloseFds = [h2gRead, g2hWrite, tempH2gRead, tempG2hWrite, tempRootfsRead];
 
     const libPathVar =
       this.deps.platform === 'darwin-arm64' ? 'DYLD_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
@@ -719,12 +827,16 @@ export class VmEngineImpl implements VmEnginePort {
       OCTOPUS_VM_MEM_MIB: String(config.memMib),
       OCTOPUS_VM_CPUS: String(config.cpus),
     };
-    if (process.env[libPathVar]) {
-      env[libPathVar] = process.env[libPathVar];
-    }
+    // The helper links -lkrun/-lkrunfw with NO rpath (build-vm-helper.mjs
+    // full-link path), and the vendored dylibs carry unversioned/bare or
+    // @rpath install names — both loader search orders (Linux ld.so and macOS
+    // dyld) consult *_LIBRARY_PATH BEFORE the install-name/rpath resolution.
+    // Point the loader at the engine-private copies: the verified object is
+    // the loaded object, and a swap of the install-dir libs is irrelevant.
+    env[libPathVar] = v.privateDir;
 
     const raw = await this.deps.spawn(
-      this.opts.helperPath,
+      v.tcbPaths.helper,
       argv,
       env,
       fileActions,
@@ -808,7 +920,27 @@ export class VmEngineImpl implements VmEnginePort {
   }
 
   async close(): Promise<void> {
-    // Stateless engine; instances own their own lifecycle. Nothing to close.
+    // Release the pinned rootfs fd and the engine-private verified TCB copies.
+    await this.resolvedRootfsHandle?.close().catch(() => {});
+    this.resolvedRootfsHandle = undefined;
+    this.resolvedRootfsPath = undefined;
+    this.resolvedRootfsRef = undefined;
+    if (this.verifiedProbe?.privateDir) {
+      await rm(this.verifiedProbe.privateDir, { recursive: true, force: true }).catch(() => {});
+    }
+    this.verifiedProbe = undefined;
+  }
+
+  /**
+   * The probe-verified image-builder binary path (the engine-private copy of
+   * the artifact verifyVmTcb() verified). The backend/builder port MUST
+   * execute this — never an independently configured path — so the executed
+   * builder is the verified one (assembly binds the configured
+   * builderBinaryPath to the same realpath before construction).
+   */
+  async getVerifiedImageBuilderPath(): Promise<string> {
+    const v = this.requireVerifiedProbe('getVerifiedImageBuilderPath');
+    return v.tcbPaths.imageBuilder;
   }
 
   /**

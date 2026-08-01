@@ -227,6 +227,10 @@ export class VmSandboxBackend implements SandboxBackend {
     // true so a missing dir (e.g. never created, or already reaped) is a no-op.
     try { await rm(this.workDir, { recursive: true, force: true }); }
     catch (err) { softReasons.push(`workDir removal failed: ${(err as Error).message ?? String(err)}`); }
+    // SOFT: release the engine's pinned rootfs fd + engine-private verified TCB
+    // copies (probe() materialized them; they live for the backend's lifetime).
+    try { await this.input.engine.close(); }
+    catch (err) { softReasons.push(`engine close failed: ${(err as Error).message ?? String(err)}`); }
     if (softReasons.length) console.warn('VmSandboxBackend.cleanup: soft teardown errors', softReasons);
     this.cleanupOutcome = {
       error: containmentReasons.length ? new ContainmentCleanupError(containmentReasons) : undefined,

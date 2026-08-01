@@ -9,6 +9,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import {
   VmSandboxBackend,
@@ -20,8 +21,10 @@ import type { VmEngineOptions } from '@agentoctopus/sandbox-vm-native';
 
 /** Minimal surface of the optional native package we construct against. */
 export type NativeVmModule = {
-  VmEngineImpl?: new (opts: VmEngineOptions, deps: unknown) => VmEnginePort;
-  VmImageBuilderImpl?: new (builderBinaryPath?: string) => VmImageBuilderPort;
+  VmEngineImpl?: new (opts: VmEngineOptions, deps: unknown) => VmEnginePort & {
+    getVerifiedImageBuilderPath(): Promise<string>;
+  };
+  VmImageBuilderImpl?: new (builderBinaryPath?: string | (() => Promise<string>)) => VmImageBuilderPort;
   createNativeDeps?: () => unknown;
 };
 
@@ -207,7 +210,29 @@ export async function createVmBackend(
     };
   }
 
-  const engine: VmEnginePort = new native.VmEngineImpl(engineOpts, native.createNativeDeps());
-  const imageBuilder: VmImageBuilderPort = new native.VmImageBuilderImpl(resolvedBuilderPath);
+  // EXECUTION-PATH BINDING (F1): the builder that executes must be the binary
+  // the engine's probe() verifies (artifactsDir/vm-image-builder). An
+  // independently configured builderBinaryPath that resolves elsewhere would
+  // execute UNVERIFIED — reject it (realpath equality) instead of constructing
+  // a backend whose prepare() shells out to an untrusted binary.
+  const expectedBuilderPath = path.join(engineOpts.artifactsDir, 'vm-image-builder');
+  const [resolvedBuilderReal, expectedBuilderReal] = await Promise.all([
+    realpath(resolvedBuilderPath).catch(() => null),
+    realpath(expectedBuilderPath).catch(() => null),
+  ]);
+  if (!resolvedBuilderReal || !expectedBuilderReal || resolvedBuilderReal !== expectedBuilderReal) {
+    return {
+      unavailable: true,
+      reason: `VM builderBinaryPath (${resolvedBuilderPath}) does not resolve to the TCB-verified builder (${expectedBuilderPath}) — refusing to exec an unverified binary`,
+    };
+  }
+
+  const engine = new native.VmEngineImpl(engineOpts, native.createNativeDeps());
+  // Lazy resolver: the executed builder path is resolved from the engine's
+  // probe()-verified state at execution time (its engine-private copy), never
+  // from the independently configured path.
+  const imageBuilder: VmImageBuilderPort = new native.VmImageBuilderImpl(
+    () => engine.getVerifiedImageBuilderPath(),
+  );
   return new VmSandboxBackend({ config, engine, imageBuilder });
 }

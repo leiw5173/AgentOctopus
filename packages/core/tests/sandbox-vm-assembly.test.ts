@@ -25,7 +25,10 @@ function makeConfig(): SandboxConfig {
   return SandboxConfigSchema.parse({});
 }
 
-// Create dummy binaries so the assembly's existence check passes.
+// Create dummy binaries so the assembly's existence check passes. helper,
+// builder, and artifactsDir are co-located: round 5 binds the executed builder
+// to the TCB-verified binary (artifactsDir/vm-image-builder) via realpath
+// equality, so an artifactsDir diverging from the builder's dir is rejected.
 function makeVmConfigWithDummyBinaries(): { config: SandboxConfig; cleanup: () => void } {
   const dir = mkdtempSync(path.join(tmpdir(), 'octopus-vm-asm-'));
   const helperPath = path.join(dir, 'sandbox-vm-helper');
@@ -37,6 +40,7 @@ function makeVmConfigWithDummyBinaries(): { config: SandboxConfig; cleanup: () =
       rootfs: 'sha256:' + 'a'.repeat(64),
       helperPath,
       builderBinaryPath: builderPath,
+      artifactsDir: dir,
     },
   });
   return { config, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
@@ -69,6 +73,9 @@ function fakeEngine(): new () => VmEnginePort {
     }
     async close(): Promise<void> {
       /* no-op fake */
+    }
+    async getVerifiedImageBuilderPath(): Promise<string> {
+      return '/fake/vm-image-builder';
     }
   };
 }
@@ -138,6 +145,41 @@ describe('createVmBackend', () => {
       }
     } finally {
       cleanup();
+    }
+  });
+
+  // F1 (round 5): a builderBinaryPath that does not realpath-resolve to the
+  // TCB-verified builder (artifactsDir/vm-image-builder) would execute
+  // UNVERIFIED — the assembly must refuse to construct the backend.
+  it('returns unavailable when builderBinaryPath diverges from the verified builder', async () => {
+    const { config, cleanup } = makeVmConfigWithDummyBinaries();
+    // Point the builder at a DIFFERENT real file outside artifactsDir.
+    const otherDir = mkdtempSync(path.join(tmpdir(), 'octopus-vm-asm-evil-'));
+    const evilBuilder = path.join(otherDir, 'vm-image-builder');
+    writeFileSync(evilBuilder, '#!/bin/sh\n');
+    const divergent = SandboxConfigSchema.parse({
+      vm: {
+        rootfs: 'sha256:' + 'a'.repeat(64),
+        helperPath: (config.vm as { helperPath?: string }).helperPath,
+        builderBinaryPath: evilBuilder,
+        artifactsDir: (config.vm as { artifactsDir?: string }).artifactsDir,
+      },
+    });
+    try {
+      const result = await createVmBackend(divergent, {
+        loadNative: async () => ({
+          VmEngineImpl: fakeEngine(),
+          VmImageBuilderImpl: fakeImageBuilder(),
+          createNativeDeps: () => ({ platform: 'unsupported' } as unknown as VmEngineDeps),
+        }),
+      });
+      expect('unavailable' in result).toBe(true);
+      if ('unavailable' in result) {
+        expect(result.reason).toMatch(/does not resolve to the TCB-verified builder/);
+      }
+    } finally {
+      cleanup();
+      rmSync(otherDir, { recursive: true, force: true });
     }
   });
 

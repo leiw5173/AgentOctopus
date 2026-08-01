@@ -96,27 +96,38 @@ Fail-closed semantics:
   harness) an absent pair degrades softly to `releaseManifest:'missing'` and
   the capability probe stays up.
 
-Post-probe TOCTOU hardening:
+Verified-object binding (post-probe TOCTOU):
 
 `probe()` is the only point that reads and verifies `gate-manifest.json`
 (binding the release signature to it) and the TCB manifest (`verifyVmTcb`
 returns the exact manifest it verified — there is no double-read substitution
-window). On success the engine caches the verified state per instance, and
-every later phase consumes only that cache:
+window). It then binds the **verified object** to the **used object**, so
+later phases never trust an on-disk path again:
 
-- `resolveRootfs()` / `assertRootfsQualified()` never re-read the gate file —
-  a post-probe swap with a self-consistent but unsigned gate is invisible.
-- **Prepare boundary:** all four TCB artifacts (helper, libkrun, libkrunfw,
-  image-builder) are re-verified (digest + symlink + mode) when
-  `resolveRootfs()` runs, immediately before the image builder is consumed.
-- **Launch boundary:** `start()` re-verifies helper/libkrun/libkrunfw and
-  re-hashes the rootfs image against its ref and the cached gate's
-  `qualifiedRootfsDigests` immediately before exec / `krun_add_disk`.
-- A gate, helper, library, builder, or rootfs swapped after `probe()` fails
-  closed (regression-tested). The residual hash→exec gap (microseconds)
-  cannot be closed from JavaScript without fd-pinning inside the C helper;
-  file permissions (0555/0444, root-owned in release installs) are the outer
-  defense for that window.
+- **Exec-path binding:** before any execution, `probe()` realpath-enforces
+  that the configured helper path resolves to the `verifyVmTcb()`-verified
+  helper — a divergent path fails closed and the capability probe never runs.
+  The assembly likewise realpath-enforces the configured builder path against
+  `artifactsDir/vm-image-builder`, and the image builder is executed at the
+  engine's probe-verified path (resolved lazily after probe), never at an
+  independently configured path.
+- **Private verified copies:** `probe()` copies the helper, libkrun,
+  libkrunfw, and image-builder into an engine-private 0700 directory, hashing
+  the bytes *as they are read for the copy* from a single `O_NOFOLLOW` file
+  descriptor — the copy's digest must equal the verified manifest entry. Only
+  those copies are ever executed or loaded (`start()` execs the private
+  helper with the dynamic-loader path pointed at the private directory), so a
+  post-probe swap of the original files is irrelevant.
+- **Pinned rootfs fd:** `resolveRootfs()` opens the rootfs image
+  `O_RDONLY|O_NOFOLLOW`, hashes from that open descriptor, and keeps it
+  pinned. `start()` inherits the descriptor into the helper at fd 5 and the
+  launch spec references `/dev/fd/5` — the attached image is the verified
+  inode even if the path is replaced after resolution. `engine.close()`
+  (invoked by backend cleanup) releases the fd and the private directory.
+- A helper, library, builder, or rootfs swapped after `probe()` is
+  **neutralized** — the verified copy or pinned inode is what runs
+  (regression-tested); a rootfs swapped *before* resolution still fails
+  closed on the from-fd digest check.
 
 Release infrastructure:
 
