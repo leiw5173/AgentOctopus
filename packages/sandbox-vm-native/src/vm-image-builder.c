@@ -50,9 +50,19 @@
  * to mount read-only as a virtio-blk backing file. Mountability is verified at
  * L3 (Linux, CI-owned); Task 13's own tests verify rejection behavior only.
  *
- * Build: cc -std=c11 -Wall -Wextra -Werror. Pure portable POSIX (openat/fstat/
- * open/fsync/chmod/unlink/write/lseek/fcntl) — builds and runs on macOS AND Linux.
+ * Build: cc -std=c11 -Wall -Wextra -Werror. Requires _GNU_SOURCE (defined
+ * below, before the includes) — this writer's descriptor-relative traversal
+ * uses openat/fdopendir/fchmod and O_CLOEXEC/O_NOFOLLOW/F_DUPFD_CLOEXEC
+ * (POSIX.1-2008) plus O_DIRECTORY (a Linux/GNU extension). Strict -std=c11
+ * (__STRICT_ANSI__) hides all of these, so the compile fails without it.
  */
+
+/* _GNU_SOURCE exposes the descriptor-relative syscalls + flags this file uses
+ * (openat, fdopendir, fchmod, O_CLOEXEC, O_NOFOLLOW, F_DUPFD_CLOEXEC,
+ * O_DIRECTORY). Must precede every system header. It also implies
+ * _POSIX_C_SOURCE=200809L and _ATFILE_SOURCE, and overrides the strict-ISO
+ * hiding that -std=c11 (__STRICT_ANSI__) applies to the default feature set. */
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
