@@ -635,7 +635,19 @@ jobs:
           # default reporter's failures/assertions still reach the workflow log;
           # json-only would swallow every assertion into a runner-local file and
           # leave each failure a black box.
+          #
+          # --config vitest.security-lane.config.ts adds `retry: 2` for THIS lane
+          # only (its `include` also selects exactly these two files). On the
+          # ~930MB self-hosted runner a sandbox's os-helper fork/exec occasionally
+          # stalls past a per-op timeout under memory/IO pressure — an empty or
+          # exit-137 probe, which is a HARNESS timeout, never a violated property
+          # (netns isolation / read-only CA / proxy-only egress are deterministic
+          # given the code). retry re-rolls the environmental timing dice; a
+          # genuine violation fails the assertion on EVERY attempt and still trips
+          # the assert-no-skipped-tests gate below (empirically validated: real
+          # failures stay "failed" after exhausting retries and are not masked).
           pnpm --filter @agentoctopus/sandbox exec vitest run \
+            --config vitest.security-lane.config.ts \
             tests/security/linux-lane.test.ts \
             tests/security/linux-topology.test.ts \
             --reporter=json --reporter=default \
