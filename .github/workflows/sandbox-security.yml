@@ -334,6 +334,30 @@ jobs:
           # rmdir (or the fresh mount) sees a clean path.
           rm -rf "$tmp" 2>/dev/null || true
           echo "rescue done; .tmp present? $(test -e "$tmp" && echo yes || echo no); still-mounted? $(findmnt -rn --target "$tmp" -o FSTYPE 2>/dev/null || echo no)"
+
+          # --- fork/EAGAIN diagnostics (persistent-runner process leak) -------
+          # A later checkout died `tar: child process: Cannot fork: Resource
+          # temporarily unavailable` = EAGAIN on fork: the runner hit a process
+          # limit (ulimit -u / cgroup pids.max) or transient PID exhaustion.
+          # Self-hosted runners persist across jobs, so PROCESSES leaked by a
+          # prior lane (dockerd children, leaked sandbox helpers, zombie
+          # rootfs/session processes) accumulate and shrink the fork budget for
+          # the next job. Dump the process state BEFORE checkout so we can see
+          # whether the baseline is already exhausted and by WHOM. Pure
+          # observation here — every probe guarded, never fails the step.
+          echo "=== process budget (pre-checkout) ==="
+          echo "ulimit -u (max user processes): $(ulimit -u 2>/dev/null || echo '?')"
+          echo "kernel pid_max:                 $(cat /proc/sys/kernel/pid_max 2>/dev/null || echo '?')"
+          echo "running processes (this user):  $(ps -u "$(id -un)" 2>/dev/null | tail -n +2 | wc -l || echo '?')"
+          echo "total processes (all users):    $(ps -e 2>/dev/null | tail -n +2 | wc -l || echo '?')"
+          cg="/sys/fs/cgroup/agentoctopus-ci"
+          if [ -r "$cg/pids.current" ]; then
+            echo "cgroup pids.current/max:        $(cat "$cg/pids.current" 2>/dev/null)/$(cat "$cg/pids.max" 2>/dev/null)"
+          fi
+          echo "--- top process-command counts (all users) ---"
+          ps -eo comm= 2>/dev/null | sort | uniq -c | sort -rn | head -15 || echo "  (ps unavailable)"
+          echo "--- longest-lived processes (possible leaks) ---"
+          ps -eo pid,ppid,etime,comm,args --sort=-etime 2>/dev/null | head -12 || true
           exit 0
       - uses: actions/checkout@v7
       - name: Diagnose disk layout + stage TMPDIR
