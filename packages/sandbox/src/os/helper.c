@@ -519,10 +519,21 @@ static void phase1_outside_chroot(const LaunchSpec *spec, int *outNetnsFd) {
     xmount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
 
     /* Bind the verified runtime root onto itself and remount read-only.
-     * This pins the exact tree verifyRuntimeArtifact() validated. */
+     * This pins the exact tree verifyRuntimeArtifact() validated.
+     *
+     * The bind is MS_REC (replicate any submounts); the remount is NOT.
+     * MS_REC is a no-op for remount in the upstream kernel — remount_ro()
+     * applies the new flags to the top mount only and never recurses. But
+     * some distro kernels (the privileged-CI runner) carry an out-of-tree
+     * mount-flag validator that rejects the MS_REMOUNT|MS_BIND|MS_REC
+     * combination outright (EPERM on 0x5021) even when the tree has no
+     * submounts. Dropping the meaningless MS_REC is behavior-preserving on
+     * mainline and required on such kernels: the verified root itself stays
+     * read-only, and no submounts exist beneath it at this point (the
+     * rootfs /proc is mounted later, after chroot). */
     xmount(spec->root, spec->root, NULL, MS_BIND | MS_REC, NULL);
     xmount(spec->root, spec->root, NULL,
-           MS_BIND | MS_REMOUNT | MS_RDONLY | MS_REC, NULL);
+           MS_BIND | MS_REMOUNT | MS_RDONLY, NULL);
 
     /* Bind each declared host mount, then remount ro,nosuid,nodev. The
      * skill bind additionally gets noexec unless the execution strategy

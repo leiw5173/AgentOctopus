@@ -533,20 +533,20 @@ jobs:
             rmdir "$bindprobe" 2>/dev/null || true
             exit 1
           fi
-          # Diagnostic (this run only): the helper's NEXT mount after the bind
-          # is a read-only REMOUNT (MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC = 0x5021)
-          # of the same root, and it now EPERMs there. Determine empirically
-          # whether AppArmor permits remount-ro under a userns. Outcomes:
-          #   OK   -> the restriction is on RECURSIVE remount -> drop MS_REC in helper.c
-          #   FAIL -> AppArmor denies remount-ro under userns entirely -> helper
-          #           must use a ro loop/bind trick instead of a remount.
-          # Diagnostic only; never fails the step (result is read from the log).
+          # Diagnostic (resolved): the helper's read-only REMOUNT of the rootfs
+          # used MS_REMOUNT|MS_BIND|MS_RDONLY|MS_REC (0x5021) and EPERMed on this
+          # kernel. The probe below proved remount-ro itself IS permitted under
+          # a userns, so the restriction was the no-op MS_REC on the recursive
+          # remount — fixed in helper.c by dropping it. Kept as a one-line
+          # regression guard: if a future change re-introduces a remount the
+          # kernel rejects, this surfaces it at staging, not as 12 ESRCH tests.
           rp="${TMPDIR}/.oct-remount-probe"
           mkdir -p "$rp"
           unshare -Umr sh -c "
             mount --bind '$rp' '$rp' &&
             mount -o remount,ro,bind '$rp'
-          " 2>/tmp/oct-rperr && echo "REMOUNT-RO OK under userns" || echo "REMOUNT-RO FAIL under userns -> $(cat /tmp/oct-rperr)"
+          " 2>/tmp/oct-rperr && echo "STAGE OK: unprivileged-userns remount-ro succeeds" || {
+            echo "ERROR: unprivileged-userns remount-ro FAILS -> $(cat /tmp/oct-rperr)" >&2; exit 1; }
           umount "$rp" 2>/dev/null || true; rmdir "$rp" 2>/dev/null || true
           rmdir "$bindprobe" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
