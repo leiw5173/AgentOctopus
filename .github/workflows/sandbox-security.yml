@@ -533,6 +533,21 @@ jobs:
             rmdir "$bindprobe" 2>/dev/null || true
             exit 1
           fi
+          # Diagnostic (this run only): the helper's NEXT mount after the bind
+          # is a read-only REMOUNT (MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC = 0x5021)
+          # of the same root, and it now EPERMs there. Determine empirically
+          # whether AppArmor permits remount-ro under a userns. Outcomes:
+          #   OK   -> the restriction is on RECURSIVE remount -> drop MS_REC in helper.c
+          #   FAIL -> AppArmor denies remount-ro under userns entirely -> helper
+          #           must use a ro loop/bind trick instead of a remount.
+          # Diagnostic only; never fails the step (result is read from the log).
+          rp="${TMPDIR}/.oct-remount-probe"
+          mkdir -p "$rp"
+          unshare -Umr sh -c "
+            mount --bind '$rp' '$rp' &&
+            mount -o remount,ro,bind '$rp'
+          " 2>/tmp/oct-rperr && echo "REMOUNT-RO OK under userns" || echo "REMOUNT-RO FAIL under userns -> $(cat /tmp/oct-rperr)"
+          umount "$rp" 2>/dev/null || true; rmdir "$rp" 2>/dev/null || true
           rmdir "$bindprobe" 2>/dev/null || true
       - name: Verify privileged Linux lane files are present
         shell: bash
