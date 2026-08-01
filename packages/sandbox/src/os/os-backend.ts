@@ -296,6 +296,14 @@ export class OsSandboxBackend implements SandboxBackend {
    * `cleaned` + this memo.
    */
   private cleanupOutcome: { error?: ContainmentCleanupError } | undefined;
+  /**
+   * Non-benign teardown errors recorded by the most recent netns cleanup
+   * (see netns.ts cleanupErrors). Captured in cleanupPartial step 5 after the
+   * netns handle is released. Empty when teardown was clean. Surfaced via the
+   * concrete-class `netnsCleanupErrors` getter so the privileged lane can
+   * diagnose a leaked veth/netns.
+   */
+  private lastNetnsCleanupErrors: ReadonlyArray<{ argv: string[]; error: string }> = [];
 
   constructor(opts: OsSandboxBackendOptions) {
     if (!opts.sessionId || typeof opts.sessionId !== 'string') {
@@ -320,6 +328,15 @@ export class OsSandboxBackend implements SandboxBackend {
    */
   get skillCgroupPath(): string | undefined {
     return this.cgroup?.path;
+  }
+
+  /**
+   * Non-benign errors recorded by the most recent netns teardown (empty when
+   * clean). CONCRETE-CLASS-ONLY getter (not on the SandboxBackend interface),
+   * mirroring skillCgroupPath — the privileged lane downcasts to read it.
+   */
+  get netnsCleanupErrors(): ReadonlyArray<{ argv: string[]; error: string }> {
+    return this.lastNetnsCleanupErrors;
   }
 
   get isolationLevel(): IsolationLevel {
@@ -932,6 +949,12 @@ export class OsSandboxBackend implements SandboxBackend {
       const n = this.netns;
       this.netns = undefined;
       await tryContainment(() => n.cleanup());
+      // Surface any non-benign teardown errors (EBUSY / EPERM / still-in-use)
+      // recorded by the netns cleanup so callers/tests can diagnose a leaked
+      // veth/netns. Already-absent (ENOENT) results are treated as success by
+      // netns.cleanup() and are NOT recorded, so an empty list with a surviving
+      // object means the delete reported the object already gone.
+      this.lastNetnsCleanupErrors = n.cleanupErrors;
     }
 
     // 6. Launch-spec dir removal (host fs hygiene — soft).
