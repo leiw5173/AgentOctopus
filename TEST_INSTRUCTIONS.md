@@ -1657,6 +1657,22 @@ Test ring-buffer eviction:
 # Fetch latest (no runId) — expected: 200 { success: true, run } (most recent)
 ```
 
+### 3.9 Hermes Acceptance Gate — E2E Skill Smoke
+
+Distinct from the raw-curl smoke in §3.8, this drives the full pipeline through the `hermes-e2e-test` skill's `run.mjs` — the same test Hermes itself invokes for acceptance. The skill lives at `~/.claude/skills/hermes-e2e-test/{SKILL.md,run.mjs}` and is machine-only (not shipped in the repository); install it on your own machine before running.
+
+Prerequisites:
+- Gateway running with `gateway.debugEndpoints: {enabled:true, includeQuery:false, bufferSize:10}` in `~/.agentoctopus/octopus.json`.
+- Two API keys created via `createApiKey` (exported from `@agentoctopus/gateway`): a `free`-tier key for `/ask` and an `admin`-tier key for `/agent/debug/last-run`.
+- `AGENTOCTOPUS_E2E_ASK_KEY` (free key) and `AGENTOCTOPUS_E2E_ADMIN_KEY` (admin key) exported in your shell.
+- Hermes logged in.
+
+```bash
+node ~/.claude/skills/hermes-e2e-test/run.mjs --json
+```
+
+**Expected:** JSON with `"ok": true` and five stages all `"PASS"`: `request-accepted`, `intent-analysis`, `skill-selection`, `sandbox-execution`, `terminal-event`. `run.mjs` posts directly to `POST /agent/ask` with the ask key (embedding a `[trace: oct-e2e-<uuid>]` correlation marker), then polls `GET /agent/debug/last-run` with the admin key and asserts intent extraction, skill match, Docker full-isolation sandbox completion (`phase:'final'`, `exitCode:0`), and exactly-one `request.completed` terminal event. A failing stage sets `"ok": false` and emits `status: "FAIL"` with a `detail` field.
+
 ## Pass / Fail Checklist (Phase E2E)
 
 | # | Test | Pass |
@@ -1669,3 +1685,4 @@ Test ring-buffer eviction:
 | E2E.6 | `debug-telemetry.test.ts` — aggregation by traceId, executionId merge, pending→complete/failed transition, ring buffer | ✅ |
 | E2E.7 | `agent-protocol-debug.test.ts` — correlation-key extraction + trace stripping, exactly-one terminal, debug endpoint 404/403/200 states | ✅ |
 | E2E.8 | Manual E2E smoke — traced request, debug record fetch, access control, includeQuery, ring-buffer eviction | ⏭️ (requires running gateway) |
+| E2E.9 | Hermes acceptance gate — `~/.claude/skills/hermes-e2e-test/run.mjs` 5-stage pipeline smoke (ask key + admin key, debug endpoints enabled) | ⏭️ (requires running gateway + Hermes logged in + machine-only test skill installed) |
