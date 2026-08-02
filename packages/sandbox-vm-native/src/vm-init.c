@@ -590,21 +590,29 @@ int main(int argc, char **argv) {
 
     /* Step 6: decode + validate. */
     size_t tokenLen = strlen(argv[1]);
-    /* DIAGNOSTIC (temporary): report what the guest actually received as
-     * argv[1] so the vm-lane can distinguish a transport-layer corruption
-     * (wrong length / mangled bytes) from a decode-logic bug. */
+    /* DIAGNOSTIC (temporary): report the FULL argv layout the guest receives
+     * (argc + argv[0..2] heads) so the vm-lane reveals exactly how libkrun's
+     * collapsed-string -> kernel cmdline -> init -> execve laid out argv.
+     * Confirmed so far: argv[1] == bootstrapPath (not the blob), so the path
+     * is duplicated somewhere; this captures argv[2] to locate the blob. */
     {
-        char diag[160];
-        size_t head = tokenLen < 24 ? tokenLen : 24;
-        size_t tail = tokenLen > 8 ? 8 : 0;
-        char hb[25]; char tb[9];
-        memcpy(hb, argv[1], head); hb[head] = '\0';
-        if (tail) { memcpy(tb, argv[1] + tokenLen - tail, tail); tb[tail] = '\0'; } else tb[0] = '\0';
-        /* sanitize to printable (base64url only) so the JSON frame stays valid */
-        for (size_t k = 0; k < head; k++) { char c = hb[k]; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) hb[k] = '?'; }
-        for (size_t k = 0; k < tail; k++) { char c = tb[k]; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) tb[k] = '?'; }
+        char diag[512];
+        char a0[40]; char a1[40]; char a2[40];
+        const char *s0 = argv[0] ? argv[0] : "";
+        const char *s1 = argv[1] ? argv[1] : "";
+        const char *s2 = (argc > 2 && argv[2]) ? argv[2] : "";
+        size_t n0 = strlen(s0) < 39 ? strlen(s0) : 39;
+        size_t n1 = strlen(s1) < 39 ? strlen(s1) : 39;
+        size_t n2 = strlen(s2) < 39 ? strlen(s2) : 39;
+        memcpy(a0, s0, n0); a0[n0] = '\0';
+        memcpy(a1, s1, n1); a1[n1] = '\0';
+        memcpy(a2, s2, n2); a2[n2] = '\0';
+        for (char *p = a0; *p; p++) { char c=*p; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) *p='?'; }
+        for (char *p = a1; *p; p++) { char c=*p; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) *p='?'; }
+        for (char *p = a2; *p; p++) { char c=*p; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) *p='?'; }
         int dn = snprintf(diag, sizeof(diag),
-            "{\"diag\":\"argv1\",\"len\":%zu,\"head\":\"%s\",\"tail\":\"%s\"}", tokenLen, hb, tb);
+            "{\"diag\":\"argv\",\"argc\":%d,\"len0\":%zu,\"len1\":%zu,\"len2\":%zu,\"a0\":\"%s\",\"a1\":\"%s\",\"a2\":\"%s\"}",
+            argc, strlen(s0), strlen(s1), strlen(s2), a0, a1, a2);
         if (dn > 0) control_write(diag);
     }
     size_t cborLen = 0;
