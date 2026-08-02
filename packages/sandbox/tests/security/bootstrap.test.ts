@@ -6,6 +6,12 @@ import { dirname, join } from 'node:path';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BOOTSTRAP = join(HERE, '..', '..', 'images', 'runtime', 'bootstrap.cjs');
 
+// The vendored undici 6.24.1 ProxyAgent implements the undici v6 dispatcher
+// interface (Node 22 runtime image). Other Node majors (e.g. v26 -> undici v8)
+// reject it, so the routing assertion only runs on the authoritative Node 22.
+const NODE_MAJOR = Number(process.versions.node.split('.')[0]);
+const onImageNode = NODE_MAJOR === 22;
+
 // Run a Node child that --require's the bootstrap then fetches, with the proxy
 // env pointed at an unroutable address. If the bootstrap works, built-in fetch
 // is routed through the (dead) proxy → ECONNREFUSED. If the bootstrap is absent
@@ -26,7 +32,7 @@ function fetchWithBootstrap(env: NodeJS.ProcessEnv): string {
   return (r.stdout || '') + (r.stderr || '');
 }
 
-describe('bootstrap.cjs proxy routing', () => {
+describe.skipIf(!onImageNode)('bootstrap.cjs proxy routing', () => {
   it('is a no-op when no proxy env is set (behavior unchanged)', () => {
     const out = fetchWithBootstrap({});
     // No proxy env → bootstrap returns early → fetch does a direct DNS lookup of
