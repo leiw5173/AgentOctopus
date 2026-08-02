@@ -512,6 +512,51 @@ static int open_control_port(void) {
     return open_named_port("octopus-control");
 }
 
+/* TEMP DIAGNOSTIC helpers (remove with the diag block in
+ * redirect_workload_stdio once the stdio relay is proven). */
+static void diag_report_ports(void) {
+    char msg[900];
+    size_t off = (size_t)snprintf(msg, sizeof(msg), "{\"diag\":\"ports=");
+    DIR *d = opendir("/sys/class/virtio-ports");
+    if (!d) {
+        snprintf(msg + off, sizeof(msg) - off, "NO_SYSFS\"}");
+        control_write(msg);
+        return;
+    }
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL && off < sizeof(msg) - 80) {
+        if (de->d_name[0] == '.') continue;
+        char np[512];
+        int n = snprintf(np, sizeof(np), "/sys/class/virtio-ports/%s/name", de->d_name);
+        if (n < 0 || (size_t)n >= sizeof(np)) continue;
+        int nf = open(np, O_RDONLY);
+        if (nf < 0) continue;
+        char buf[64];
+        ssize_t r = read(nf, buf, sizeof(buf) - 1);
+        close(nf);
+        if (r <= 0) continue;
+        buf[r] = '\0';
+        while (r > 0 && (buf[r-1] == '\n' || buf[r-1] == '\r')) buf[--r] = '\0';
+        off += (size_t)snprintf(msg + off, sizeof(msg) - off, "%s:%s;", de->d_name, buf);
+    }
+    closedir(d);
+    snprintf(msg + off, sizeof(msg) - off, "\"}");
+    control_write(msg);
+}
+
+static void diag_report_fd1(const char *tag) {
+    char link[128];
+    ssize_t n = readlink("/proc/self/fd/1", link, sizeof(link) - 1);
+    char msg[192];
+    if (n > 0) {
+        link[n] = '\0';
+        snprintf(msg, sizeof(msg), "{\"diag\":\"%s fd1=%s\"}", tag, link);
+    } else {
+        snprintf(msg, sizeof(msg), "{\"diag\":\"%s fd1=readlink-failed\"}", tag);
+    }
+    control_write(msg);
+}
+
 /* Redirect the workload's stdio onto the "krun-stdio" named virtio-console
  * port BEFORE execve. The host helper registers that port on the octopus-control
  * multiport device (input fd 7 / output fd 6 on the host), so anything the
@@ -533,8 +578,22 @@ static int open_control_port(void) {
  * failing the workload (ready/error frames ride octopus-control anyway). The
  * octopus-control fd is untouched. */
 static void redirect_workload_stdio(void) {
+    /* TEMP DIAGNOSTIC (remove once the stdio relay is proven end-to-end):
+     * report the guest's view of the console ports over octopus-control (the
+     * proven-reliable channel) so a host-side NO-GO is diagnosable from the
+     * INSIDE. Frames concatenate onto the control stream. */
+    diag_report_ports();
+    diag_report_fd1("before");
     int p = open_named_port("krun-stdio");
-    if (p < 0) return;
+    if (p < 0) {
+        control_write("{\"diag\":\"stdio=MISSING\"}");
+        return;
+    }
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "{\"diag\":\"stdio_fd=%d\"}", p);
+        control_write(msg);
+    }
     dup2(p, STDIN_FILENO);
     dup2(p, STDOUT_FILENO);
     dup2(p, STDERR_FILENO);
@@ -542,6 +601,19 @@ static void redirect_workload_stdio(void) {
      * (open() could return fd 0 if stdin were free; closing it then would
      * undo the dup2). */
     if (p > STDERR_FILENO) close(p);
+    /* Prove the relay from the inside: one line through the new fd 1. If this
+     * reaches the host's helper stdout, the port delivers and any later
+     * missing workload output is a post-execve problem; if it does not, the
+     * port's host-side sink is the culprit. */
+    const char probe_line[] = "DIAG-STDOUT-ALIVE\n";
+    ssize_t w = write(STDOUT_FILENO, probe_line, sizeof(probe_line) - 1);
+    {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "{\"diag\":\"test_write=%d errno=%d\"}",
+                 (int)w, (w < 0) ? errno : 0);
+        control_write(msg);
+    }
+    diag_report_fd1("after");
 }
 
 /* ------------------------------------------------------------------ */
