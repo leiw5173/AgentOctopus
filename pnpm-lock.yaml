@@ -43,6 +43,9 @@ importers:
       '@agentoctopus/registry':
         specifier: workspace:*
         version: link:../../packages/registry
+      '@agentoctopus/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@agentoctopus/skills':
         specifier: workspace:*
         version: link:../../packages/skills
