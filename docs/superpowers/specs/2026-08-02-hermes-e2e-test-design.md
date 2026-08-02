@@ -1,7 +1,9 @@
-# Hermes ↔ AgentOctopus 端到端测试 + 沙箱联网修复 — 设计（v4）
+# Hermes ↔ AgentOctopus 端到端测试 + 沙箱联网修复 — 设计（v5）
 
-日期：2026-08-02（v4 阶段1 取证强化 + 两腿语义边界，吸收 code review 第 4 轮 3 项阻塞问题）
+日期：2026-08-02（v5 阶段1 取证可证伪 + 聚合终止信号健全，吸收 code review 第 6 轮 2 项阻塞问题）
 状态：已确认方向，待写实现计划
+
+> v5 说明：在 v4 基础上修第 6 轮 review 2 项阻塞——①wrapper 由 `exec` 改为**普通启动真 octopus**（exec 会替换 wrapper 进程、拿不到真退出码），捕获 `exitCode`/`signal`、**原子追加 JSONL marker**（每调用一行，容忍 Hermes 多次调用），断言收紧为"至少一行 `argv[0]==='ask'` 且 `realExitCode===0` 且无 signal"；②聚合记录**离开 pending 的判据**从"所有已启动 executionId 均 final"改为"收到**请求级终止事件**（`/ask` 最外层发 `request.completed`/`request.failed`，覆盖正常/凭证缺失/不支持运行时/无路由/异常全路径）**且**所有已注册 executionId final"——否则组合/顺序重试流程会过早判完成、无沙箱路径会永远 pending；status 单向（pending→complete|failed，不回退），无沙箱终止路径以空 `runs[]` 正常 complete。另把 validator 表述从"限时且同步"改为"**异步、带 timeout**、无副作用的 callback"（JS 无法中断同步阻塞代码，超时按校验失败处理）。
 
 > v4 说明：在 v3（路线 A 双腿）基础上修第 4 轮 review 3 项阻塞——①阶段1 改用 **octopus-wrapper 取证**（marker+argv+真 octopus 成功），不再只看 stdout；②核实 CLI 与 gateway **编排语义不同**（rerank 模型 / Executor.router / maxRetries），改称**两条独立集成冒烟**，删"受遥测腿证明 Hermes 腿底层行为"；③聚合记录带 **`status:pending|complete|failed` + `completedAt`**，run.mjs 轮询到非 pending 且受断言 `runs[]` 元素均 final。另补 `outputValidated` 由 Executor 调注入 validator callback、原始输出不过 telemetry bus。
 
@@ -26,11 +28,11 @@
             ├─ [0] 前置检查（hermes CLI / octopus CLI / gateway 存活 / 调试端点已开(admin key) / 两个 key 齐备）
             │
             ├─ [1a] Hermes 腿（验证"接入 Hermes→octopus CLI→AgentOctopus"）
-            │        run.mjs 先把 octopus-wrapper 放 PATH 最前（记录 nonce+argv+时间→exec 真 octopus）
+            │        run.mjs 先解析真 octopus 绝对路径，把 octopus-wrapper 放 PATH 最前
             │        hermes -z "<查询>"（无需关联键、无凭证）
             │        └─ Hermes 读 agentoctopus skill → 用终端跑 `octopus ask "<查询>"`（被 wrapper 捕获）
-            │             └─ CLI 内: 意图分析→路由→评分→SandboxRunner 沙箱执行
-            │        → 断言四点: hermes 退出 0 + wrapper marker 存在(nonce 匹配) + argv 含 ask + 真 octopus 退出 0
+            │             └─ wrapper 普通启动真 octopus(非 exec)、捕获 exitCode/signal→追加 JSONL marker→同码退出
+            │        → 断言四点: hermes 退出 0 + marker 有行 nonce 匹配且 argv[0]=ask + 该行 realExitCode=0 无 signal + 真 octopus 由 wrapper 所起
             │
             ├─ [1b] 受遥测腿（独立验证"gateway /ask 的路由 + 评分 + 沙箱联网"，产出结构化证据）
             │        生成关联键 oct-e2e-<uuid>，嵌入 query
@@ -68,7 +70,7 @@
 
 | 步骤 | 验证点 | 证据来源 |
 |---|---|---|
-| 1. 接入 Hermes | 真实 Hermes 经 CLI 触发了 AgentOctopus（`octopus ask`） | **Hermes 腿 [1a] + octopus-wrapper 取证**（review #P0-1——光 `hermes -z` 退出 0 + stdout 非空，证明不了 Hermes 没直接自己答）：run.mjs 在跑 `hermes -z` 前，临时把一个 **`octopus` wrapper** 放到 PATH 最前；wrapper 记录 `{nonce, argv, calledAt}` 到临时 marker 文件后 `exec` 真正的 `octopus`。断言四点全真：`hermes -z` 退出 0 + **wrapper marker 存在且 nonce 匹配** + **marker argv 含 `ask`** + **真实 octopus 子进程退出 0**。四点齐了才叫"接入 AgentOctopus"，否则只是"Hermes 响应冒烟"。测试结束清理 wrapper。 |
+| 1. 接入 Hermes | 真实 Hermes 经 CLI 触发了 AgentOctopus（`octopus ask`） | **Hermes 腿 [1a] + octopus-wrapper 取证**（review #P0——光 `hermes -z` 退出 0 + stdout 非空，证明不了 Hermes 没直接自己答）：run.mjs 在跑 `hermes -z` 前，先**解析真实 `octopus` 的绝对路径**，再把一个 **`octopus` wrapper** 放到 PATH 最前。wrapper **不用 `exec`**（`exec` 会替换 wrapper 进程，使 wrapper 无法在子进程结束后记录退出码），而是**普通启动**真实 octopus 子进程、**捕获其 `exitCode`/`signal`**，把 `{nonce, argv, calledAt, realExitCode, signal}` **原子追加写入 JSONL marker**（每次调用一行，避免 Hermes 多次调用互相覆盖），并以**相同退出码**退出。断言四点全真：`hermes -z` 退出 0 + **marker 至少存在一行 `nonce` 匹配且 `argv[0] === 'ask'`** + 该行 **`realExitCode === 0` 且无 `signal`** + 真实 octopus 确为 wrapper 所起（marker 行存在即证）。四点齐了才叫"接入 AgentOctopus"，否则只是"Hermes 响应冒烟"。测试结束（finally）卸载 wrapper、清理临时目录。 |
 | 2. 分析任务意图 | Router 真正做了意图提取（**不接受** original-query-fallback） | **受遥测腿 [1b]**：`routing.intent` 非空 + `intentSource === 'llm'` + **`intentExtractionSucceeded === true`** + `candidatesConsidered > 0`。允许 fallback 通过只能证明 Router 收到非空 query，证明不了"意图分析"（review #次要-2）。 |
 | 3. 路由到合适 skill | 选中 skill == 预期 | 受遥测腿 [1b]：`skill` 字段 |
 | 4. 按分数选择 | 见下方"评分遥测语义" | 受遥测腿 [1b]：`selectedRawScore` / `normalizedConfidence` / `selectionMethod` / `selectedCandidateRank` |
@@ -156,8 +158,13 @@
     ```json
     { "runId": "oct-e2e-…", "status": "pending | complete | failed", "completedAt": 1754150400000, "runs": [ { "executionId": "…", "status": "…", "…": "…" } ] }
     ```
-    - 聚合记录初始 `status:'pending'`（任一事件先到即建）；当该 traceId 下**所有已开始的 executionId** 都到达 final（`sandbox.completed` 的 `finalMeta` 已解析 + 对应 `adapter.completed`/`outputValidated` 已落地）→ `status:'complete'`；任一执行彻底失败（adapter 失败且不再重试 / sandbox 无法启动）→ `status:'failed'`。`completedAt` 在进入非 pending 时写入。
+    - 聚合记录初始 `status:'pending'`（任一事件先到即建）；进入非 pending 时写入 `completedAt`。
     - 每个 `runs[]` 元素也带自己的 `status`（created → final）。**受断言的 `runs[]` 元素必须读到 final 状态**（见 `executionId` 合并规则），不能把 created 时的 `full` 当最终隔离结果。
+    - **请求级终止事件（review #P1-2——"所有已开始 executionId 已 final"不足以判断不会再有新执行）**：composed/顺序重试流程里，第一项完成时第二项可能尚未创建，若只看"已开始的都 final"会**过早标 complete**；而 credential-missing、无路由等在沙箱启动前返回的路径又**永远没有** sandbox final。所以 `/ask`（Executor 最外层）必须发**请求级终止事件**：
+      - `request.completed` / `request.failed`：一次 `/ask` 请求无论走哪条路径（正常执行 / credential-missing / unsupported-runtime / 无路由回退 / 异常）都在最外层终结时发一条，带 `traceId`。
+      - **离开 pending 的充要条件**：聚合记录**收到请求级终止事件** **且**所有**已登记**的 executionId 均 final。只看 executionId 不够——必须以请求级终止事件为准，才知道"不会再有新 execution"。
+      - **完成状态单向**：`pending → complete | failed`，**永不** `complete → pending`（终态不可逆；迟到的后续事件只补数据、不改终态）。
+      - **无沙箱执行的终止路径也正常完成**：credential-missing / 无路由等没起沙箱的请求，`runs[]` 可为空，收到 `request.completed`/`failed` 即离开 pending（complete 或 failed 取决于终止类型），不会因缺 sandbox final 而卡 pending。
     - **run.mjs 轮询条件**：直到 `run.status !== 'pending'` **且**本次受断言的 `runs[]` 元素均为 final，才停止；否则继续轮询直到超时。
   - **runId 产生与关联机制（路线 A——确定性提取，不再依赖 Hermes）**：关联键由 **run.mjs** 放进 `/ask` 的 query，不经过 Hermes，所以 gateway 提取是**确定性**的。原"备用关联"机制（依赖 Hermes 逐字保留 trace）随路线 A **取消**——关联键不再经 Hermes 传递。
     1. run.mjs 生成关联键 `oct-e2e-<uuid>`，嵌入受遥测腿 [1b] 发给 `/ask` 的 query（如 `"What's the weather in Tokyo? [trace: oct-e2e-9f3a...]"`）。
@@ -176,7 +183,7 @@
     - 现有 `/ask` 即便 `adapterResult.success===false` 外层仍返回 `success:true`（`agent-protocol.ts:252`），所以阶段5 必须读 `adapter.completed` 的 `adapterSuccess`，不能只看外层响应。
     - 这些是结构化字段，**不含 query 原文、不含 skill 输出原文**（输出原文仍受 `includeQuery`/隐私边界约束）。
   - **`outputValidated`（review #P0——`adapterSuccess:true + exitCode:0` 仍证明不了"返回了有效外网数据")**：weather 可以正常退出却返回 "No weather data"。增加**不泄露原文的结果验证**：
-    - **由 Executor 调用一个注入的、限时且无副作用的 validator callback**（review #补充——`adapter.completed` 不携带输出，而 validator 需要看到 adapter 输出才能校验）：Executor 在 adapter 返回后、`adapter.completed` 事件发出前，把 `adapterResult`（含输出）交给 validator callback 同步校验；validator 只返回**布尔 + 结构化原因**（如 `{ok:false, reason:'missing temperature field'}`），Executor 把这个结果放进 `adapter.completed` 事件的 `outputValidated` 字段。
+    - **由 Executor 调用一个注入的、异步、带 timeout、无副作用的 validator callback**（review #补充——`adapter.completed` 不携带输出，而 validator 需要看到 adapter 输出才能校验；review #文字——JS 无法强制中断同步阻塞代码，故定义为**异步 callback + timeout**，超时按校验失败处理而非中断）：Executor 在 adapter 返回后、`adapter.completed` 事件发出前，把 `adapterResult`（含输出）交给 validator callback `await` 校验（带超时上限）；validator 只返回**布尔 + 结构化原因**（如 `{ok:false, reason:'missing temperature field'}`），Executor 把这个结果放进 `adapter.completed` 事件的 `outputValidated` 字段。
     - **原始输出绝不经过 telemetry bus**——validator 是 Executor 侧的注入回调（E2E 场景下按 skill 注册，如 weather 校验含地点/温度字段、非错误占位文本），校验完即丢弃输出；telemetry 事件里只有布尔与结构化原因，没有 query/输出原文。
     - 阶段5 用 `adapterSuccess === true` + `outputValidated === true` 判定"真实联网并返回有效外网数据"。
   - **`executionId` 合并规则（review #次要-1）**：一次逻辑执行（一次 `run()`，或一次 `spawn()` 会话）分配一个稳定 `executionId`。`spawn()` 的 created 与 final 两条**不追加为两个元素**，而是**按 `executionId` 合并更新同一个 `runs[]` 元素**；`sandbox.completed`/`adapter.completed` 也按 `executionId` 归并到同一 run。**断言只读 final 状态**（`resultMeta` 解析后的 `finalMeta`），防止把 spawn 创建时的 `full` 误当清理降级后的最终隔离结果。
@@ -201,11 +208,11 @@
 - **SKILL.md**：name `hermes-e2e-test`；用户说"运行这个测试"时执行 `node run.mjs`，把 PASS/FAIL 读给用户，失败按排查提示引导。
 - **run.mjs 逻辑**：
   1. 前置检查（任一失败给修复提示、非零退出）：`hermes --version`；`octopus --version`（Hermes 腿要靠它）；`GET /agent/health`；`GET /agent/debug/last-run`（用 `AGENTOCTOPUS_E2E_ADMIN_KEY`）——**404**=端点没开（提示去开 `debugEndpoints.enabled`），**401/403**=key 问题，**200 `{run:null}`**=端点已开但缓冲为空（**正常**，继续）；两个测试 key 都存在于 env。
-  2. **装 octopus-wrapper 取证**：在临时目录写一个 `octopus` wrapper（记录 `{nonce, argv, calledAt}` 到 marker 文件后 `exec` 真 `octopus`），生成一次性 nonce，把临时目录**前置到 PATH**。测试结束（finally）卸载 wrapper、清理临时目录。
-  3. **Hermes 腿 [1a]**：在装了 wrapper 的 PATH 下 `hermes -z "<query>"`（默认 `"What's the weather in Tokyo?"`，`--query` 可覆盖），带 `--timeout`（默认 90s）。**无关联键、无凭证**。记录 hermes 退出码 + stdout。
+  2. **装 octopus-wrapper 取证**：run.mjs 先解析出真 `octopus` 的**绝对路径**；在临时目录写一个 `octopus` wrapper，生成一次性 nonce。wrapper **普通启动真 octopus（不用 `exec`——exec 会替换 wrapper 进程、拿不到真退出码）**，捕获其 exitCode/signal，**原子追加**一行 JSONL `{nonce, argv, calledAt, realExitCode, signal}` 到 marker 文件，并以相同退出码退出（JSONL 每调用一行，容忍 Hermes 多次调用 octopus）。测试结束（finally）卸载 wrapper、清理临时目录。
+  3. **Hermes 腿 [1a]**：在装了 wrapper 的 PATH 下 `hermes -z "<query>"`（默认 `"What's the weather in Tokyo?"`，`--query` 可覆盖），带 `--timeout`（默认 90s）。**无关联键、无凭证**。记录 hermes 退出码 + stdout（阶段1 只作佐证，不作判据）。
   4. **受遥测腿 [1b]**：生成关联键 `oct-e2e-<uuid>`（crypto random），嵌入 query；run.mjs **自己** `POST /agent/ask`（header `Authorization: Bearer AGENTOCTOPUS_E2E_ASK_KEY`，body `{query:"…[trace: oct-e2e-<uuid>]"}`）。
   5. 轮询 `GET /agent/debug/last-run?runId=oct-e2e-<uuid>`（用 `AGENTOCTOPUS_E2E_ADMIN_KEY`）**直到 `run.status !== 'pending'` 且本次受断言的 `runs[]` 元素均为 final**，或超时（不是只等 `run !== null`——路由/spawn-created/sandbox 事件可能先建记录而 adapter/outputValidated/finalMeta 还没到）。
-  6. 按 5 阶段断言：阶段1 用 [1a] **+ wrapper 取证四点**（hermes 退出 0、marker 存在且 nonce 匹配、marker argv 含 `ask`、真 octopus 退出 0）；阶段2/3/4/5 用 [1b] 遥测（评分/意图/沙箱/结果断言按 Phase 3 语义；阶段5 需 `adapterSuccess===true` + `outputValidated===true`）。
+  6. 按 5 阶段断言：阶段1 用 [1a] **+ wrapper 取证四点**（①hermes 退出 0；②marker 至少一行 nonce 匹配；③该行 `argv[0]==='ask'`；④该行 `realExitCode===0` 且无 signal——证明真 octopus 由 wrapper 拉起且跑通，而非 Hermes 直接作答）；阶段2/3/4/5 用 [1b] 遥测（评分/意图/沙箱/结果断言按 Phase 3 语义；阶段5 需 `adapterSuccess===true` + `outputValidated===true`）。
   7. 输出 5 行 PASS/FAIL + 总 verdict；`--json` 机器可读。
 - **CLI 参数**：`--query`、`--expect-skill`、`--threshold`、`--timeout`、`--json`。
 
@@ -220,7 +227,8 @@
 | 调试端点没开 | 404 | `octopus.json` 设 `gateway.debugEndpoints.enabled:true` 并重启 |
 | 缓冲为空（非错误） | 200 `{run:null}` | 端点已开、还没执行记录——正常，继续跑，不要去改 config |
 | 限流 | 429 | 降低频率或提 tier |
-| Hermes 直接答、没走 octopus（wrapper 无 marker / nonce 不匹配 / argv 无 ask） | 阶段1 wrapper 取证四点任一不满足 | Hermes 这次没触发 agentoctopus skill——在 `hermes -z` 的 prompt 里明确要求用 agentoctopus 查天气后重试；确认 skill 已加载且 wrapper 已正确前置到 PATH |
+| Hermes 直接答、没走 octopus（wrapper 无 marker / nonce 不匹配 / argv[0] 非 ask） | 阶段1 wrapper 取证四点任一不满足 | Hermes 这次没触发 agentoctopus skill——在 `hermes -z` 的 prompt 里明确要求用 agentoctopus 查天气后重试；确认 skill 已加载且 wrapper 已正确前置到 PATH |
+| 真 octopus 跑挂了（wrapper 有 marker、argv 对、但 realExitCode 非 0 或有 signal） | 阶段1 第④点不满足 | Hermes 已触发 CLI 但 `octopus ask` 本身失败——先脱离 Hermes 手动 `octopus ask "<query>"` 看真实报错（沙箱 fail-closed / 联网 / 凭证），wrapper 的 `signal` 字段提示是否被 kill |
 | Hermes 没触发 agentoctopus（连 wrapper 都没起 octopus） | `hermes -z` 退出码非 0 | 确认 Hermes 已加载 agentoctopus skill（`~/.hermes/skills/openclaw-imports/agentoctopus`）且 `octopus` CLI 在 PATH；先手动 `octopus ask "<query>"` 验证 CLI 路径 |
 | 遥测记录卡在 pending | `?runId` 有记录但 `status` 一直 `pending` 直到超时 | 某事件没到（adapter.completed / outputValidated / finalMeta 未完成）——查 gateway 日志看这次执行是否卡住或 spawn 会话没 close |
 | 受遥测腿没记录 | `?runId` 超时 `run:null` | 确认 run.mjs 的 `/ask` POST 成功（看 HTTP 状态）且 query 里带了 `[trace: oct-e2e-<uuid>]`，gateway 才提取得到 |
@@ -247,10 +255,10 @@
 - `TEST_INSTRUCTIONS.md`：加测试行。
 - **代码改动范围**：
   - `packages/gateway`：`agent-protocol.ts` `/ask` handler 在路由前从 query 提取 `oct-e2e-<uuid>` 关联键、**剥除 `[trace:...]` 后再送 Router**；telemetry 记录带 apiKey id + receivedAt；新增 `/agent/debug/last-run` admin-only 端点 + 环形缓冲 + `gateway.debugEndpoints` **对象配置**（`enabled`/`includeQuery`/`bufferSize`）；端点关闭→404、开启但无匹配→200 `{run:null}`；telemetry sink 注册 + 按 `traceId+executionId` 聚合两类事件；聚合记录带 **`status:pending|complete|failed` + `completedAt`**，每个 `runs[]` 元素带自身 `status`（created→final）。
-  - `packages/core`：新增内部 `ExecutionContext`（承载 `traceId`/`executionId`），在 `router.route()` / `executor.execute()` / `SandboxRunner` 间显式传递。**分层发事件**：`SandboxRunner` 在 `run()` 完成 + `spawn()` 创建 + `spawn().close()/resultMeta` 完成发 `sandbox.completed`（带**降级后** `finalMeta` + `exitCode` + `sandboxSuccess`）；`Executor` 在 adapter 返回后调**注入的、限时、无副作用的 validator callback**（原始输出不进 telemetry bus），再发 `adapter.completed`（带 `adapterSuccess` + 规范化 `errorCode` + `outputValidated`）。**不改** `AdapterResult`/`ExecutionResult` 既有形状。
+  - `packages/core`：新增内部 `ExecutionContext`（承载 `traceId`/`executionId`），在 `router.route()` / `executor.execute()` / `SandboxRunner` 间显式传递。**分层发事件**：`SandboxRunner` 在 `run()` 完成 + `spawn()` 创建 + `spawn().close()/resultMeta` 完成发 `sandbox.completed`（带**降级后** `finalMeta` + `exitCode` + `sandboxSuccess`）；`Executor` 在 adapter 返回后调**注入的、异步、带 timeout、无副作用的 validator callback**（原始输出不进 telemetry bus），再发 `adapter.completed`（带 `adapterSuccess` + 规范化 `errorCode` + `outputValidated`）；`/ask`（Executor 最外层）在请求终结时发 `request.completed`/`request.failed`（覆盖正常/credential-missing/无路由/异常全路径）。**不改** `AdapterResult`/`ExecutionResult` 既有形状。
   - `packages/sandbox` + `images/runtime`：bootstrap 联网导流（P1）、uid 65534 统一、契约测试。
   - `apps/cli/skills/weather` + `ip-lookup`：`requires.bins` `[curl]`→`[node]` + `sandbox.hosts` 声明（P2）。
-  - **CLI（`apps/cli`）不改遥测**：Hermes 腿走 `octopus ask`（CLI 路径），它共用 core 的 Router/Executor/SandboxRunner 故沙箱/路由真实发生，但遥测落点只在 gateway——CLI 侧无需新增遥测。阶段1 的判定依据是 `hermes -z` 的退出码 + stdout，不是遥测。
+  - **CLI（`apps/cli`）不改遥测**：Hermes 腿走 `octopus ask`（CLI 路径），它共用 core 的 Router/Executor/SandboxRunner 故沙箱/路由真实发生，但遥测落点只在 gateway——CLI 侧无需新增遥测。阶段1 的判定依据是 **octopus-wrapper 四点取证**（见阶段1），不是遥测。
 - changeset：`feat(sandbox)`（联网修复）、`feat(gateway)`（调试端点+分层遥测+关联键提取+对象配置+validator）、`feat(core)`（ExecutionContext + sandbox.completed/adapter.completed 分层事件）按实际触及包分别入。
 
 ## 风险与开放点
