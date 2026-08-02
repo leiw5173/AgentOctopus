@@ -43,6 +43,7 @@
  *   may appear in ExecSpec.
  */
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import type { LoadedSkill } from '@agentoctopus/registry';
 import { lookupInstallationId } from '@agentoctopus/skills';
@@ -74,6 +75,7 @@ import {
   MapSecretProvider,
 } from '@agentoctopus/sandbox';
 import { toSandboxDescriptor } from './sandbox-bridge.js';
+import type { ExecutionContext, TelemetrySink } from './execution-context.js';
 
 // ---------------------------------------------------------------------------
 // Public DTOs
@@ -215,6 +217,18 @@ export interface SandboxRunnerDeps {
    * degradation reason, NEVER a containment error). NOT for production use.
    */
   rmSessionDir?: (sessionDir: string) => Promise<void>;
+  /**
+   * Optional per-request telemetry context (T3.2). When present its traceId
+   * and executionId are stamped onto emitted sandbox.completed events. run()
+   * uses execContext.executionId when set, else generates a fresh UUID;
+   * spawn() ALWAYS generates a fresh per-session executionId (the aggregator
+   * merges created + final by executionId, so one run() call ≠ one spawn()
+   * session). Telemetry NEVER changes control flow — a throwing sink is
+   * swallowed at each emission site.
+   */
+  execContext?: ExecutionContext;
+  /** Optional sink for sandbox.completed events. Absent = telemetry off. */
+  telemetrySink?: TelemetrySink;
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +500,8 @@ export class SandboxRunner {
     | ((ctx: { snapshotRoot: string; identity: InstallationIdentity }) => void)
     | undefined;
   private readonly rmSessionDir: (sessionDir: string) => Promise<void>;
+  private readonly execContext: ExecutionContext | undefined;
+  private readonly telemetrySink: TelemetrySink | undefined;
 
   constructor(opts: SandboxRunnerDeps) {
     // Parse trusted config with the canonical schema (Task 0 re-export).
@@ -503,6 +519,34 @@ export class SandboxRunner {
     this.onEvent = opts.onEvent;
     this.afterBuildSnapshot = opts.afterBuildSnapshot;
     this.rmSessionDir = opts.rmSessionDir ?? defaultRmSessionDir;
+    this.execContext = opts.execContext;
+    this.telemetrySink = opts.telemetrySink;
+  }
+
+  /**
+   * Fire-and-forget telemetry emission. A throwing sink MUST NEVER break
+   * run/spawn/close — swallow any error at the call site. Telemetry is
+   * strictly observational and never changes control flow or the result.
+   */
+  private emitSandboxCompleted(event: {
+    executionId: string;
+    meta: SandboxResultMeta;
+    exitCode: number | null;
+    sandboxSuccess: boolean;
+  }): void {
+    if (!this.telemetrySink) return;
+    try {
+      this.telemetrySink.emit({
+        kind: 'sandbox.completed',
+        traceId: this.execContext?.traceId,
+        executionId: event.executionId,
+        meta: event.meta,
+        exitCode: event.exitCode,
+        sandboxSuccess: event.sandboxSuccess,
+      });
+    } catch {
+      /* telemetry must never break execution */
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -564,9 +608,23 @@ export class SandboxRunner {
     });
     // (3) Output LAST.
     if (runError !== undefined) {
-      return this.toErrorOutput(runError, backend, containment, soft);
+      const output = this.toErrorOutput(runError, backend, containment, soft);
+      this.emitSandboxCompleted({
+        executionId: this.execContext?.executionId ?? randomUUID(),
+        meta: output.meta,
+        exitCode: null,
+        sandboxSuccess: output.success,
+      });
+      return output;
     }
-    return this.toRunOutput(result!, backend, containment, soft);
+    const output = this.toRunOutput(result!, backend, containment, soft);
+    this.emitSandboxCompleted({
+      executionId: this.execContext?.executionId ?? randomUUID(),
+      meta: output.meta,
+      exitCode: result!.exitCode,
+      sandboxSuccess: output.success,
+    });
+    return output;
   }
 
   async spawn(input: SandboxSpawnInput): Promise<SandboxSession> {
@@ -591,6 +649,23 @@ export class SandboxRunner {
       };
       process = await backend.spawn(spec);
       const proc = process;
+
+      // T3.3: emit the CREATED sandbox.completed with a FRESH per-session
+      // executionId. The aggregator (T3.6) merges created + final events by
+      // executionId into ONE runs[] element, so doClose() MUST reuse this id.
+      // The initial meta is pre-teardown (no downgrade applied yet).
+      const sessionExecutionId = randomUUID();
+      this.emitSandboxCompleted({
+        executionId: sessionExecutionId,
+        meta: {
+          isolationLevel: backend.isolationLevel,
+          backend: backend.kind,
+          degraded: false,
+          degradationReasons: [],
+        },
+        exitCode: null,
+        sandboxSuccess: false,
+      });
 
       // Memoized close state (T3): the FIRST close() runs the teardown chain
       // (process close → backend cleanup → proxy close → session-dir removal),
@@ -674,6 +749,16 @@ export class SandboxRunner {
             : exitMeta;
         firstContainment = containment;
         resolveResultMeta(finalMeta);
+        // T3.3: emit the FINAL sandbox.completed BEFORE any containment throw
+        // so the aggregator always sees the definitive post-teardown meta even
+        // when close() rethrows. Reuse the session's executionId so the
+        // aggregator merges created + final into ONE runs[] element.
+        this.emitSandboxCompleted({
+          executionId: sessionExecutionId,
+          meta: finalMeta,
+          exitCode: null,
+          sandboxSuccess: !containment,
+        });
         if (containment) throw containment;
       };
 
