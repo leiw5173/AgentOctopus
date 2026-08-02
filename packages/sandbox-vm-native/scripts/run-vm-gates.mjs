@@ -461,13 +461,31 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
   raw.stdout?.on('data', (c) => { helperStdout += c.toString('utf8'); });
   raw.stderr?.on('data', (c) => { helperStderr += c.toString('utf8'); });
 
+  // Fail-closed per-boot timeout: a healthy boot -> probe -> guest halt takes
+  // only a few seconds. If the guest never halts (krun_start_enter does not
+  // return), do NOT hang the lane forever -- declare a TIMEOUT and let the
+  // finally block's raw.close() SIGKILL the helper. The captured output (which
+  // accumulates into helperStdout/helperStderr regardless of how the boot ends)
+  // is still returned below, so a TIMEOUT remains diagnosable. A TIMEOUT is a
+  // boot defect, not a pass.
+  const BOOT_TIMEOUT_MS = 90_000;
   let exitInfo = 'exit: unknown';
+  let bootTimer;
   try {
-    const { exitCode } = await raw.exited;
-    exitInfo = `exit: ${exitCode}`;
+    const timeout = new Promise((resolve) => {
+      bootTimer = setTimeout(() => resolve({ __bootTimeout: true }), BOOT_TIMEOUT_MS);
+      bootTimer.unref?.();
+    });
+    const result = await Promise.race([raw.exited, timeout]);
+    if (result && result.__bootTimeout) {
+      exitInfo = `exit: TIMEOUT after ${BOOT_TIMEOUT_MS / 1000}s (guest never halted; helper killed)`;
+    } else {
+      exitInfo = `exit: ${result.exitCode}`;
+    }
   } catch (err) {
     exitInfo = `exit error: ${err.message}`;
   } finally {
+    clearTimeout(bootTimer);
     // Drain any trailing console bytes, then release the parent's retained fds.
     await new Promise((r) => setTimeout(r, 50));
     controlRead.destroy();

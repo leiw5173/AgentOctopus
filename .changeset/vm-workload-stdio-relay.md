@@ -35,4 +35,7 @@ AND real skill execution):
 - `run-vm-gates.mjs`: the gate now returns the guest control frame plus the
   helper's stdout and stderr, each LABELED, so the evaluators see the markers,
   a NO-GO still surfaces the bootstrap reason / helper exit status, and the CI
-  log reveals which stream the markers rode (stdout == clean relay).
+  log reveals which stream the markers rode (stdout == clean relay). It also
+  gained a fail-closed per-boot timeout (90s): a healthy boot+probe+halt takes
+  seconds, so a guest that never halts now yields a diagnosable TIMEOUT (helper
+  SIGKILL'd, captured output still returned) instead of hanging the lane.
