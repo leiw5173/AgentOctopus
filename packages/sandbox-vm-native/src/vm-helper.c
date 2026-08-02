@@ -67,13 +67,15 @@
  *   9. krun_set_vm_config(ctx, cpus, memMib)            -- vCPUs BEFORE RAM
  *  10. krun_add_virtio_console_multiport(ctx)           -> console_id (>=0)
  *      krun_add_console_port_inout(ctx, console_id, "octopus-control", 3, 4)
- *  10b. krun_add_console_port_inout(ctx, console_id, "krun-stdio", 0, 1) --
- *       ONE bidirectional workload-stdio port (real fds both directions).
- *       Neither krun_add_virtio_console_default (a 2nd console device) nor
- *       multiple /dev/null-backed ports work: both panic libkrun device.rs:263
- *       "port rx queue should exist" when the guest opens the port. vm-init
- *       (guest PID 1) opens "krun-stdio" and dup2's it onto fd 0/1/2 before
- *       execve (libkrun's own init never runs).
+ *  10b. krun_set_console_output(ctx, "/dev/fd/1") -- point the guest's
+ *       implicit console (hvc0 == /dev/console) output at the helper's own
+ *       stdout (fd 1), so workload stdio reaches the host raw (no log prefix).
+ *       vm-init (guest PID 1) dup2's /dev/console onto fd 0/1/2 before execve
+ *       (libkrun's own init never runs). We must NOT register a console port on
+ *       fd 0/1: krun_start_enter takes those over, and a port there is never
+ *       relayed; likewise krun_add_virtio_console_default (a 2nd console
+ *       device) and /dev/null-backed or 2nd data ports panic libkrun
+ *       device.rs:263 "port rx queue should exist".
  *  11. krun_set_exec(ctx, bootstrapPath, bootstrapArgv, trustedEnv)
  *  12. krun_set_workdir(ctx, "/")                       -- pinned to "/"
  *  13. krun_start_enter(ctx)                            -- blocks; exits with
@@ -719,12 +721,17 @@ int vm_helper_main(int argc, char **argv) {
                                            /*output_fd=*/ G2H_WRITE_FD),
                "add_console_port_inout");
 
-    /* 10b. TEMP DIAG: no workload-stdio port is registered here. libkrun's
-     *      krun_start_enter takes over the helper's fd 0/1/2 and bridges them
-     *      to the guest's implicit console (hvc0 == /dev/console). Registering
-     *      a console port on fd 0/1 collides with that takeover. The guest
-     *      bootstrap (vm-init) is being tested routing the workload's stdio
-     *      through /dev/console directly. See vm-init.c TEMP DIAG. */
+    /* 10b. Point the guest's implicit console (hvc0 == /dev/console) output at
+     *      the helper's own stdout (fd 1), so workload stdio reaches the host
+     *      RAW (no libkrun log prefix). The guest bootstrap (vm-init) dup2's
+     *      /dev/console onto the workload's fd 0/1/2 before execve. We must NOT
+     *      register a console port on fd 0/1 instead: krun_start_enter takes
+     *      those over and a port there is never relayed (and the alternate
+     *      approaches -- krun_add_virtio_console_default, /dev/null-backed or
+     *      2nd data ports -- panic libkrun device.rs:263). This API is a NOOP
+     *      if the implicit console is disabled; we never disable it. */
+    krun_check(krun_set_console_output((uint32_t)ctx, "/dev/fd/1"),
+               "set_console_output");
 
     /* 11. Set the guest PID 1 to the trusted bootstrap. bootstrapArgv is
      *     the single authoritative workload representation; trustedEnv is

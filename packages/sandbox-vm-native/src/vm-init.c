@@ -10,10 +10,11 @@
  * The workload executable/argv/env travel ONLY as that structured token
  * (NOT a shell string, NOT over the control channel). The control channel
  * (virtio-console port "octopus-control") carries ONLY {"ready":true} and
- * {"error":"<reason>"} frames; workload stdio rides a single named port on
- * that same console ("krun-stdio", registered by the host helper and relayed
- * bidirectionally to the helper's own stdin/stdout). vm-init dup2's that port
- * onto fd 0/1/2 before execve.
+ * {"error":"<reason>"} frames; workload stdio rides the guest's implicit
+ * console (/dev/console == hvc0). The host helper points libkrun's implicit-
+ * console output at its own stdout via krun_set_console_output, so anything
+ * the workload writes to /dev/console reaches the host raw. vm-init dup2's
+ * /dev/console onto fd 0/1/2 before execve.
  * Workload exit status is the krun_start_enter return
  * value read by the host helper subprocess -- this process execve's into
  * the workload and never returns to send an exit frame.
@@ -38,8 +39,8 @@
  *      value; bare name is a key in allowedExecutables. "other" =>
  *      {"error":"unresolvable executable"} + exit(127).
  *  10. chdir(cwd), CLOSE the control port fd, redirect fd 0/1/2 onto the
- *      single "krun-stdio" port (workload stdio -> host), execve(resolved,
- *      argv, envp).
+ *      implicit console /dev/console (workload stdio -> host via the
+ *      helper's krun_set_console_output), execve(resolved, argv, envp).
  *
  * Freestanding-ish C: no shell, no dlopen, no PATH lookup by execve
  * (the bootstrap resolves bare names itself). Every error is fatal and
@@ -473,8 +474,8 @@ static void start_forwarder(void) {
 }
 
 /* Scan /sys/class/virtio-ports/<port>/name for a port named `want`, open the
- * matching /dev/vportNpM read/write, return its fd (or -1 if absent). Shared
- * by the octopus-control port and the krun workload-stdio ports. */
+ * matching /dev/vportNpM read/write, return its fd (or -1 if absent). Used to
+ * locate the octopus-control port. */
 static int open_named_port(const char *want) {
     DIR *d = opendir("/sys/class/virtio-ports");
     if (!d) return -1;
@@ -511,37 +512,27 @@ static int open_control_port(void) {
     return open_named_port("octopus-control");
 }
 
-/* Redirect the workload's stdio onto the single "krun-stdio" port BEFORE
- * execve. The host helper registers ONE bidirectional port named "krun-stdio"
- * on the octopus-control multiport console, relayed to the helper's own stdin/
- * stdout. vm-init is the guest PID 1 (NOT libkrun's init), so nothing else
- * performs this redirection -- without it the workload's console.log/error go
- * to the boot console and never reach the host (the root cause of the G1/G2
- * NO-GO "no DONE marker relayed").
+/* Redirect the workload's stdio onto the guest's implicit console
+ * (/dev/console == hvc0) BEFORE execve. The host helper points libkrun's
+ * implicit-console output at its own stdout via krun_set_console_output, so
+ * anything the workload writes to /dev/console reaches the host's helper
+ * stdout raw; the octopus-control multiport port stays dedicated to the
+ * ready/error frames. vm-init is the guest PID 1 (NOT libkrun's init), so
+ * nothing else performs this redirection -- at boot this process's fd 1 is a
+ * stray virtio-console port (e.g. /dev/vport2p2) that goes nowhere, and
+ * without the redirect the workload's console.log never reaches the host (the
+ * root cause of the G1/G2 NO-GO "DONE marker absent").
  *
- * The single port is dup2'd onto fd 0 (read), fd 1 and fd 2 (write) -- a
- * serial-style bidirectional channel, so stdout and stderr both reach the
- * host's helper stdout. (One port, real fds on both directions: libkrun
- * panics with "port rx queue should exist" for a /dev/null-backed input or a
- * second data port, so we must not add separate stdin/stdout/stderr ports.)
- *
- * Best-effort: if the port is absent the fds stay on the boot console rather
- * than failing the workload (ready/error frames ride octopus-control anyway).
- * The octopus-control fd is untouched. */
+ * Best-effort: if /dev/console is absent the fds are left as-is rather than
+ * failing the workload (ready/error frames ride octopus-control anyway). The
+ * octopus-control fd is untouched. */
 static void redirect_workload_stdio(void) {
-    int p = open_named_port("krun-stdio");
-    if (p < 0) return;
-    dup2(p, STDIN_FILENO);
-    dup2(p, STDOUT_FILENO);
-    dup2(p, STDERR_FILENO);
-    close(p);
-    /* TEMP DIAG: prove the relay end-to-end. If this line reaches the host's
-     * helper stdout, then fd 1 -> krun-stdio port -> host works, and any
-     * missing workload output is a workload (node) buffering issue, not a
-     * wiring issue. */
-    const char *m = "VM-INIT-STDIO-RELAY-OK\n";
-    ssize_t wr = write(STDOUT_FILENO, m, strlen(m));
-    (void)wr;
+    int c = open("/dev/console", O_RDWR);
+    if (c < 0) return;
+    dup2(c, STDIN_FILENO);
+    dup2(c, STDOUT_FILENO);
+    dup2(c, STDERR_FILENO);
+    close(c);
 }
 
 /* ------------------------------------------------------------------ */
@@ -664,28 +655,9 @@ int main(int argc, char **argv) {
     if (chdir(cwd_real) < 0) {
         free(resolved); launchspec_free(&ls); die("chdir cwd failed");
     }
-    /* TEMP DIAG: probe the implicit-console (hvc0) stdio bridge. libkrun's
-     * krun_start_enter takes over the helper's fd 0/1/2 and bridges them to
-     * the guest's /dev/console (hvc0). Report what fd 1 is at boot and write a
-     * marker to /dev/console; if it reaches the host helper stdout, the native
-     * bridge works and the fix is to leave/dup the workload onto /dev/console
-     * (no custom port needed). */
-    {
-        char lbuf[256];
-        ssize_t ll = readlink("/proc/self/fd/1", lbuf, sizeof(lbuf) - 1);
-        if (ll < 0) { lbuf[0] = '?'; lbuf[1] = '\0'; } else lbuf[ll] = '\0';
-        int c = open("/dev/console", O_RDWR);
-        const char *cm = "CONSOLE-WRITE-TEST\n";
-        ssize_t cw = (c >= 0) ? write(c, cm, strlen(cm)) : -1;
-        int cw_errno = errno;
-        if (c >= 0) close(c);
-        char df[320];
-        int dn = snprintf(df, sizeof(df),
-            "{\"diag\":\"fd1=%s consolefd=%d cw=%d cwe=%d\"}",
-            lbuf, c, (int)cw, cw_errno);
-        if (dn > 0) control_write(df);
-        (void)redirect_workload_stdio; /* keep -Werror happy while diag replaces it */
-    }
+    /* Route the workload's stdio onto the implicit console (/dev/console) so
+     * its output reaches the host via the helper's krun_set_console_output. */
+    redirect_workload_stdio();
     if (g_control_fd >= 0) { close(g_control_fd); g_control_fd = -1; }
 
     /* execve: pathname=resolved, argv=ls.argv (argv[0]=program name),

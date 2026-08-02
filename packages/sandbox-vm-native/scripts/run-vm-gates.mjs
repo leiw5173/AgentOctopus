@@ -480,21 +480,32 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
     await fs.rm(vsockHostSocket, { force: true }).catch(() => {});
   }
 
-  // The workload's stdio is relayed to the HOST helper's own fd 1/2 (the
-  // helper registers a krun default console on fds 0/1/2 and vm-init dup2's
-  // the resulting "krun-stdout"/"krun-stderr" ports onto the workload's
-  // fd 1/2 before execve). So G1-DONE/G2-DONE, any leaked sentinel, and any
-  // CONNECT-OK marker land in helperStdout/helperStderr. The control port
-  // (fd 4 -> guestOut) carries ONLY the bootstrap ready/error frame. Return
-  // all of it so the evaluators see the workload output AND a NO-GO still
-  // shows the bootstrap reason / helper exit status.
+  // The workload's stdio is relayed via the guest's implicit console
+  // (/dev/console == hvc0): the helper points libkrun's implicit-console output
+  // at its own stdout via krun_set_console_output("/dev/fd/1"), and vm-init
+  // dup2's /dev/console onto the workload's fd 0/1/2 before execve. So
+  // G1-DONE/G2-DONE, any leaked sentinel, and any CONNECT-OK marker land in
+  // helperStdout (raw, on the stdout channel). The control port (fd 4 ->
+  // guestOut) carries ONLY the bootstrap ready/error frame. Return all three
+  // streams, LABELED, so the evaluators see the workload output AND a NO-GO
+  // still shows the bootstrap reason / helper exit status — and so the CI log
+  // reveals which stream the markers rode (stdout == clean; stderr == the
+  // console fell back to libkrun's logger).
   const tail = [];
   tail.push(`[helper ${exitInfo}]`);
   tail.push(`[${probeInfo}]`);
   if (!guestOut.trim()) {
     tail.push('[guest control console (fd 4) empty — no ready/error frame relayed]');
   }
-  return [guestOut, helperStdout, helperStderr, ...tail].join('\n');
+  return [
+    '--- guest control console (fd 4 -> ready/error frame) ---',
+    guestOut,
+    '--- helper stdout (fd 1 -> workload stdio via implicit console) ---',
+    helperStdout,
+    '--- helper stderr (fd 2 -> libkrun logger) ---',
+    helperStderr,
+    ...tail,
+  ].join('\n');
 }
 
 function cryptoRandomHex(bytes) {

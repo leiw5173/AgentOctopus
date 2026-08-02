@@ -2,34 +2,37 @@
 "@agentoctopus/sandbox-vm-native": patch
 ---
 
-fix(sandbox-vm-native): relay guest workload stdio to the host via a krun default console
+fix(sandbox-vm-native): relay guest workload stdio to the host via the implicit console
 
 After the bootstrapArgv + cwd fixes, the G1/G2 qualification gates booted the
 guest, decoded the launch spec, and emitted `{"ready":true}` — but the probe's
 `G1-DONE`/`G2-DONE` markers never reached the host, so the gates NO-GO'd with
 "helper early-exit: DONE marker absent" and the vCPU halted with exit 0.
 
-Root cause: the helper registered ONLY the `octopus-control` multiport console
-(fds 3/4) and never called `krun_add_virtio_console_default`, so no
-`krun-stdin`/`krun-stdout`/`krun-stderr` ports existed. libkrun's own guest
-init (which would redirect the app's stdio to those ports) never runs — our
-custom `octopus-vm-init` is PID 1 — so the workload's fd 1/2 went to the boot
-console and were lost.
+Root cause: our custom `octopus-vm-init` is the guest PID 1 (libkrun's own init
+never runs), and at boot its fd 1 is a stray virtio-console port (e.g.
+`/dev/vport2p2`) that goes nowhere — so the workload's `console.log` was lost.
+In-guest diagnostics proved that a write to the guest's implicit console
+(`/dev/console` == hvc0) DOES reach the host, but by default libkrun re-emits it
+through its own logger (mangled with an `ERROR init_or_kernel` prefix on the
+helper's stderr), which would corrupt real skill output.
 
 Fix (two parts, shared helper binary so it covers both the qualification gate
 AND real skill execution):
-- `vm-helper.c`: register ONE extra named port `krun-stdio` as a bidirectional
-  `inout` port on the SAME multiport console as `octopus-control`, with real fds
-  on both directions (helper stdin -> guest, guest -> helper stdout).
-  NOTE: two libkrun constraints force the single-port/real-fd design —
-  `krun_add_virtio_console_default` (a second console device) AND any
-  `/dev/null`-backed or second data port both make libkrun panic at
-  `devices/src/virtio/console/device.rs:263` ("port rx queue should exist",
-  helper SIGABRT 134) the instant the guest opens the port.
-- `vm-init.c`: before execve, dup2 the single `krun-stdio` port onto fd 0/1/2
-  (`redirect_workload_stdio`, a serial-style bidirectional channel so stdout and
-  stderr both reach the host), generalizing the port-by-name scan into
-  `open_named_port`.
-- `run-vm-gates.mjs`: the gate now returns the helper's own stdout/stderr (where
-  the workload output lands) alongside the control-port ready/error frame, so
-  the evaluators see the markers and a NO-GO still surfaces the bootstrap reason.
+- `vm-helper.c`: call `krun_set_console_output(ctx, "/dev/fd/1")` so libkrun
+  writes the implicit console's output RAW to the helper's own stdout (fd 1),
+  not through its logger. `/dev/fd/1` survives `mass_close_fds` (stdio fds 0-2
+  are preserved). This API is a NOOP if the implicit console is disabled; we
+  never disable it. NOTE: the rejected alternatives are load-bearing to avoid —
+  registering a console port on fd 0/1 is never relayed (`krun_start_enter`
+  takes over the helper's stdio), and `krun_add_virtio_console_default` (a 2nd
+  console device), a `/dev/null`-backed input, or a 2nd data port all panic
+  libkrun at `devices/src/virtio/console/device.rs:263` ("port rx queue should
+  exist", helper SIGABRT 134).
+- `vm-init.c`: before execve, dup2 `/dev/console` onto fd 0/1/2
+  (`redirect_workload_stdio`) so the workload's stdio rides the implicit console
+  to the host's helper stdout.
+- `run-vm-gates.mjs`: the gate now returns the guest control frame plus the
+  helper's stdout and stderr, each LABELED, so the evaluators see the markers,
+  a NO-GO still surfaces the bootstrap reason / helper exit status, and the CI
+  log reveals which stream the markers rode (stdout == clean relay).
