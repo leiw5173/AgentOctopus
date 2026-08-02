@@ -557,6 +557,32 @@ static void diag_report_fd1(const char *tag) {
     control_write(msg);
 }
 
+/* TEMP DIAGNOSTIC: dump exactly what execve is about to run (resolved path +
+ * argv + counts), sanitizing for JSON. */
+static void diag_report_exec(const LaunchSpec *ls, const char *resolved) {
+    char msg[900];
+    snprintf(msg, sizeof(msg),
+             "{\"diag\":\"resolved=%.100s executable=%.60s argc=%zu envn=%zu aen=%zu\"}",
+             resolved, ls->executable ? ls->executable : "",
+             ls->argv_n, ls->env_n, ls->ae_n);
+    control_write(msg);
+    size_t off = (size_t)snprintf(msg, sizeof(msg), "{\"diag\":\"argv=");
+    for (size_t i = 0; i < ls->argv_n && i < 4 && off < sizeof(msg) - 70; i++) {
+        const char *a = ls->argv[i] ? ls->argv[i] : "(null)";
+        off += (size_t)snprintf(msg + off, sizeof(msg) - off, "[%zu]", i);
+        for (size_t j = 0; a[j] && j < 60 && off < sizeof(msg) - 10; j++) {
+            char c = a[j];
+            if (c == '"' || c == '\\' || (unsigned char)c < 0x20 ||
+                (unsigned char)c > 0x7e) {
+                c = '.';
+            }
+            msg[off++] = c;
+        }
+    }
+    snprintf(msg + off, sizeof(msg) - off, "\"}");
+    control_write(msg);
+}
+
 /* Redirect the workload's stdio onto the "krun-stdio" named virtio-console
  * port BEFORE execve. The host helper registers that port on the octopus-control
  * multiport device (input fd 7 / output fd 6 on the host), so anything the
@@ -739,6 +765,22 @@ int main(int argc, char **argv) {
     /* Route the workload's stdio onto the "krun-stdio" named port so its
      * output reaches the host via the helper's krun-stdio port pipe. */
     redirect_workload_stdio();
+    /* TEMP DIAGNOSTIC (remove once workload output arrives): dump the execve
+     * inputs, then sleep 300ms. libkrun's init.krun (guest) waitpid()s on THIS
+     * process and reboots the guest when it exits — so if the guest still
+     * halts <1ms after these frames, the halt is NOT this process exiting;
+     * if it lives ~300ms, the halt is workload-exit-driven and the argv dump
+     * shows what actually ran. Then write a pre-exec marker through the relay
+     * (second proof the port still carries bytes right before execve). */
+    diag_report_exec(&ls, resolved);
+    usleep(300 * 1000);
+    {
+        const char marker[] = "DIAG-PRE-EXEC\n";
+        ssize_t w = write(STDOUT_FILENO, marker, sizeof(marker) - 1);
+        char frame[80];
+        snprintf(frame, sizeof(frame), "{\"diag\":\"pre_exec_write=%d\"}", (int)w);
+        control_write(frame);
+    }
     if (g_control_fd >= 0) { close(g_control_fd); g_control_fd = -1; }
 
     /* execve: pathname=resolved, argv=ls.argv (argv[0]=program name),
