@@ -29,6 +29,7 @@ export {
   type VmBackendUnavailable,
 } from './sandbox-vm-assembly.js';
 export { buildSecretProviderFromConfig } from './secret-provider.js';
+export * from './execution-context.js';
 
 export {
   loadConfig, getConfig, resetConfig,
