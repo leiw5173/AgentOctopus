@@ -23,10 +23,10 @@
        └─ 执行 run.mjs（编排脚本，仅在用户机器 ~/.claude/skills/，不入库）
             ├─ [0] 前置检查（hermes CLI / gateway 存活 / 调试端点已开(admin key) / 两个 key 齐备）
             ├─ [1] 生成关联键 oct-e2e-<uuid>，嵌入 query 文本
-            │        hermes -z "<查询…[trace: oct-e2e-<uuid>]>"
+            │        hermes -z "<查询…[trace: oct-e2e-<uuid>]；指令：调用 agentoctopus 并逐字传 query>"
             │        └─ Hermes agent 把 AgentOctopus 当 tool 调用（AGENTOCTOPUS_E2E_ASK_KEY，free）
             │             └─ POST http://localhost:3002/agent/ask {query: "…[trace: oct-e2e-<uuid>]"}
-            │                  └─ gateway 从 query 提取关联键→ExecutionContext.traceId
+            │                  └─ gateway 从 query 提取关联键→剥除 [trace:...]→ExecutionContext.traceId
             │                       └─ AgentOctopus: 意图分析→路由→评分→SandboxRunner 沙箱执行（联网）
             ├─ [2] GET /agent/debug/last-run?runId=oct-e2e-<uuid>（AGENTOCTOPUS_E2E_ADMIN_KEY，admin）
             └─ [3] 对 5 个阶段逐一断言，输出 PASS/FAIL
@@ -117,29 +117,67 @@
 - **鉴权（#1）——两 key 分离，一次性 setup**：
   - 建**两个专用测试 key**，角色分离：
     - `AGENTOCTOPUS_E2E_ASK_KEY` — **free tier**，只给 Hermes 调 `POST /agent/ask`。注入到 Hermes 的 agentoctopus tool 配置（`Authorization: Bearer <key>`）。
+      - **Hermes 配置示例（header 语法）**：当前仓库 `docs/integrations/hermes.md` 只有 endpoint、没写 header，需补上准确写法。Hermes 在 `~/.hermes/config.yaml` 的 `mcp_servers`（或对应 tool/skill 节）下用 `headers` 传字面 header、`env` 从 `~/.hermes/.env` 转发变量：
+        ```yaml
+        mcp_servers:
+          agentoctopus:
+            endpoint: "http://localhost:3002/agent/ask"
+            headers:
+              Authorization: "Bearer ${AGENTOCTOPUS_E2E_ASK_KEY}"
+            env:
+              AGENTOCTOPUS_E2E_ASK_KEY: "${env:AGENTOCTOPUS_E2E_ASK_KEY}"
+        ```
+        （确切节名以 Hermes 实际配置结构为准——`mcp_servers` vs skill 配置；实现时按本地 `~/.hermes/config.yaml` 现状对齐。）
     - `AGENTOCTOPUS_E2E_ADMIN_KEY` — **admin tier**，只给 run.mjs 查遥测（`/agent/debug/last-run`）。**绝不交给 Hermes**，只存在 run.mjs 读的本地 env。
   - 一次性 setup：用已有 admin key 调 `POST /agent/keys/create`（`/keys/create` 默认 tier `free`，admin 需显式 `tier:'admin'`）各建一个，写入两个 env。**不每次新建**——key 持久存在于 `auth.apiKeysPath`，测试只读 env。
   - 职责边界：Hermes 侧的 key **不能**是 admin（它只需发 query）；遥测查询的 key **必须**是 admin（debug 端点 admin-only）。两者分开是为了让 Hermes 永远拿不到能读遥测的凭证。
-  - 文档明确状态码语义：**401**=未带/无效 key（提示配 key）、**403**=key 有效但 tier 不足（如用 ASK_KEY 访问 admin-only 的 debug 端点）、**404**=端点未启用（`debugEndpoints:false`）、**429**=限流。
+  - 文档明确状态码语义：**401**=未带/无效 key（提示配 key）、**403**=key 有效但 tier 不足（如用 ASK_KEY 访问 admin-only 的 debug 端点）、**404**=端点未启用（`debugEndpoints.enabled:false`）、**429**=限流。
 - **调试端点（#2）**：
   - 命名 `GET /agent/debug/last-run?runId=<id>`：`last-run` 表示"返回匹配该 runId 的最近一次执行记录"（同一 runId 多次沙箱 run 时聚合为一条含 `runs[]` 的记录）；省略 `runId` 时返回全局最近一条（**仅 admin**，且默认不含 query 原文）。
-  - **admin-only**（仅 admin tier key 可访问），默认 `gateway.debugEndpoints:false` 关闭。
+  - **admin-only**（仅 admin tier key 可访问）。
+  - **配置形状（统一为对象，不再混用布尔）**：`gateway.debugEndpoints` 是一个对象，不是布尔：
+    ```json
+    { "gateway": { "debugEndpoints": { "enabled": false, "includeQuery": false, "bufferSize": 10 } } }
+    ```
+    默认 `enabled:false` 关闭；`includeQuery` 控制是否返回 query 原文；`bufferSize` 是环形缓冲容量。
+  - **响应语义（区分三种状态）**：
+    - **端点关闭**（`enabled:false`）→ **404**（端点不存在）。
+    - **端点开启但缓冲为空 / 无匹配 runId** → **200** `{success:true, run:null}`（**不是** 404）。这样 run.mjs 前置检查能区分"端点没开（404，要去开 config）"和"端点开了但还没有执行记录（200 run:null，正常，继续跑）"。
+    - **命中** → **200** `{success:true, run:{...}}`。
   - 执行记录带 `runId`；按 runId 精确查询，避免并发混淆与跨调用者读取。
-  - **runId 产生与关联机制（替代 `metadata:{runId}`）**：Hermes 的 tool 调用是模型驱动的，无法可靠携带任意 metadata，所以 runId **不能**靠 `/ask` 请求体里的 `metadata.runId` 传。改为：
+  - **runId 产生与关联机制（替代 `metadata:{runId}`）**：Hermes 的 tool 调用是模型驱动的，无法可靠携带任意 metadata，所以 runId **不能**靠 `/ask` 请求体里的 `metadata.runId` 传。改为关联键方案：
     1. run.mjs 生成一个**不可猜测的关联键** `oct-e2e-<uuid>`（非 runId 本身，仅作本次执行的关联标识）。
-    2. 把关联键**嵌入发给 Hermes 的 query 文本**（如 `"...查东京天气 [trace: oct-e2e-9f3a...]"`），Hermes 把它原样作为 agentoctopus 的 query 转给 `/ask`。
-    3. **gateway 在 `/ask` handler 里、路由之前**，用正则从原始 query 提取 `oct-e2e-<uuid>` 模式，得到关联键（trusted side 提取，不依赖 LLM 是否保留）。
-    4. gateway 把关联键作为 **显式 `ExecutionContext.traceId`** 传给 `router.route()` / `executor.execute()` / `SandboxRunner` 的 telemetry sink；路由遥测、沙箱遥测、composed/MCP 的子执行都带这个 traceId 写入环形缓冲。
-    5. run.mjs 用同一关联键查 `GET /agent/debug/last-run?runId=oct-e2e-<uuid>`，拿回这次执行聚合的记录。
-    - query 内嵌的键对 Hermes/LLM 可见但**不是凭证**（真正的鉴权仍是 `AGENTOCTOPUS_E2E_ASK_KEY`）；即使键被复述或丢失，gateway 提取不到就只记录无 traceId 的普通执行，run.mjs 查询返回"未找到该 runId"，**不影响安全**。
+    2. run.mjs 把关联键**嵌入发给 Hermes 的 prompt/query 文本**（如 `"...查东京天气 [trace: oct-e2e-9f3a...]"`），并在 Hermes prompt 里**显式指令**：调用 agentoctopus tool，且把 query **逐字**（含 `[trace: ...]`）传给该 tool。这是 primary 关联路径——**它依赖 Hermes 模型逐字保留 trace，这一点必须承认**（见下"备用关联"）。
+    3. **gateway 在 `/ask` handler 里、路由之前**，用正则从原始 query 提取 `oct-e2e-<uuid>` 模式，得到关联键（trusted side 提取）。
+    4. **gateway 提取后，把 `[trace: ...]` 片段从 query 中剥除**，再送给 Router / skill——避免 trace 串污染意图提取（intent extraction）与评分。剥除是 gateway 侧的纯字符串操作，剥除失败不影响主流程（剥不掉就带着 trace 继续，仅可能轻微影响路由质量，不影响安全）。
+    5. gateway 把关联键作为 **显式 `ExecutionContext.traceId`** 传给 `router.route()` / `executor.execute()` / `SandboxRunner` 的 telemetry sink；路由遥测、沙箱遥测、composed/MCP 的子执行都带这个 traceId 写入环形缓冲。
+    6. run.mjs 用同一关联键查 `GET /agent/debug/last-run?runId=oct-e2e-<uuid>`，拿回这次执行聚合的记录。
+    - query 内嵌的键对 Hermes/LLM 可见但**不是凭证**（真正的鉴权仍是 `AGENTOCTOPUS_E2E_ASK_KEY`）。
+    - **备用关联（trace 被模型删掉/改写时区分失败模式）**：telemetry 记录除 `traceId` 外，还记录**调用者身份（ASK key 的 apiKey id）+ 请求开始时间（receivedAt）**。于是 run.mjs 查询 `?runId=<键>` 超时时，能进一步用"该 ASK key 在最近窗口内是否有执行记录"区分两种失败：
+      - **窗口内无任何该 key 的记录** → Hermes 根本没调 tool（接线问题）。
+      - **窗口内有该 key 的记录但无匹配 traceId** → tool 被调了，但 trace 被模型删掉/改写（prompt 指令不够强，或模型行为）。
+      这把"trace 依赖模型保留"这一不可靠点变成**可诊断**，而不是默默超时。
     - `ExecutionContext` 是新增的内部传递对象（见"改动范围"），只承载 traceId 等遥测元数据，**不改变** `AdapterResult`/`ExecutionResult` 既有形状。
-  - 记录**绑定调用者身份**（apiKey id）；**默认不保存/不返回 query 原文**（只返回 query 的哈希或长度 + 结构化遥测），需要时显式开 `debugEndpoints.includeQuery:true`。
-  - 环形缓冲 last-N（可调），按 runId 索引。
+  - 记录**绑定调用者身份**（apiKey id）+ **请求开始时间**（receivedAt，供备用关联用）；**默认不保存/不返回 query 原文**（只返回 query 的哈希或长度 + 结构化遥测），需要时显式开 `gateway.debugEndpoints.includeQuery:true`。
+  - 环形缓冲，容量由 `gateway.debugEndpoints.bufferSize` 决定（默认 10），按 runId 索引。
 - **沙箱遥测透传（#3）**：
   - 采用**独立 execution-telemetry 回调**（而非改 `AdapterResult`/`ExecutionResult` 的既有形状，避免破坏 adapter 契约）：`SandboxRunner.bind().run()` 已有 `meta:{backend,isolationLevel,degraded,degradationReasons}`，runner 在执行完成时回调 engine 注册的 telemetry sink，gateway 写入环形缓冲。telemetry sink 接收的上下文里带 `ExecutionContext.traceId`（上面的关联键），记录按 traceId 索引。
+  - **同时 instrument 一次性 `run()` 与持久 `spawn()` 两条路径**（review #P4——只挂 `run()` 会漏掉 MCP）：
+    - **`run()` 完成路径**：执行返回时回调，带 `meta` + `traceId`。
+    - **`spawn()` 创建路径**：`backend.spawn()` 成功后回调一条"session created"（带 `traceId`、backend、isolationLevel 初值）。
+    - **`spawn()` 的 `close()`/`resultMeta` 完成路径**：MCP 经 `spawn()` 建持久会话，**最终 meta 只有在 `session.close()` 解析 `resultMeta` 后才确定**（`sandbox-runner.ts` 的 `doClose` 里 await `proc.exited` 拿 exitMeta，再叠加 cleanup 结果）。telemetry 在 `close()` 完成、`resultMeta` 解析后回调**最终 meta**。
+    - **cleanup 降级后的最终 isolation metadata**：`doClose` 里 backend.cleanup() 抛 `ContainmentCleanupError` 会把 `isolationLevel` 降到 `'none'` 并 `degraded:true`。telemetry 记录的必须是这条**降级后**的 `finalMeta`，而不是 spawn 时的初值——否则会把一次 containment 破坏误报成 full isolation。
+  - **执行结果字段（review #P2 阶段5——光有 meta 只能证明"起过 Docker"，不能证明"联网 skill 成功")**：现有 `/ask` 即便 `adapterResult.success===false` 外层仍返回 `success:true`（`agent-protocol.ts:252`），所以 telemetry 必须额外带**安全的执行结果**：
+    - `sandboxRun.success`（bool）、`adapterSuccess`（bool，下层 adapter 真实成败）、`exitCode`（number|null）、`errorCode`（string|null，如 `EAI_AGAIN`/egress 403）。
+    - 这些是结构化字段，**不含 query 原文、不含 skill 输出原文**（输出原文仍受 `includeQuery`/隐私边界约束）。阶段5 的"下层 skill 实际返回外网数据"用 `adapterSuccess:true` + `exitCode:0` 判定。
   - **digest 语义**：调试记录里的 `sandbox.digest` 指 **skill snapshot digest**（`identity.digest`，`sha256:<64hex>`，runner 在 prepare 前 verify 的那个），**不是** runtime image digest。文档写明。
-  - 多次沙箱运行（MCP/composed）：每次 run 产生一条 telemetry 记录，都带同一 `traceId`，按 traceId 聚合为一条含 `runs[]` 的记录；composed skill 记录 composer 轨迹。
-- **路由遥测（#4）**：按上文"评分遥测语义"暴露 `selectedRawScore`/`normalizedConfidence`/`candidates[]`/`selectionMethod`/`selectedCandidateRank`。
+  - 多次沙箱运行（MCP/composed）：每次 run/spawn 产生 telemetry 记录，都带同一 `traceId`，按 traceId 聚合为一条含 `runs[]` 的记录；composed skill 记录 composer 轨迹。
+- **路由遥测（#4）**：按上文"评分遥测语义"暴露 `selectedRawScore`/`normalizedConfidence`/`candidates[]`/`selectionMethod`/`selectedCandidateRank`。另外补齐阶段2 所需的**意图遥测**（review #P2——光评分字段不够）：
+  - **`intent`**：Router 实际用来 embed 的意图短语（`embedQuery`）。
+  - **`intentSource`**：`llm` | `original-query-fallback`。Router 的 intent 提取有回退路径——非 Latin 走翻译+intent 合并调用（JSON 解析失败/LLM 调用失败都回退原 query），Latin 只在 trim 后短于原 query 时才用提取结果、否则也回退原 query（`router.ts:204-243`）。必须记录走的是哪条。
+  - **`intentExtractionSucceeded`**（bool）：是否真正用上了 LLM 提取的 intent（区别于回退原 query）。
+  - **`candidatesConsidered` 口径**：送入 LLM reranker 的候选数（cosine topK + keyword-boosted 名称匹配 + previousSkill 去重注入之后的 `candidates.length`，`router.ts:334-363`），**不是**索引总数、也不是 eligibility 过滤前的数量。文档写明。
+  - 阶段2 的"Router 做了非平凡路由"用 `intent` 非空 + `intentSource`/`intentExtractionSucceeded` + `candidatesConsidered > 0` 判定。
 
 ### Phase 4 — Claude Code 测试 Skill（run.mjs，不入库）
 
@@ -147,9 +185,9 @@
 
 - **SKILL.md**：name `hermes-e2e-test`；用户说"运行这个测试"时执行 `node run.mjs`，把 PASS/FAIL 读给用户，失败按排查提示引导。
 - **run.mjs 逻辑**：
-  1. 前置检查（任一失败给修复提示、非零退出）：`hermes --version`；`GET /agent/health`；`GET /agent/debug/last-run`（用 `AGENTOCTOPUS_E2E_ADMIN_KEY`，区分 401/403/404）；两个测试 key 都存在于 env；Hermes tool 已指向 `/agent/ask` 且带 `AGENTOCTOPUS_E2E_ASK_KEY`。
-  2. 生成不可猜测的**关联键** `oct-e2e-<uuid>`（crypto random），把它**嵌入 query 文本**（默认 `"What's the weather in Tokyo? [trace: oct-e2e-<uuid>]"`，`--query`/`--expect-skill` 可覆盖），`hermes -z "<含关联键的 query>"`。带 `--timeout`（默认 90s）。**不在 request metadata 注入**——Hermes 的 tool 调用模型驱动，metadata 不可靠；关联键走 query 文本，由 gateway 端正则提取。
-  3. 轮询 `GET /agent/debug/last-run?runId=oct-e2e-<uuid>`（用 `AGENTOCTOPUS_E2E_ADMIN_KEY`）直到出现或超时。
+  1. 前置检查（任一失败给修复提示、非零退出）：`hermes --version`；`GET /agent/health`；`GET /agent/debug/last-run`（用 `AGENTOCTOPUS_E2E_ADMIN_KEY`）——**404**=端点没开（提示去开 `debugEndpoints.enabled`），**401/403**=key 问题，**200 `{run:null}`**=端点已开但缓冲为空（**正常**，继续）；两个测试 key 都存在于 env；Hermes tool 已指向 `/agent/ask` 且带 `AGENTOCTOPUS_E2E_ASK_KEY`。
+  2. 生成不可猜测的**关联键** `oct-e2e-<uuid>`（crypto random），把它**嵌入 query 文本**，并在 Hermes prompt 里**显式指令逐字传递**（默认 `"What's the weather in Tokyo? [trace: oct-e2e-<uuid>]\n\nCall the agentoctopus tool and pass the query above VERBATIM, including the [trace: ...] token."`，`--query`/`--expect-skill` 可覆盖），`hermes -z "<含关联键与指令的 query>"`。带 `--timeout`（默认 90s）。**不在 request metadata 注入**——Hermes 的 tool 调用模型驱动，metadata 不可靠；关联键走 query 文本，由 gateway 端正则提取。
+  3. 轮询 `GET /agent/debug/last-run?runId=oct-e2e-<uuid>`（用 `AGENTOCTOPUS_E2E_ADMIN_KEY`）直到 `run` 非空或超时。
   4. 按 5 阶段断言（评分断言按 Phase 3 语义）。
   5. 输出 5 行 PASS/FAIL + 总 verdict；`--json` 机器可读。
 - **CLI 参数**：`--query`、`--expect-skill`、`--threshold`、`--timeout`、`--json`。
@@ -162,9 +200,11 @@
 | gateway 没起 | `/agent/health` 连接拒绝 | 先 `octopus start`（:3002） |
 | 未带/无效 key | 401 | 设 `AGENTOCTOPUS_E2E_ASK_KEY`（Hermes tool 注入 Bearer）/ `AGENTOCTOPUS_E2E_ADMIN_KEY`（run.mjs 读） |
 | key tier 不足 | 403 | 调试端点需 admin tier——确认 run.mjs 用的是 `AGENTOCTOPUS_E2E_ADMIN_KEY` 而非 ASK_KEY |
-| 调试端点没开 | 404 | `octopus.json` 设 `gateway.debugEndpoints:true` 并重启 |
+| 调试端点没开 | 404 | `octopus.json` 设 `gateway.debugEndpoints.enabled:true` 并重启 |
+| 缓冲为空（非错误） | 200 `{run:null}` | 端点已开、还没执行记录——正常，继续跑，不要去改 config |
 | 限流 | 429 | 降低频率或提 tier |
-| Hermes 没接线 / 关联键没传到 | `?runId` 超时无记录 | 确认 Hermes tool 指到 `/agent/ask`，且把 query 原样转发（关联键需随 query 文本到达，gateway 才提取得到）；按 `docs/integrations/hermes.md` 接线 |
+| Hermes 没接线（备用关联判定） | `?runId` 超时 且 最近窗口内该 ASK key **无任何**执行记录 | Hermes 没调 tool——按 `docs/integrations/hermes.md` 把 tool 指到 `/agent/ask` |
+| trace 被模型丢掉（备用关联判定） | `?runId` 超时 但 最近窗口内该 ASK key **有**执行记录（无匹配 traceId） | tool 被调了但 `[trace:...]` 没逐字传到——加强 prompt 逐字指令后重试 |
 | 调用超时 | 超 `--timeout` | 区分模型慢 vs 接线断，先手动 `hermes -z` |
 | 路由选错 | `skill !== expected` | 显示实际命中 + candidates |
 | host fallback | `isolationLevel` 缺/none | 查 `sandbox.defaultBackend`/`minIsolationLevel`（fail-closed 下不应出现） |
@@ -184,20 +224,21 @@
 - `docs/integrations/hermes.md`：加"端到端验证"（用测试 skill + 开 debugEndpoints + 配测试 key）。
 - `docs/core-concepts/sandbox.md`：记录联网导流机制（HTTP(S)_PROXY + bootstrap）与 skill 联网前提（hosts 声明 + grant）。
 - `docs/api-reference/agent-protocol.md`：记录 `/agent/debug/last-run`（admin-only、runId、遥测字段）+ `/ask` 的关联键提取行为（从 query 提取 `oct-e2e-<uuid>` 模式作为 traceId）。
-- `CLAUDE.md`：更新 gateway/agent-protocol（debugEndpoints、调试端点、关联键提取）、core（`ExecutionContext.traceId` 传递）、sandbox（bootstrap 联网机制）、镜像构建（vendored undici）。
+- `CLAUDE.md`：更新 gateway/agent-protocol（debugEndpoints 对象配置、调试端点、关联键提取+trace 剥除）、core（`ExecutionContext.traceId` 传递）、sandbox（bootstrap 联网机制）、镜像构建（vendored undici）。
 - `TEST_INSTRUCTIONS.md`：加测试行。
 - **代码改动范围**：
-  - `packages/gateway`：`agent-protocol.ts` `/ask` handler 在路由前从 query 提取 `oct-e2e-<uuid>` 关联键；新增 `/agent/debug/last-run` admin-only 端点 + 环形缓冲 + `gateway.debugEndpoints` 开关；telemetry sink 注册。
-  - `packages/core`：新增内部 `ExecutionContext`（承载 `traceId` 等遥测元数据），在 `router.route()` / `executor.execute()` / `SandboxRunner` 间显式传递；`SandboxRunner` 执行完成时回调 telemetry sink（带 `meta` + `traceId`）。**不改** `AdapterResult`/`ExecutionResult` 既有形状。
+  - `packages/gateway`：`agent-protocol.ts` `/ask` handler 在路由前从 query 提取 `oct-e2e-<uuid>` 关联键、**剥除 `[trace:...]` 后再送 Router**；telemetry 记录带 apiKey id + receivedAt（备用关联）；新增 `/agent/debug/last-run` admin-only 端点 + 环形缓冲 + `gateway.debugEndpoints` **对象配置**（`enabled`/`includeQuery`/`bufferSize`）；端点关闭→404、开启但无匹配→200 `{run:null}`；telemetry sink 注册。另补 `docs/integrations/hermes.md` 的 Authorization header 配置示例。
+  - `packages/core`：新增内部 `ExecutionContext`（承载 `traceId` 等遥测元数据），在 `router.route()` / `executor.execute()` / `SandboxRunner` 间显式传递；`SandboxRunner` 在 **`run()` 完成 + `spawn()` 创建 + `spawn().close()/resultMeta` 完成** 三处回调 telemetry sink（带**降级后** `finalMeta` + `traceId` + 执行结果字段 `sandboxRun.success`/`adapterSuccess`/`exitCode`/`errorCode`）。**不改** `AdapterResult`/`ExecutionResult` 既有形状。
   - `packages/sandbox` + `images/runtime`：bootstrap 联网导流（P1）、uid 65534 统一、契约测试。
   - `apps/cli/skills/weather` + `ip-lookup`：`requires.bins` `[curl]`→`[node]` + `sandbox.hosts` 声明（P2）。
-- changeset：`feat(sandbox)`（联网修复）、`feat(gateway)`（调试端点+遥测+关联键提取）、`feat(core)`（ExecutionContext + 遥测透传）按实际触及包分别入。
+- changeset：`feat(sandbox)`（联网修复）、`feat(gateway)`（调试端点+遥测+关联键提取+对象配置）、`feat(core)`（ExecutionContext + 遥测透传 run/spawn/close）按实际触及包分别入。
 
 ## 风险与开放点
 
 - **镜像 TCB 扩大**：vendored undici 进 runtime 镜像，需 pinned + 哈希入锁 + 契约测试守护；后续 undici 升级要走同一审计路径。
 - **undici 内部 Symbol 依赖**：`Symbol.for('undici.globalDispatcher.1')` 是 undici 内部约定，Node 大版本升级可能变；契约测试需在目标 Node 版本上断言该机制有效（v22 已实测）。
 - ** Hermes 自主决策随机性（review #P2-1）**：Hermes 是否调 AgentOctopus 由模型自主决定，单次有随机性。缓解：E2E 的 prompt 明确要求使用 agentoctopus tool（链路冒烟目标）；若要把"自主工具选择"也作为受测行为，需多次采样而非单次断言——本期不做（YAGNI）。
+- **trace 依赖模型逐字保留（review #P1）**：关联键经 query 文本传递，若 Hermes 模型删掉/改写 `[trace:...]`，gateway 就提取不到。缓解：① Hermes prompt 显式指令逐字传递；② gateway 提取后剥除 trace 再送 Router（不污染意图/评分）；③ 备用关联（ASK key 身份 + receivedAt）让 run.mjs 能区分"没调 tool"vs"调了但 trace 丢了"，把不可靠点变成可诊断而非默默超时。
 
 ## 明确不做（YAGNI）
 
