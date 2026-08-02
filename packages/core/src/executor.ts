@@ -11,8 +11,15 @@ import { SkillComposer } from './composer.js';
 import type { Router } from './router.js';
 import { SandboxRunner } from './sandbox-runner.js';
 import { createDefaultSandboxRunner } from './sandbox-runner-factory.js';
+import type { ExecutionContext, TelemetrySink, AdapterCompletedEvent } from './execution-context.js';
+import { runOutputValidator, type OutputValidator } from './output-validator.js';
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
+
+/** Bounded budget for the injected output validator — a hung validator must
+ *  never stall execute(). */
+const OUTPUT_VALIDATOR_TIMEOUT_MS = 5000;
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
 
@@ -108,18 +115,28 @@ export interface UnsupportedRuntimeRequirementsResult {
   message: string;
 }
 
+export interface ExecutorOptions {
+  execContext?: ExecutionContext;
+  telemetrySink?: TelemetrySink;
+  outputValidator?: OutputValidator;
+}
+
 export class Executor {
   private http = new HttpAdapter();
   private mcp = new McpAdapter();
   private subprocess = new SubprocessAdapter();
   private composer?: SkillComposer;
   private readonly sandboxRunner: SandboxRunner;
+  private readonly execContext?: ExecutionContext;
+  private readonly telemetrySink?: TelemetrySink;
+  private readonly outputValidator?: OutputValidator;
 
   constructor(
     private registry: SkillRegistry,
     private chatClient?: ChatClient,
     private router?: Router,
     sandboxRunner?: SandboxRunner,
+    options?: ExecutorOptions,
   ) {
     // The SandboxRunner is the SOLE execution boundary for every non-MCP skill
     // path. Inject one in tests; production call sites get the default built
@@ -128,6 +145,9 @@ export class Executor {
     if (this.router && this.chatClient) {
       this.composer = new SkillComposer(this.registry, this.router, this, this.chatClient);
     }
+    this.execContext = options?.execContext;
+    this.telemetrySink = options?.telemetrySink;
+    this.outputValidator = options?.outputValidator;
   }
 
   /**
@@ -302,6 +322,29 @@ export class Executor {
         adapterResult = { success: false, error: httpError, rawText: adapterResult.rawText };
       }
     }
+
+    // Post-execution: optional caller-injected output validation. Runs ONLY
+    // when the adapter succeeded — a failed output has no payload to validate.
+    // When no validator is injected, surface the explicit 'no validator'
+    // sentinel so downstream telemetry consumers can distinguish it from a
+    // real validator failure.
+    let outputValidated = false;
+    let outputValidationReason: string | null = null;
+    if (!adapterResult.success) {
+      outputValidationReason = 'adapter failed';
+    } else if (!this.outputValidator) {
+      outputValidationReason = 'no validator';
+    } else {
+      const vr = await runOutputValidator(this.outputValidator, adapterResult, OUTPUT_VALIDATOR_TIMEOUT_MS);
+      outputValidated = vr.ok;
+      outputValidationReason = vr.reason;
+    }
+
+    // T3.4: emit adapter.completed AFTER the detectHttpErrorInOutput mutation
+    // so adapterSuccess reflects the FINAL success flag, and after the output
+    // validator so the event carries its verdict. Fire-and-forget: a throwing
+    // sink must never break execute(). NEVER carry rawText/output content.
+    this.emitAdapterCompleted(adapterResult, outputValidated, outputValidationReason);
 
     // Post-execution: detect auth errors and append setup guidance
     const authGuidance = await this.diagnoseAuthError(adapterResult, skill, instructions);
@@ -837,5 +880,50 @@ If you're not confident about the URL, say "Visit the provider's website" instea
         error.includes('too many requests') || desc.includes('too many requests')) return true;
 
     return false;
+  }
+
+  /**
+   * T3.4 — emit `adapter.completed` through the optional injected sink.
+   * Fire-and-forget: a throwing sink is caught and ignored. NEVER carries
+   * rawText/output content — only structured metadata. Per the binding brief
+   * note, the Executor NEVER emits `request.completed`/`request.failed`; the
+   * gateway /ask handler owns the terminal event.
+   */
+  private emitAdapterCompleted(
+    adapterResult: AdapterResult,
+    outputValidated: boolean,
+    outputValidationReason: string | null,
+  ): void {
+    if (!this.telemetrySink) return;
+    try {
+      const event: AdapterCompletedEvent = {
+        kind: 'adapter.completed',
+        traceId: this.execContext?.traceId,
+        executionId: this.execContext?.executionId ?? randomUUID(),
+        adapterSuccess: adapterResult.success,
+        errorCode: this.normalizeErrorCode(adapterResult.error),
+        outputValidated,
+        outputValidationReason,
+      };
+      this.telemetrySink.emit(event);
+    } catch {
+      // telemetry must never break execute()
+    }
+  }
+
+  /**
+   * Normalize an adapter error string to a stable machine-readable code.
+   * Maps common cases; falls back to the first whitespace-separated token;
+   * returns null when there is no error.
+   */
+  private normalizeErrorCode(error: string | undefined): string | null {
+    if (!error) return null;
+    if (/EAI_AGAIN/.test(error)) return 'EAI_AGAIN';
+    if (/ECONNREFUSED/.test(error)) return 'ECONNREFUSED';
+    if (/host not granted/i.test(error)) return 'host not granted';
+    const httpMatch = error.match(/\b(4\d\d|5\d\d)\b/);
+    if (httpMatch) return httpMatch[1]!;
+    const firstToken = error.trim().split(/\s+/)[0];
+    return firstToken && firstToken.length > 0 ? firstToken : null;
   }
 }
