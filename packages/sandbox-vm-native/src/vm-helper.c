@@ -719,26 +719,12 @@ int vm_helper_main(int argc, char **argv) {
                                            /*output_fd=*/ G2H_WRITE_FD),
                "add_console_port_inout");
 
-    /* 10b. Workload stdio as ONE named bidirectional port on the SAME multiport
-     *      console (NOT a second console device, and NOT multiple ports).
-     *      Two libkrun constraints force the single-port design:
-     *        (a) krun_add_virtio_console_default adds a second console device
-     *            whose ports panic libkrun (device.rs:263 "port rx queue should
-     *            exist") the moment the guest opens them; and
-     *        (b) on this one console, a port whose input_fd is /dev/null -- or
-     *            any port beyond the first data port -- also trips that same
-     *            panic (observed: guest opens port 2 -> SIGABRT 134).
-     *      So register exactly ONE extra port, "krun-stdio", with REAL fds on
-     *      both directions (helper stdin -> guest, guest -> helper stdout).
-     *      vm-init (guest PID 1 -- NOT libkrun's init) opens it by name and
-     *      dup2's it onto the workload's fd 0/1/2 before execve, giving a
-     *      serial-style bidirectional stdio channel to the host. It stays
-     *      separate from octopus-control, which keeps the ready/error frames. */
-    krun_check(krun_add_console_port_inout((uint32_t)ctx, (uint32_t)console_id,
-                                           "krun-stdio",
-                                           /*input_fd=*/ STDIN_FILENO,
-                                           /*output_fd=*/ STDOUT_FILENO),
-               "add krun-stdio port");
+    /* 10b. TEMP DIAG: no workload-stdio port is registered here. libkrun's
+     *      krun_start_enter takes over the helper's fd 0/1/2 and bridges them
+     *      to the guest's implicit console (hvc0 == /dev/console). Registering
+     *      a console port on fd 0/1 collides with that takeover. The guest
+     *      bootstrap (vm-init) is being tested routing the workload's stdio
+     *      through /dev/console directly. See vm-init.c TEMP DIAG. */
 
     /* 11. Set the guest PID 1 to the trusted bootstrap. bootstrapArgv is
      *     the single authoritative workload representation; trustedEnv is

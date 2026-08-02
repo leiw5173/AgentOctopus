@@ -664,24 +664,25 @@ int main(int argc, char **argv) {
     if (chdir(cwd_real) < 0) {
         free(resolved); launchspec_free(&ls); die("chdir cwd failed");
     }
-    /* TEMP DIAG: full stdio-relay trace reported over the (still-open) control
-     * port. Does the open + dup2 + a probe write to fd 1, so the CI log shows
-     * exactly where the relay breaks. Replaces redirect_workload_stdio for this
-     * diagnostic build (it performs the same dup2s). */
+    /* TEMP DIAG: probe the implicit-console (hvc0) stdio bridge. libkrun's
+     * krun_start_enter takes over the helper's fd 0/1/2 and bridges them to
+     * the guest's /dev/console (hvc0). Report what fd 1 is at boot and write a
+     * marker to /dev/console; if it reaches the host helper stdout, the native
+     * bridge works and the fix is to leave/dup the workload onto /dev/console
+     * (no custom port needed). */
     {
-        int p = open_named_port("krun-stdio");
-        int d_in  = (p >= 0) ? dup2(p, STDIN_FILENO)  : -1;
-        int d_out = (p >= 0) ? dup2(p, STDOUT_FILENO) : -1;
-        int d_err = (p >= 0) ? dup2(p, STDERR_FILENO) : -1;
-        int dup_errno = errno;
-        const char *m = "VM-INIT-STDIO-RELAY-OK\n";
-        ssize_t wr = (d_out >= 0) ? write(STDOUT_FILENO, m, strlen(m)) : -1;
-        int wr_errno = errno;
-        if (p >= 0) close(p);
-        char df[192];
+        char lbuf[256];
+        ssize_t ll = readlink("/proc/self/fd/1", lbuf, sizeof(lbuf) - 1);
+        if (ll < 0) { lbuf[0] = '?'; lbuf[1] = '\0'; } else lbuf[ll] = '\0';
+        int c = open("/dev/console", O_RDWR);
+        const char *cm = "CONSOLE-WRITE-TEST\n";
+        ssize_t cw = (c >= 0) ? write(c, cm, strlen(cm)) : -1;
+        int cw_errno = errno;
+        if (c >= 0) close(c);
+        char df[320];
         int dn = snprintf(df, sizeof(df),
-            "{\"diag\":\"p=%d din=%d dout=%d derr=%d duperr=%d wr=%d wrerr=%d\"}",
-            p, d_in, d_out, d_err, dup_errno, (int)wr, wr_errno);
+            "{\"diag\":\"fd1=%s consolefd=%d cw=%d cwe=%d\"}",
+            lbuf, c, (int)cw, cw_errno);
         if (dn > 0) control_write(df);
         (void)redirect_workload_stdio; /* keep -Werror happy while diag replaces it */
     }
