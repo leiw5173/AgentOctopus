@@ -289,7 +289,15 @@ async function buildStaging(staging, nodeHostPath, runtimeBins) {
     await copyInto(staging, guest, host, 0o755);
   }
 
-  for (const d of ['/tmp', '/run', '/dev', '/etc']) {
+  // Empty dir skeleton. The rootfs is mounted READ-ONLY (sealed image), so
+  // every mount point the guest needs must pre-exist here — neither libkrun's
+  // init nor vm-init can mkdir on a ro root:
+  //   /tmp /run /dev /etc   <- base skeleton (tmpfs / devtmpfs / conf)
+  //   /proc                 <- libkrun init_or_kernel mounts procfs here
+  //   /sys                  <- vm-init scans /sys/class/virtio-ports (sysfs)
+  //   /skill                <- vm-init mounts /dev/vdb (skill block) here
+  //   /etc/skill-ca         <- vm-init mounts /dev/vdc (CA block) here
+  for (const d of ['/tmp', '/run', '/dev', '/etc', '/proc', '/sys', '/skill', '/etc/skill-ca']) {
     await fs.mkdir(path.join(staging, d), { recursive: true });
   }
 
