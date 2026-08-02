@@ -1,7 +1,7 @@
 import path from 'path';
 import os from 'os';
 import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, createDefaultSandboxRunner, buildSecretProviderFromConfig, type ChatClient, type LLMConfig, type TelemetryEvent, type TelemetrySink, getConfig, loadConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, createDefaultSandboxRunner, buildSecretProviderFromConfig, type ChatClient, type LLMConfig, type TelemetryEvent, type TelemetrySink, type OutputValidator, getConfig, loadConfig } from '@agentoctopus/core';
 import { DebugTelemetryBuffer } from './debug-telemetry.js';
 
 export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
@@ -86,7 +86,28 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   // to the trusted egress proxy — never into a prompt, env spec, log, or error.
   const secretProvider = buildSecretProviderFromConfig(config);
   const sandboxRunner = createDefaultSandboxRunner(secretProvider, { telemetrySink });
-  const executor = new Executor(registry, chatClient, router, sandboxRunner, { telemetrySink });
+
+  // Per-skill output validators for E2E telemetry (Stages 5). Validators
+  // return boolean + short machine-readable reason ONLY — raw output NEVER
+  // crosses the telemetry bus (events already carry no rawText; keep it that
+  // way). Validators must NEVER throw; runOutputValidator guards anyway.
+  const weatherValidator: OutputValidator = async (output) => {
+    if (!output.success) return { ok: false, reason: 'adapter failed' };
+    const text = output.rawText ?? '';
+    if (/\d+\s*°\s*[CF]/i.test(text)) return { ok: true };
+    return { ok: false, reason: 'no temperature pattern in output' };
+  };
+  const ipLookupValidator: OutputValidator = async (output) => {
+    if (!output.success) return { ok: false, reason: 'adapter failed' };
+    const text = output.rawText ?? '';
+    if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(text)) return { ok: true };
+    return { ok: false, reason: 'no IPv4 pattern in output' };
+  };
+
+  const executor = new Executor(registry, chatClient, router, sandboxRunner, {
+    telemetrySink,
+    outputValidators: { weather: weatherValidator, 'ip-lookup': ipLookupValidator },
+  });
 
   _engine = { registry, router, executor, chatClient, telemetryBuffer };
   return _engine;
