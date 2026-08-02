@@ -10,8 +10,11 @@
  * The workload executable/argv/env travel ONLY as that structured token
  * (NOT a shell string, NOT over the control channel). The control channel
  * (virtio-console port "octopus-control") carries ONLY {"ready":true} and
- * {"error":"<reason>"} frames; workload stdio uses the guest primary
- * console (/dev/hvc0). Workload exit status is the krun_start_enter return
+ * {"error":"<reason>"} frames; workload stdio rides the krun default console
+ * ("krun-stdin"/"krun-stdout"/"krun-stderr" ports, created by the host
+ * helper's krun_add_virtio_console_default and relayed to the helper's own
+ * fd 0/1/2). vm-init dup2's those ports onto fd 0/1/2 before execve.
+ * Workload exit status is the krun_start_enter return
  * value read by the host helper subprocess -- this process execve's into
  * the workload and never returns to send an exit frame.
  *
@@ -34,7 +37,9 @@
  *      /skill; rootfs-absolute EXACTLY matches an allowedExecutables
  *      value; bare name is a key in allowedExecutables. "other" =>
  *      {"error":"unresolvable executable"} + exit(127).
- *  10. chdir(cwd), CLOSE the control port fd, execve(resolved, argv, envp).
+ *  10. chdir(cwd), CLOSE the control port fd, redirect fd 0/1/2 onto the
+ *      krun default-console ports (workload stdio -> host), execve(resolved,
+ *      argv, envp).
  *
  * Freestanding-ish C: no shell, no dlopen, no PATH lookup by execve
  * (the bootstrap resolves bare names itself). Every error is fatal and
@@ -467,9 +472,10 @@ static void start_forwarder(void) {
     _exit(0);
 }
 
-/* Scan /sys/class/virtio-ports/<port>/name for "octopus-control", open the
- * matching /dev/vportNpM read/write. */
-static int open_control_port(void) {
+/* Scan /sys/class/virtio-ports/<port>/name for a port named `want`, open the
+ * matching /dev/vportNpM read/write, return its fd (or -1 if absent). Shared
+ * by the octopus-control port and the krun workload-stdio ports. */
+static int open_named_port(const char *want) {
     DIR *d = opendir("/sys/class/virtio-ports");
     if (!d) return -1;
     struct dirent *de;
@@ -489,7 +495,7 @@ static int open_control_port(void) {
         buf[r] = '\0';
         /* strip trailing newline */
         while (r > 0 && (buf[r-1] == '\n' || buf[r-1] == '\r')) buf[--r] = '\0';
-        if (strcmp(buf, "octopus-control") == 0) {
+        if (strcmp(buf, want) == 0) {
             char dev_path[512];
             int m = snprintf(dev_path, sizeof(dev_path), "/dev/%s", de->d_name);
             if (m < 0 || (size_t)m >= sizeof(dev_path)) continue;
@@ -499,6 +505,30 @@ static int open_control_port(void) {
     }
     closedir(d);
     return fd;
+}
+
+static int open_control_port(void) {
+    return open_named_port("octopus-control");
+}
+
+/* Redirect the workload's stdio onto the krun default-console ports BEFORE
+ * execve. krun_add_virtio_console_default(ctx, 0, 1, 2) in the host helper
+ * makes libkrun create "krun-stdin"/"krun-stdout"/"krun-stderr" virtio-console
+ * ports relayed to the helper's own fd 0/1/2. vm-init is the guest PID 1 (NOT
+ * libkrun's init), so nothing else performs this redirection -- without it the
+ * workload's console.log/console.error go to the boot console and never reach
+ * the host (the root cause of the G1/G2 NO-GO "no DONE marker relayed").
+ *
+ * Best-effort: a missing port leaves that fd as the boot console rather than
+ * failing the workload (ready/error frames ride the separate octopus-control
+ * port regardless). The octopus-control fd is untouched. */
+static void redirect_workload_stdio(void) {
+    int o = open_named_port("krun-stdout");
+    if (o >= 0) { dup2(o, STDOUT_FILENO); close(o); }
+    int e = open_named_port("krun-stderr");
+    if (e >= 0) { dup2(e, STDERR_FILENO); close(e); }
+    int i = open_named_port("krun-stdin");
+    if (i >= 0) { dup2(i, STDIN_FILENO); close(i); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -617,11 +647,16 @@ int main(int argc, char **argv) {
         launchspec_free(&ls); die("unresolvable executable");
     }
 
-    /* Step 10: chdir, close control fd, execve. */
+    /* Step 10: chdir, CLOSE the control port fd, redirect stdio, execve. */
     if (chdir(cwd_real) < 0) {
         free(resolved); launchspec_free(&ls); die("chdir cwd failed");
     }
     if (g_control_fd >= 0) { close(g_control_fd); g_control_fd = -1; }
+
+    /* Relay the workload's fd 0/1/2 to the krun default-console ports so its
+     * console output reaches the host (separate from the now-closed control
+     * port). Must run after the control fd is closed and before execve. */
+    redirect_workload_stdio();
 
     /* execve: pathname=resolved, argv=ls.argv (argv[0]=program name),
      * envp=ls.env. If env is empty, pass a minimal environ. */

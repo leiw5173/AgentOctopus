@@ -480,20 +480,21 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
     await fs.rm(vsockHostSocket, { force: true }).catch(() => {});
   }
 
-  // The gate asserts on the GUEST console (fd 4). If that is empty the helper
-  // never relayed the probe — fall back to its own stdout/stderr + exit status
-  // so the NO-GO message shows WHY (die() writes early-exit reasons to fd 2).
-  const guest = guestOut.trim();
+  // The workload's stdio is relayed to the HOST helper's own fd 1/2 (the
+  // helper registers a krun default console on fds 0/1/2 and vm-init dup2's
+  // the resulting "krun-stdout"/"krun-stderr" ports onto the workload's
+  // fd 1/2 before execve). So G1-DONE/G2-DONE, any leaked sentinel, and any
+  // CONNECT-OK marker land in helperStdout/helperStderr. The control port
+  // (fd 4 -> guestOut) carries ONLY the bootstrap ready/error frame. Return
+  // all of it so the evaluators see the workload output AND a NO-GO still
+  // shows the bootstrap reason / helper exit status.
   const tail = [];
-  if (helperStderr.trim()) tail.push(`[helper stderr]\n${helperStderr.trim()}`);
-  if (!guest) {
-    const fallback = helperStdout.trim();
-    if (fallback) tail.push(`[helper stdout]\n${fallback}`);
-    tail.push(`[guest console (fd 4) empty — no DONE marker relayed]\n[helper ${exitInfo}]\n[${probeInfo}]`);
-  } else {
-    tail.push(`[helper ${exitInfo}]`);
+  tail.push(`[helper ${exitInfo}]`);
+  tail.push(`[${probeInfo}]`);
+  if (!guestOut.trim()) {
+    tail.push('[guest control console (fd 4) empty — no ready/error frame relayed]');
   }
-  return `${guestOut}\n${tail.join('\n')}`;
+  return [guestOut, helperStdout, helperStderr, ...tail].join('\n');
 }
 
 function cryptoRandomHex(bytes) {
