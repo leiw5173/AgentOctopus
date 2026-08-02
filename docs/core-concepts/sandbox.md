@@ -166,6 +166,25 @@ The skill namespace has only a `/32` route to the proxy namespace over a veth pa
 
 The dyld shared-cache feasibility gate proved `file-read-data` containment cannot be established on macOS 26.x, so the restricted production backend was abandoned and a VM backend supersedes it for full isolation. Restricted use on macOS is an explicit, trusted opt-in; `auto` never picks it and the default `full` floor fails closed without Docker.
 
+## Skill networking (egress)
+
+The Docker runtime image is distroless: it contains only a `node` binary. There is no shell, no `curl`/`wget`, and no `ca-certificates` package. Skills are expected to use Node's built-in `fetch`.
+
+Node v22's built-in `fetch` (undici) does not honor `HTTP_PROXY` or `HTTPS_PROXY` environment variables, and importing `node:undici`'s `setGlobalDispatcher` does not affect the built-in dispatcher. If nothing else were done, a skill calling `fetch` would attempt a direct connection and fail closed with `EAI_AGAIN` because guest DNS is disabled.
+
+To route all built-in `fetch` calls through the egress proxy, the runtime uses `NODE_OPTIONS=--require /opt/octopus-boot/bootstrap.cjs`. That script synchronously assigns a vendored undici `ProxyAgent` to the shared global dispatcher symbol (`Symbol.for('undici.globalDispatcher.1')`), so every `fetch` in the skill process uses the proxy at `http://egress-proxy:8080`. `proxyTunnel: false` keeps plain HTTP on an absolute-form forward request (the proxy's only HTTP path) while HTTPS still opens a `CONNECT` tunnel into the MITM path.
+
+The boot path `/opt/octopus-boot/` is mounted read-only and owned by `root` (directory mode `0555`, files mode `0444`). The runtime uid (`65534`) can read the bootstrap but cannot modify it, so a skill cannot tamper with the proxy routing.
+
+Routing through the proxy does not bypass policy. The proxy still applies the `requested ∩ granted` allowlist, and an ungranted host returns `403 host not granted`. Fail-closed semantics are preserved.
+
+For a skill to reach an external host, the SKILL.md must declare both:
+
+1. The host in `sandbox.hosts`.
+2. A matching entry in `sandbox.grants`.
+
+Both declarations are required; routing to the proxy alone is not enough.
+
 ## Response-cap failure semantics
 
 When a skill response exceeds the configured body cap, the proxy truncates and the run is reported as degraded (the cap is a hard limit, not advisory). Framing errors and protocol violations from the upstream are rejected before reaching the skill; the skill never observes a partially-framed response. Max-connection accounting refuses connections over the configured budget rather than queueing them indefinitely.
