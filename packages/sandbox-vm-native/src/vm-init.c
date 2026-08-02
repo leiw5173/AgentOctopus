@@ -10,10 +10,10 @@
  * The workload executable/argv/env travel ONLY as that structured token
  * (NOT a shell string, NOT over the control channel). The control channel
  * (virtio-console port "octopus-control") carries ONLY {"ready":true} and
- * {"error":"<reason>"} frames; workload stdio rides the krun default console
- * ("krun-stdin"/"krun-stdout"/"krun-stderr" ports, created by the host
- * helper's krun_add_virtio_console_default and relayed to the helper's own
- * fd 0/1/2). vm-init dup2's those ports onto fd 0/1/2 before execve.
+ * {"error":"<reason>"} frames; workload stdio rides named ports on that same
+ * console ("krun-stdin"/"krun-stdout"/"krun-stderr", registered by the host
+ * helper and relayed to the helper's own fd 0/1/2). vm-init dup2's those
+ * ports onto fd 0/1/2 before execve.
  * Workload exit status is the krun_start_enter return
  * value read by the host helper subprocess -- this process execve's into
  * the workload and never returns to send an exit frame.
@@ -38,7 +38,7 @@
  *      value; bare name is a key in allowedExecutables. "other" =>
  *      {"error":"unresolvable executable"} + exit(127).
  *  10. chdir(cwd), CLOSE the control port fd, redirect fd 0/1/2 onto the
- *      krun default-console ports (workload stdio -> host), execve(resolved,
+ *      krun-stdio named ports (workload stdio -> host), execve(resolved,
  *      argv, envp).
  *
  * Freestanding-ish C: no shell, no dlopen, no PATH lookup by execve
@@ -511,13 +511,13 @@ static int open_control_port(void) {
     return open_named_port("octopus-control");
 }
 
-/* Redirect the workload's stdio onto the krun default-console ports BEFORE
- * execve. krun_add_virtio_console_default(ctx, 0, 1, 2) in the host helper
- * makes libkrun create "krun-stdin"/"krun-stdout"/"krun-stderr" virtio-console
- * ports relayed to the helper's own fd 0/1/2. vm-init is the guest PID 1 (NOT
- * libkrun's init), so nothing else performs this redirection -- without it the
- * workload's console.log/console.error go to the boot console and never reach
- * the host (the root cause of the G1/G2 NO-GO "no DONE marker relayed").
+/* Redirect the workload's stdio onto the krun-stdio named ports BEFORE
+ * execve. The host helper registers "krun-stdin"/"krun-stdout"/"krun-stderr"
+ * as inout ports on the octopus-control multiport console, relayed to the
+ * helper's own fd 0/1/2. vm-init is the guest PID 1 (NOT libkrun's init), so
+ * nothing else performs this redirection -- without it the workload's
+ * console.log/console.error go to the boot console and never reach the host
+ * (the root cause of the G1/G2 NO-GO "no DONE marker relayed").
  *
  * Best-effort: a missing port leaves that fd as the boot console rather than
  * failing the workload (ready/error frames ride the separate octopus-control

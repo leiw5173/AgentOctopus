@@ -67,10 +67,12 @@
  *   9. krun_set_vm_config(ctx, cpus, memMib)            -- vCPUs BEFORE RAM
  *  10. krun_add_virtio_console_multiport(ctx)           -> console_id (>=0)
  *      krun_add_console_port_inout(ctx, console_id, "octopus-control", 3, 4)
- *  10b. krun_add_virtio_console_default(ctx, 0, 1, 2)   -- workload stdio;
- *       non-TTY helper stdio -> "krun-stdin"/"krun-stdout"/"krun-stderr"
- *       ports. vm-init (guest PID 1) dup2's them onto the workload's fd
- *       0/1/2 before execve (libkrun's own init never runs).
+ *  10b. krun_add_console_port_inout x3 on the SAME console_id:
+ *       "krun-stdin"(0,null) "krun-stdout"(null,1) "krun-stderr"(null,2) --
+ *       workload stdio. (krun_add_virtio_console_default is NOT used: its
+ *       second console device panics libkrun device.rs:263 on port open.)
+ *       vm-init (guest PID 1) opens these by name and dup2's them onto the
+ *       workload's fd 0/1/2 before execve (libkrun's own init never runs).
  *  11. krun_set_exec(ctx, bootstrapPath, bootstrapArgv, trustedEnv)
  *  12. krun_set_workdir(ctx, "/")                       -- pinned to "/"
  *  13. krun_start_enter(ctx)                            -- blocks; exits with
@@ -716,20 +718,35 @@ int vm_helper_main(int argc, char **argv) {
                                            /*output_fd=*/ G2H_WRITE_FD),
                "add_console_port_inout");
 
-    /* 10b. Default console for WORKLOAD stdio (fd 0/1/2). The helper's own
-     *      stdio are non-TTY pipes (installed by the engine/gate spawn), so
-     *      libkrun creates three additional non-console ports named
-     *      "krun-stdin"/"krun-stdout"/"krun-stderr", each relayed to the
-     *      matching helper fd. vm-init (the guest PID 1 -- NOT libkrun's
-     *      init) detects these ports and dup2's them onto the workload's
-     *      fd 0/1/2 before execve, so console.log/console.error reach the
-     *      host. This is SEPARATE from the octopus-control port, which stays
-     *      dedicated to ready/error frames. */
-    krun_check(krun_add_virtio_console_default((uint32_t)ctx,
-                                               /*input_fd=*/ STDIN_FILENO,
-                                               /*output_fd=*/ STDOUT_FILENO,
-                                               /*err_fd=*/ STDERR_FILENO),
-               "add_virtio_console_default");
+    /* 10b. Workload stdio as named ports ON THE SAME multiport console (NOT a
+     *      second console device). krun_add_virtio_console_default adds another
+     *      console whose ports make libkrun panic at device.rs:263
+     *      ("port rx queue should exist") the moment the guest opens them.
+     *      Instead, register three named inout ports -- relayed to the helper's
+     *      own fd 0/1/2, /dev/null backing each port's unused direction -- on
+     *      the existing console_id (the same call that already works for
+     *      octopus-control). vm-init (guest PID 1 -- NOT libkrun's init) opens
+     *      "krun-stdin"/"krun-stdout"/"krun-stderr" by name and dup2's them
+     *      onto the workload's fd 0/1/2 before execve, so console.log/error
+     *      reach the host. These stay separate from octopus-control, which
+     *      remains dedicated to ready/error frames. */
+    int nullfd = open("/dev/null", O_RDWR);
+    if (nullfd < 0) die("open /dev/null for stdio ports failed: %d", errno);
+    krun_check(krun_add_console_port_inout((uint32_t)ctx, (uint32_t)console_id,
+                                           "krun-stdin",
+                                           /*input_fd=*/ STDIN_FILENO,
+                                           /*output_fd=*/ nullfd),
+               "add krun-stdin port");
+    krun_check(krun_add_console_port_inout((uint32_t)ctx, (uint32_t)console_id,
+                                           "krun-stdout",
+                                           /*input_fd=*/ nullfd,
+                                           /*output_fd=*/ STDOUT_FILENO),
+               "add krun-stdout port");
+    krun_check(krun_add_console_port_inout((uint32_t)ctx, (uint32_t)console_id,
+                                           "krun-stderr",
+                                           /*input_fd=*/ nullfd,
+                                           /*output_fd=*/ STDERR_FILENO),
+               "add krun-stderr port");
 
     /* 11. Set the guest PID 1 to the trusted bootstrap. bootstrapArgv is
      *     the single authoritative workload representation; trustedEnv is

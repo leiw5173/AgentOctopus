@@ -18,8 +18,13 @@ console and were lost.
 
 Fix (two parts, shared helper binary so it covers both the qualification gate
 AND real skill execution):
-- `vm-helper.c`: register `krun_add_virtio_console_default(ctx, 0, 1, 2)` so
-  the helper's own (non-TTY pipe) stdio become the guest workload stdio relay.
+- `vm-helper.c`: register three named inout ports — `krun-stdin`/`krun-stdout`/
+  `krun-stderr` — on the SAME multiport console as `octopus-control`, relayed to
+  the helper's own fd 0/1/2 (/dev/null backs each port's unused direction).
+  NOTE: `krun_add_virtio_console_default` is deliberately NOT used — it adds a
+  second console device whose ports make libkrun panic at
+  `devices/src/virtio/console/device.rs:263` ("port rx queue should exist",
+  helper SIGABRT 134) the instant the guest opens them.
 - `vm-init.c`: before execve, dup2 the `krun-stdout`/`krun-stderr`/`krun-stdin`
   ports onto fd 1/2/0 (`redirect_workload_stdio`), generalizing the port-by-name
   scan into `open_named_port`.
