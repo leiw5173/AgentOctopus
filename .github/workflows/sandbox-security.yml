@@ -962,10 +962,18 @@ jobs:
           # krun-input build script (clang-sys/bindgen). Both are keg-only.
           brew install lld llvm
           LLD_BIN="$(brew --prefix)/opt/lld/bin"
-          mkdir -p /usr/local/bin
+          # Link onto $(brew --prefix)/bin, NOT /usr/local/bin: on a physical
+          # self-hosted Apple Silicon runner /usr/local/bin is root:wheel and
+          # the unprivileged runner user cannot write it, while the Homebrew
+          # bin dir is user-writable and already on PATH. (Hosted macos-15
+          # happens to allow /usr/local/bin writes, which is why this only
+          # surfaced on physical hardware.)
+          LINK_BIN="$(brew --prefix)/bin"
+          mkdir -p "$LINK_BIN"
           for tool in ld64.lld ld.lld lld-link wasm-ld; do
-            [ -e "$LLD_BIN/$tool" ] && ln -sf "$LLD_BIN/$tool" "/usr/local/bin/$tool"
+            [ -e "$LLD_BIN/$tool" ] && ln -sf "$LLD_BIN/$tool" "$LINK_BIN/$tool"
           done
+          echo "$LINK_BIN" >> "$GITHUB_PATH"
           command -v ld64.lld >/dev/null || { echo "ERROR: ld64.lld not on PATH after lld provision" >&2; exit 1; }
           clang -fuse-ld=lld -Wl,--version >/dev/null 2>&1 || clang -fuse-ld=lld -Wl,-v 2>&1 | grep -qi lld || { echo "ERROR: clang -fuse-ld=lld still cannot resolve an lld linker" >&2; exit 1; }
           echo "lld provisioned: $(command -v ld64.lld)"
