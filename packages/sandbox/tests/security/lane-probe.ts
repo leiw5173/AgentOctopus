@@ -246,3 +246,36 @@ setTimeout(() => { process.stderr.write('timeout\\n'); sock.destroy(); process.e
 /** Relative path of the absolute-form proxy probe. Mounted at /skill/http-probe.js. */
 export const HTTP_PROBE_REL = 'http-probe.js';
 
+/**
+ * Built-in-fetch egress probe for the networking behavior lane. Mounted at
+ * /skill/fetch-probe.js. Usage: node /skill/fetch-probe.js <targetUrl>
+ *
+ * Uses Node's BUILT-IN fetch (undici global dispatcher) — the exact client a
+ * real skill uses. The runtime image routes it through the egress proxy ONLY
+ * because the backend injects NODE_OPTIONS=--require /opt/octopus-boot/bootstrap.cjs
+ * (plus HTTPS_PROXY); without the bootstrap, built-in fetch ignores HTTP(S)_PROXY
+ * and fails closed with EAI_AGAIN (guest DNS is cut). This probe therefore proves
+ * the bootstrap actually routes fetch.
+ *
+ * Emits one JSON line: { status, body, error } — status is the upstream HTTP
+ * status (0 when the request never got a response), body the response text,
+ * error the fetch failure code (e.g. EAI_AGAIN) if it threw.
+ */
+export const FETCH_PROBE_SCRIPT = `const target = process.argv[2];
+const out = (o) => { process.stdout.write(JSON.stringify(o) + '\\n'); };
+if (!target) { out({ status: 0, body: '', error: 'bad-args' }); process.exit(0); }
+try {
+  const res = await fetch(target);
+  const body = await res.text();
+  out({ status: res.status, body, error: null });
+} catch (e) {
+  const c = e && e.cause;
+  const err = (c && (c.code || c.message)) || (e && (e.code || e.message)) || String(e);
+  const causeCode = (c && c.code) || null;
+  out({ status: 0, body: '', error: String(err), causeCode });
+}
+`;
+
+/** Relative path of the built-in-fetch egress probe. Mounted at /skill/fetch-probe.js. */
+export const FETCH_PROBE_REL = 'fetch-probe.js';
+

@@ -24,8 +24,12 @@ try {
   // overwrite it. Use a data: URL so no network is touched. The assignment is
   // synchronous so the first real fetch can never race a half-installed
   // dispatcher.
+  // proxyTunnel:false → plain-http targets use ABSOLUTE-FORM forward (the only
+  // http path the egress proxy serves); https targets still CONNECT-tunnel into
+  // the MITM path. The egress proxy has no CONNECT-to-:80 forward, so the
+  // default (proxyTunnel:true) 403s every plain-http fetch.
   const KEY = Symbol.for('undici.globalDispatcher.1');
-  globalThis[KEY] = new ProxyAgent(proxy);
+  globalThis[KEY] = new ProxyAgent({ uri: proxy, proxyTunnel: false });
 
   // Best-effort priming after installation; any failure is non-fatal.
   (async () => {
