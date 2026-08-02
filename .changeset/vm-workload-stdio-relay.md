@@ -18,16 +18,18 @@ console and were lost.
 
 Fix (two parts, shared helper binary so it covers both the qualification gate
 AND real skill execution):
-- `vm-helper.c`: register three named inout ports — `krun-stdin`/`krun-stdout`/
-  `krun-stderr` — on the SAME multiport console as `octopus-control`, relayed to
-  the helper's own fd 0/1/2 (/dev/null backs each port's unused direction).
-  NOTE: `krun_add_virtio_console_default` is deliberately NOT used — it adds a
-  second console device whose ports make libkrun panic at
+- `vm-helper.c`: register ONE extra named port `krun-stdio` as a bidirectional
+  `inout` port on the SAME multiport console as `octopus-control`, with real fds
+  on both directions (helper stdin -> guest, guest -> helper stdout).
+  NOTE: two libkrun constraints force the single-port/real-fd design —
+  `krun_add_virtio_console_default` (a second console device) AND any
+  `/dev/null`-backed or second data port both make libkrun panic at
   `devices/src/virtio/console/device.rs:263` ("port rx queue should exist",
-  helper SIGABRT 134) the instant the guest opens them.
-- `vm-init.c`: before execve, dup2 the `krun-stdout`/`krun-stderr`/`krun-stdin`
-  ports onto fd 1/2/0 (`redirect_workload_stdio`), generalizing the port-by-name
-  scan into `open_named_port`.
+  helper SIGABRT 134) the instant the guest opens the port.
+- `vm-init.c`: before execve, dup2 the single `krun-stdio` port onto fd 0/1/2
+  (`redirect_workload_stdio`, a serial-style bidirectional channel so stdout and
+  stderr both reach the host), generalizing the port-by-name scan into
+  `open_named_port`.
 - `run-vm-gates.mjs`: the gate now returns the helper's own stdout/stderr (where
   the workload output lands) alongside the control-port ready/error frame, so
   the evaluators see the markers and a NO-GO still surfaces the bootstrap reason.
