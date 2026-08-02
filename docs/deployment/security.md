@@ -132,7 +132,8 @@ later phases never trust an on-disk path again:
   pinned. `start()` inherits the descriptor into the helper at fd 5 and the
   launch spec references `/dev/fd/5` — the attached image is the verified
   inode even if the path is replaced after resolution. The helper's launch
-  mode preserves fd 5 across its startup mass-close (watermark 6; the
+  mode preserves fd 5-7 across its startup mass-close (watermark 8: the
+  pinned rootfs fd 5 plus the `krun-stdio` console-port pipe fds 6/7; the
   `--has-blk` probe mode still closes everything ≥ 5) and `fcntl`-checks the
   fd before `krun_add_disk`. `engine.close()` (invoked by backend cleanup)
   releases the fd and the private directory.

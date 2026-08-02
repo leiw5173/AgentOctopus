@@ -135,11 +135,13 @@ function archTarget(arch) {
   die(`unsupported guest arch '${arch}' — rootfs targets linux-arm64 and linux-x64 only.`);
 }
 
-// Guest binaries (vm-init, vsock-forwarder) must be statically linked AND
-// built for the guest CPU arch — the sealed rootfs has no /lib, no dynamic
-// loader, and (for linux-arm64) a different ISA than the x64 build host. The
-// x64 build uses the host compiler; the arm64 build needs the aarch64 cross
-// toolchain (gcc-aarch64-linux-gnu), provisioned by the producer CI step.
+// Guest binaries (vm-init, vsock-forwarder) are statically linked AND built
+// for the guest CPU arch — (for linux-arm64) a different ISA than the x64
+// build host. Static keeps them independent of the bundled loader/libc: they
+// run before and alongside the workload and are TCB-critical, so they must
+// exec even if the node library closure were ever incomplete. The x64 build
+// uses the host compiler; the arm64 build needs the aarch64 cross toolchain
+// (gcc-aarch64-linux-gnu), provisioned by the producer CI step.
 function guestCompiler(arch) {
   if (arch === 'arm64') return 'aarch64-linux-gnu-gcc';
   if (arch === 'x64') return 'cc';
@@ -220,6 +222,10 @@ function canonicalDigest(entries) {
 // Build the staging tree — a plain directory mke2fs will pack into ext4.
 // Layout (all paths absolute inside the guest):
 //   /usr/bin/node                              <- pinned host node (copy)
+//   /lib/ld-...  (or /lib64/ld-... on x64)     <- node's ELF interpreter (copy)
+//   /lib/<lib>.so.N...                         <- node's transitive NEEDED
+//                                                 closure: libc/libm/
+//                                                 libstdc++/libgcc_s... (copy)
 //   /usr/libexec/octopus-vm-init               <- guest bootstrap (compile)
 //   /usr/libexec/octopus-vsock-forwarder       <- vsock→loopback forwarder
 //   /usr/bin/<runtime-bin>...                  <- declared runtime bins (copy)
@@ -233,14 +239,95 @@ async function copyInto(staging, guestAbsPath, hostPath, mode = 0o755) {
   await fs.chmod(dest, mode);
 }
 
+// Read an ELF's PT_INTERP (dynamic loader path) + DT_NEEDED entries via
+// readelf (binutils — arch-independent: the host readelf parses foreign-arch
+// ELFs fine, which is how the x64 lane reads the arm64 guest node).
+async function elfDynamicDeps(elfPath) {
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync('readelf', ['-l', '-d', elfPath]));
+  } catch (err) {
+    die(`readelf failed on ${elfPath}: ${err.stderr ?? err.message}\n` +
+      '  Ensure binutils (readelf) is installed on the release lane.');
+  }
+  const interp = stdout.match(/Requesting program interpreter:\s*([^\]]+)\]/);
+  const needed = [...stdout.matchAll(/\(NEEDED\)[^\[]*\[([^\]]+)\]/g)].map((m) => m[1]);
+  return { interpreter: interp ? interp[1].trim() : null, needed };
+}
+
+// Bundle the dynamic loader + shared libraries a dynamically-linked guest
+// node needs. The sealed rootfs previously shipped NO loader or libc, so the
+// guest kernel's execve of /usr/bin/node failed ENOENT (missing PT_INTERP)
+// and no workload could ever run — G1/G2 could never GO. The set is
+// discovered from the node binary itself (readelf) and copied from a
+// guest-arch library directory CI provides (OCTOPUS_ROOTFS_LIBS for x64,
+// OCTOPUS_ROOTFS_LIBS_ARM64 for arm64 — on the Linux producer lane these are
+// the host multiarch dir and the aarch64 cross-toolchain dir respectively;
+// both are pinned by the lane's apt provisioning). Fail-closed: a dynamic
+// node with no libs dir is a build error, never a loaderless rootfs.
+//
+// Placement: the interpreter is copied to the EXACT absolute path baked into
+// the node binary (e.g. /lib64/ld-linux-x86-64.so.2 on x64,
+// /lib/ld-linux-aarch64.so.1 on arm64) — the kernel opens that verbatim.
+// NEEDED libraries land in /lib/<name>, which is in every glibc build's
+// default search path (Debian/Ubuntu ld.so also searches the multiarch dirs
+// and /usr/lib; /lib is the portable common denominator). Staging stays
+// symlink-free (real file copies) per the canonical-digest contract.
+async function bundleDynamicLibs(staging, nodeHostPath, libsDir) {
+  const { interpreter, needed } = await elfDynamicDeps(nodeHostPath);
+  if (!interpreter && needed.length === 0) {
+    console.log('build-vm-rootfs: guest node is statically linked — no runtime libraries bundled.');
+    return [];
+  }
+  if (!libsDir) {
+    die(`guest node is dynamically linked (interpreter=${interpreter ?? 'none'}; ` +
+      `NEEDED=${needed.join(',') || 'none'}) but no guest-arch library directory was provided.\n` +
+      '  Set OCTOPUS_ROOTFS_LIBS (x64) / OCTOPUS_ROOTFS_LIBS_ARM64 (arm64) to a directory ' +
+      'holding the guest ld/libc/libm/libstdc++/libgcc_s shared objects.');
+  }
+  if (interpreter) {
+    const src = path.join(libsDir, path.basename(interpreter));
+    if (!existsSync(src)) {
+      die(`guest ELF interpreter '${path.basename(interpreter)}' not found in ${libsDir} ` +
+        `(node bakes the loader path '${interpreter}').`);
+    }
+    await copyInto(staging, interpreter, src, 0o755);
+  }
+  // BFS the NEEDED closure (each library's own DT_NEEDED pulls the next).
+  const queue = [...needed];
+  const copied = [];
+  const seen = new Set(interpreter ? [path.basename(interpreter)] : []);
+  while (queue.length > 0) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const src = path.join(libsDir, name);
+    if (!existsSync(src)) {
+      die(`guest runtime library '${name}' not found in ${libsDir}\n` +
+        '  It is transitively required by the guest node binary. Provide it ' +
+        'in the libs directory (CI: apt cross packages for arm64, the host ' +
+        'multiarch dir for x64).');
+    }
+    await copyInto(staging, `/lib/${name}`, src, 0o755);
+    copied.push(name);
+    const deps = await elfDynamicDeps(src);
+    queue.push(...deps.needed);
+  }
+  console.log(`build-vm-rootfs: bundled interpreter ${interpreter ?? '(none)'} + ` +
+    `${copied.length} runtime librar${copied.length === 1 ? 'y' : 'ies'} into /lib: ${copied.join(', ')}`);
+  return copied;
+}
+
 async function compileGuest(staging, guestAbsPath, srcPath, arch, extra = []) {
   const dest = path.join(staging, guestAbsPath);
   await fs.mkdir(path.dirname(dest), { recursive: true });
   const tmpOut = dest + `.tmp-${process.pid}`;
   const cc = guestCompiler(arch);
-  // -static: the sealed rootfs has no dynamic loader, so the binary must be
-  // self-contained. Without it an x64 host `cc` produces a dynamically-linked
-  // ELF that the guest kernel cannot exec (ENOENT on the missing interpreter).
+  // -static: keep the TCB-critical guest binaries independent of the bundled
+  // loader/libc (they must exec even if the node library closure were ever
+  // incomplete). Without it an x64 host `cc` also produces a dynamically-
+  // linked ELF targeting the HOST loader path, which needlessly couples the
+  // bootstrap to the node library set.
   const args = ['-O2', '-static', '-std=gnu17', '-Wall', '-Werror', '-o', tmpOut, srcPath, ...extra];
   try {
     await execFileAsync(cc, args);
@@ -280,7 +367,7 @@ async function pinStagingTimes(staging) {
   await fs.utimes(staging, epoch, epoch); // root last, after its readdir above
 }
 
-async function buildStaging(staging, nodeHostPath, runtimeBins, arch) {
+async function buildStaging(staging, nodeHostPath, runtimeBins, arch, libsDir) {
   await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
   await fs.mkdir(staging, { recursive: true });
 
@@ -289,6 +376,9 @@ async function buildStaging(staging, nodeHostPath, runtimeBins, arch) {
       '  Set OCTOPUS_ROOTFS_NODE (x64) / OCTOPUS_ROOTFS_NODE_ARM64 (arm64) to a Linux node.');
   }
   await copyInto(staging, ROOTFS_NODE_GUEST_PATH, nodeHostPath, 0o755);
+  // The official node build is dynamically linked — bundle its interpreter +
+  // library closure or the guest cannot exec it (fail-closed inside).
+  await bundleDynamicLibs(staging, nodeHostPath, libsDir);
 
   if (!existsSync(VM_INIT_SRC)) die(`vm-init.c source not found at ${VM_INIT_SRC}`);
   await compileGuest(staging, VM_INIT_GUEST_PATH, VM_INIT_SRC, arch);
@@ -457,7 +547,7 @@ async function buildOnce(staging, destPath, sizeBlocks, inodeCount) {
 // Build the rootfs for one arch: build the staging tree, compute the tree
 // digest + image geometry, build the image TWICE, assert the two byte
 // digests match, write the manifest.
-async function buildArch(arch, nodeHostPath, runtimeBins) {
+async function buildArch(arch, nodeHostPath, runtimeBins, libsDir) {
   const target = archTarget(arch);
   const targetDir = path.join(PREBUILDS_DIR, target);
   await fs.mkdir(targetDir, { recursive: true });
@@ -467,7 +557,7 @@ async function buildArch(arch, nodeHostPath, runtimeBins) {
   const staging = path.join(os.tmpdir(), `octopus-rootfs-staging-${process.pid}-${Date.now()}-${arch}`);
 
   try {
-    await buildStaging(staging, nodeHostPath, runtimeBins, arch);
+    await buildStaging(staging, nodeHostPath, runtimeBins, arch, libsDir);
 
     // Tree identity (audit field).
     const entries = relEntriesFor(staging).filter((e) => e.path !== '');
@@ -587,6 +677,7 @@ async function assertOnPath(tool, hint) {
 await assertOnPath('mke2fs', 'install e2fsprogs on the release lane.');
 await assertOnPath('debugfs', 'install e2fsprogs on the release lane.');
 await assertOnPath('cc', 'install a C toolchain.');
+await assertOnPath('readelf', 'install binutils on the release lane (reads the guest node ELF interpreter/NEEDED closure).');
 
 // Declared runtime bins (copied verbatim). CI can extend via
 // OCTOPUS_ROOTFS_BINS="guest1:host1,guest2:host2".
@@ -600,11 +691,19 @@ for (const pair of extraBinsRaw.split(',').map((s) => s.trim()).filter(Boolean))
 
 const built = [];
 
+// Guest-arch library directories for the dynamically-linked node binary
+// (interpreter + libc/libm/libstdc++/libgcc_s closure). CI sets these:
+//   OCTOPUS_ROOTFS_LIBS        x64  (host multiarch dir, e.g. /lib/x86_64-linux-gnu)
+//   OCTOPUS_ROOTFS_LIBS_ARM64  arm64 (cross-toolchain dir, /usr/aarch64-linux-gnu/lib)
+// A dynamic node without a libs dir fails the build (see bundleDynamicLibs).
+const libsX64 = process.env.OCTOPUS_ROOTFS_LIBS;
+const libsArm64 = process.env.OCTOPUS_ROOTFS_LIBS_ARM64;
+
 // linux-x64: native on an x64 Linux runner.
 {
   const nodeHostPath = process.env.OCTOPUS_ROOTFS_NODE ?? process.execPath;
   const runtimeBins = [{ guest: ROOTFS_NODE_GUEST_PATH, host: nodeHostPath }, ...extraBins];
-  built.push(await buildArch('x64', nodeHostPath, runtimeBins));
+  built.push(await buildArch('x64', nodeHostPath, runtimeBins, libsX64));
 }
 
 // linux-arm64: requires a cross-built or pre-fetched arm64 guest node.
@@ -614,7 +713,7 @@ const built = [];
   const nodeArm64 = process.env.OCTOPUS_ROOTFS_NODE_ARM64;
   if (nodeArm64 && existsSync(nodeArm64)) {
     const runtimeBins = [{ guest: ROOTFS_NODE_GUEST_PATH, host: nodeArm64 }, ...extraBins];
-    built.push(await buildArch('arm64', nodeArm64, runtimeBins));
+    built.push(await buildArch('arm64', nodeArm64, runtimeBins, libsArm64));
   } else {
     console.error(
       'build-vm-rootfs: SKIP linux-arm64 — OCTOPUS_ROOTFS_NODE_ARM64 not set or not a file.\n' +

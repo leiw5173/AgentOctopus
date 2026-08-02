@@ -173,8 +173,20 @@ jobs:
           # cross compiler build-vm-rootfs.mjs uses to build the arm64 guest
           # vm-init/vsock-forwarder (the x64 host cc would emit x86-64 binaries
           # that the ARM guest cannot exec). libc6-dev-arm64-cross provides the
-          # aarch64 libc needed for -static linking.
-          sudo apt-get install -y --no-install-recommends e2fsprogs gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          # aarch64 libc needed for -static linking AND (via its libc6-arm64-cross
+          # dependency) the arm64 runtime shared objects — ld-linux-aarch64.so.1,
+          # libc/libm/... — under /usr/aarch64-linux-gnu/lib. libstdc++6-arm64-cross
+          # adds libstdc++.so.6 (the official node build NEEDs it; libc6-dev alone
+          # does not provide it). libgcc_s.so.1 arrives with the gcc cross package.
+          # These runtime libs are COPIED into the sealed guest rootfs (the guest
+          # node is dynamically linked — without its interpreter + NEEDED closure
+          # the guest kernel cannot exec it), pinned here by the lane's apt
+          # provisioning like the rest of the toolchain.
+          sudo apt-get install -y --no-install-recommends e2fsprogs gcc-aarch64-linux-gnu libc6-dev-arm64-cross libstdc++6-arm64-cross
+          # build-vm-rootfs.mjs reads the per-guest-arch library dirs from these:
+          # x64 = the host multiarch dir; arm64 = the cross-toolchain dir above.
+          echo "OCTOPUS_ROOTFS_LIBS=/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+          echo "OCTOPUS_ROOTFS_LIBS_ARM64=/usr/aarch64-linux-gnu/lib" >> "$GITHUB_ENV"
       - name: Fetch pinned ARM64 Linux guest node (for the linux-arm64 rootfs)
         shell: bash
         run: |
