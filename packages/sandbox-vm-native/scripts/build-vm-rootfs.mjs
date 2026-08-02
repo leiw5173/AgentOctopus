@@ -135,6 +135,17 @@ function archTarget(arch) {
   die(`unsupported guest arch '${arch}' — rootfs targets linux-arm64 and linux-x64 only.`);
 }
 
+// Guest binaries (vm-init, vsock-forwarder) must be statically linked AND
+// built for the guest CPU arch — the sealed rootfs has no /lib, no dynamic
+// loader, and (for linux-arm64) a different ISA than the x64 build host. The
+// x64 build uses the host compiler; the arm64 build needs the aarch64 cross
+// toolchain (gcc-aarch64-linux-gnu), provisioned by the producer CI step.
+function guestCompiler(arch) {
+  if (arch === 'arm64') return 'aarch64-linux-gnu-gcc';
+  if (arch === 'x64') return 'cc';
+  die(`unsupported guest arch '${arch}' — cannot select a guest C compiler.`);
+}
+
 async function writeAtomic(dest, data) {
   const tmp = path.join(path.dirname(dest), `.tmp-${process.pid}-${Date.now()}`);
   try {
@@ -222,16 +233,20 @@ async function copyInto(staging, guestAbsPath, hostPath, mode = 0o755) {
   await fs.chmod(dest, mode);
 }
 
-async function compileGuest(staging, guestAbsPath, srcPath, extra = []) {
+async function compileGuest(staging, guestAbsPath, srcPath, arch, extra = []) {
   const dest = path.join(staging, guestAbsPath);
   await fs.mkdir(path.dirname(dest), { recursive: true });
   const tmpOut = dest + `.tmp-${process.pid}`;
-  const args = ['-O2', '-std=gnu17', '-Wall', '-Werror', '-o', tmpOut, srcPath, ...extra];
+  const cc = guestCompiler(arch);
+  // -static: the sealed rootfs has no dynamic loader, so the binary must be
+  // self-contained. Without it an x64 host `cc` produces a dynamically-linked
+  // ELF that the guest kernel cannot exec (ENOENT on the missing interpreter).
+  const args = ['-O2', '-static', '-std=gnu17', '-Wall', '-Werror', '-o', tmpOut, srcPath, ...extra];
   try {
-    await execFileAsync('cc', args);
+    await execFileAsync(cc, args);
   } catch (err) {
     await fs.rm(tmpOut, { force: true }).catch(() => {});
-    die(`guest compile failed for ${path.basename(srcPath)}: ${err.stderr ?? err.message}`);
+    die(`guest compile failed for ${path.basename(srcPath)} (${arch}, ${cc}): ${err.stderr ?? err.message}`);
   }
   await fs.chmod(tmpOut, 0o755);
   await fs.rename(tmpOut, dest);
@@ -265,7 +280,7 @@ async function pinStagingTimes(staging) {
   await fs.utimes(staging, epoch, epoch); // root last, after its readdir above
 }
 
-async function buildStaging(staging, nodeHostPath, runtimeBins) {
+async function buildStaging(staging, nodeHostPath, runtimeBins, arch) {
   await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
   await fs.mkdir(staging, { recursive: true });
 
@@ -276,12 +291,12 @@ async function buildStaging(staging, nodeHostPath, runtimeBins) {
   await copyInto(staging, ROOTFS_NODE_GUEST_PATH, nodeHostPath, 0o755);
 
   if (!existsSync(VM_INIT_SRC)) die(`vm-init.c source not found at ${VM_INIT_SRC}`);
-  await compileGuest(staging, VM_INIT_GUEST_PATH, VM_INIT_SRC);
+  await compileGuest(staging, VM_INIT_GUEST_PATH, VM_INIT_SRC, arch);
 
   // vsock→loopback forwarder (optional; vm-init.c's start_forwarder is
   // self-contained as of Task 12, so this is optional).
   if (existsSync(VSOCK_FORWARDER_SRC)) {
-    await compileGuest(staging, VSOCK_FORWARDER_GUEST_PATH, VSOCK_FORWARDER_SRC);
+    await compileGuest(staging, VSOCK_FORWARDER_GUEST_PATH, VSOCK_FORWARDER_SRC, arch);
   }
 
   for (const { guest, host } of runtimeBins) {
@@ -452,7 +467,7 @@ async function buildArch(arch, nodeHostPath, runtimeBins) {
   const staging = path.join(os.tmpdir(), `octopus-rootfs-staging-${process.pid}-${Date.now()}-${arch}`);
 
   try {
-    await buildStaging(staging, nodeHostPath, runtimeBins);
+    await buildStaging(staging, nodeHostPath, runtimeBins, arch);
 
     // Tree identity (audit field).
     const entries = relEntriesFor(staging).filter((e) => e.path !== '');
