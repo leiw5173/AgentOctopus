@@ -1613,7 +1613,7 @@ curl -s 'http://localhost:3002/agent/debug/last-run?runId=oct-e2e-12345678-abcd-
   -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
 ```
 
-**Expected:** Returns `{ success: true, run: { runId: "oct-e2e-...", status: "complete", receivedAt: ..., completedAt: ..., apiKeyId: "key:<sha256-16>", queryHash: "<sha256>", routing: { ... }, runs: [{ executionId: "...", status: "final", sandbox: { phase: "final", exitCode: 0, sandboxSuccess: true }, adapter: { adapterSuccess: true, outputValidated: true } }], terminal: { kind: "request.completed", reason: null } } }`. `run.query` is absent (because `includeQuery=false`); `run.queryHash` is present.
+**Expected:** Returns `{ success: true, run: { runId: "oct-e2e-...", status: "complete", receivedAt: ..., completedAt: ..., apiKeyId: "user:user_<hex>", queryHash: "<sha256>", routing: { ... }, runs: [{ executionId: "...", status: "final", sandbox: { phase: "final", exitCode: 0, sandboxSuccess: true }, adapter: { adapterSuccess: true, outputValidated: true } }], terminal: { kind: "request.completed", reason: null } } }`. `run.query` is absent (because `includeQuery=false`); `run.queryHash` is present. Note: `apiKeyId` is `user:<userId>` when the API-key entry has a userId (always the case for `createApiKey`), otherwise `key:<sha256-16>` — agent-protocol.md documents both forms.
 
 Test access control:
 
@@ -1661,17 +1661,21 @@ Test ring-buffer eviction:
 
 Distinct from the raw-curl smoke in §3.8, this drives the full pipeline through the `hermes-e2e-test` skill's `run.mjs` — the same test Hermes itself invokes for acceptance. The skill lives at `~/.claude/skills/hermes-e2e-test/{SKILL.md,run.mjs}` and is machine-only (not shipped in the repository); install it on your own machine before running.
 
+Two independent legs:
+- **Leg 1a (Hermes CLI):** Stage 1 drives `hermes -z "<query>"` under an octopus-wrapper PATH that records every CLI invocation as JSONL, then asserts 4-point forensics (hermes exit 0, wrapper `ask` invocation, real octopus exit 0, no signal).
+- **Leg 1b (telemetry):** `run.mjs` itself POSTs `/agent/ask` directly (for deterministic control, embedding a `[trace: oct-e2e-<uuid>]` correlation marker), then polls `GET /agent/debug/last-run` and asserts stages 2–5 from the aggregated RunRecord.
+
 Prerequisites:
 - Gateway running with `gateway.debugEndpoints: {enabled:true, includeQuery:false, bufferSize:10}` in `~/.agentoctopus/octopus.json`.
 - Two API keys created via `createApiKey` (exported from `@agentoctopus/gateway`): a `free`-tier key for `/ask` and an `admin`-tier key for `/agent/debug/last-run`.
-- `AGENTOCTOPUS_E2E_ASK_KEY` (free key) and `AGENTOCTOPUS_E2E_ADMIN_KEY` (admin key) exported in your shell.
+- `AGENTOCTOPUS_E2E_ASK_KEY` (free key) and `AGENTOCTOPUS_E2E_ADMIN_KEY` (admin key) exported in your shell. The admin key NEVER leaves `run.mjs` — it is never passed to Hermes or any subprocess.
 - Hermes logged in.
 
 ```bash
 node ~/.claude/skills/hermes-e2e-test/run.mjs --json
 ```
 
-**Expected:** JSON with `"ok": true` and five stages all `"PASS"`: `request-accepted`, `intent-analysis`, `skill-selection`, `sandbox-execution`, `terminal-event`. `run.mjs` posts directly to `POST /agent/ask` with the ask key (embedding a `[trace: oct-e2e-<uuid>]` correlation marker), then polls `GET /agent/debug/last-run` with the admin key and asserts intent extraction, skill match, Docker full-isolation sandbox completion (`phase:'final'`, `exitCode:0`), and exactly-one `request.completed` terminal event. A failing stage sets `"ok": false` and emits `status: "FAIL"` with a `detail` field.
+**Expected:** JSON with `"verdict": "PASS"` and five stages all `"pass": true`: `hermes+wrapper`, `routing`, `selection`, `score-semantics`, `sandbox+adapter`. The output shape is `{correlationKey, stages:[{stage,name,pass,detail},...], verdict, run}`. Stage 5 asserts that the final `runs[]` element carries both a sandbox event (`meta.backend === 'docker'`, `meta.isolationLevel === 'full'`, `sandboxSuccess === true`) and an adapter event (`adapterSuccess === true`, `outputValidated === true`). A failing stage sets `"pass": false` with a `detail` field explaining what was expected vs. what was received, and `"verdict": "FAIL"`.
 
 ## Pass / Fail Checklist (Phase E2E)
 
@@ -1685,4 +1689,5 @@ node ~/.claude/skills/hermes-e2e-test/run.mjs --json
 | E2E.6 | `debug-telemetry.test.ts` — aggregation by traceId, executionId merge, pending→complete/failed transition, ring buffer | ✅ |
 | E2E.7 | `agent-protocol-debug.test.ts` — correlation-key extraction + trace stripping, exactly-one terminal, debug endpoint 404/403/200 states | ✅ |
 | E2E.8 | Manual E2E smoke — traced request, debug record fetch, access control, includeQuery, ring-buffer eviction | ⏭️ (requires running gateway) |
-| E2E.9 | Hermes acceptance gate — `~/.claude/skills/hermes-e2e-test/run.mjs` 5-stage pipeline smoke (ask key + admin key, debug endpoints enabled) | ⏭️ (requires running gateway + Hermes logged in + machine-only test skill installed) |
+| E2E.9 | Hermes acceptance gate — `~/.claude/skills/hermes-e2e-test/run.mjs` 5-stage pipeline smoke: `hermes+wrapper`, `routing`, `selection`, `score-semantics`, `sandbox+adapter` (ask key + admin key, debug endpoints enabled) | ⏭️ (requires running gateway + Hermes logged in + machine-only test skill installed) |
+| E2E.10 | `telemetry-integration.test.ts` — one executionId shared across adapter+sandbox per execute(), merged into a single runs[] entry with both events, transitions to 'complete' on terminal | ✅ |

@@ -138,7 +138,7 @@ Admin-only debug endpoint that returns the aggregated per-request telemetry reco
       "executionId": "<uuid>",
       "status": "created | final",
       "sandbox": { "kind": "sandbox.completed", "phase": "created | final", "exitCode": 0, "sandboxSuccess": true, "meta": { } },
-      "adapter": { "kind": "adapter.completed", "skill": "weather", "adapterSuccess": true, "outputValidated": true, "errorCode": null }
+      "adapter": { "kind": "adapter.completed", "adapterSuccess": true, "outputValidated": true, "errorCode": null }
     }
   ],
   "terminal": { "kind": "request.completed | request.failed", "reason": null }

@@ -83,33 +83,36 @@ The test skill lives at `~/.claude/skills/hermes-e2e-test/{SKILL.md,run.mjs}` �
 node ~/.claude/skills/hermes-e2e-test/run.mjs --json
 ```
 
-The test posts directly to `POST /agent/ask` with the ask-tier key (bypassing Hermes for deterministic control), then polls `GET /agent/debug/last-run` with the admin-tier key, and asserts the full pipeline through a 5-stage PASS/FAIL:
+The test runs two independent legs:
 
-| Stage | What it checks |
-|---|---|
-| 1 — Request accepted | `/ask` returns `200 { success: true }` with the embedded `[trace: oct-e2e-<uuid>]` correlation marker stripped before routing |
-| 2 — Intent analysis | Debug record shows `routing.intentAnalysis` populated (the LLM-extracted intent phrase) |
-| 3 — Skill selection | Debug record shows `routing.selectedSkill` matching a registered skill name |
-| 4 — Sandbox execution | Debug record shows `runs[]` with `sandbox.phase:'final'` and `exitCode:0`, confirming Docker full-isolation execution |
-| 5 — Terminal event | Debug record shows `terminal.kind:'request.completed'` — exactly one terminal event emitted by `/ask` |
+- **Leg 1a (Hermes CLI):** drives `hermes -z "<query>"` under an octopus-wrapper that records every CLI invocation as JSONL, then asserts 4-point forensics (Stage 1).
+- **Leg 1b (telemetry):** `run.mjs` itself POSTs `/agent/ask` with a `[trace: oct-e2e-<uuid>]` correlation marker (directly, for deterministic control), then polls `GET /agent/debug/last-run` until the aggregated RunRecord is fully final, then asserts stages 2–5 from routing/selection/score/sandbox+adapter telemetry.
+
+| Stage | Name | What it checks |
+|---|---|---|
+| 1 | hermes+wrapper | hermes exited 0; the wrapper marker file records an `ask` invocation with matching nonce; the real octopus inside exited 0 with no signal |
+| 2 | routing | Debug record shows `routing.intent` populated (the LLM-extracted intent phrase), `routing.intentSource === 'llm'`, and `routing.candidatesConsidered > 0` |
+| 3 | selection | Debug record shows `routing.selected` matching the expected skill name (default `weather`) |
+| 4 | score-semantics | Score-fallback path: `selectedCandidateRank === 0` and `normalizedConfidence >= threshold`; reranker path: `selected` is in `candidates[].name` |
+| 5 | sandbox+adapter | The final `runs[]` element carries both a sandbox event (`meta.backend === 'docker'`, `meta.isolationLevel === 'full'`, `sandboxSuccess === true`) and an adapter event (`adapterSuccess === true`, `outputValidated === true`) |
 
 **Expected output (all stages PASS):**
 
 ```json
 {
-  "ok": true,
+  "correlationKey": "oct-e2e-<uuid>",
   "stages": [
-    { "name": "request-accepted",   "status": "PASS" },
-    { "name": "intent-analysis",    "status": "PASS" },
-    { "name": "skill-selection",    "status": "PASS" },
-    { "name": "sandbox-execution",  "status": "PASS" },
-    { "name": "terminal-event",     "status": "PASS" }
+    { "stage": 1, "name": "hermes+wrapper",  "pass": true, "detail": "hermes exit 0; wrapper invoked 'ask' (nonce match); real octopus exit 0, no signal" },
+    { "stage": 2, "name": "routing",         "pass": true, "detail": "intent='weather tokyo', source=llm, candidates=20" },
+    { "stage": 3, "name": "selection",       "pass": true, "detail": "selected='weather'" },
+    { "stage": 4, "name": "score-semantics", "pass": true, "detail": "method=reranker; selected 'weather' ∈ candidates" },
+    { "stage": 5, "name": "sandbox+adapter", "pass": true, "detail": "backend=docker, isolationLevel=full, sandboxSuccess=true, adapterSuccess=true, outputValidated=true" }
   ],
-  "runId": "oct-e2e-...",
-  "elapsed": 1234
+  "verdict": "PASS",
+  "run": { "runId": "oct-e2e-...", "status": "complete", "runs": [{ "executionId": "...", "status": "final", "sandbox": {}, "adapter": {} }] }
 }
 ```
 
-If any stage fails, the JSON `ok` field is `false` and the failing stage has `status: "FAIL"` with a `detail` field explaining what was expected vs. what was received.
+If any stage fails, the stage has `"pass": false` and the `verdict` is `"FAIL"`. The failing stage's `detail` field explains what was expected vs. what was received.
 
 See also: [OpenClaw](openclaw.md) | [Claude Code](claude-code.md) | [REST API](../api-reference/rest-api.md)
