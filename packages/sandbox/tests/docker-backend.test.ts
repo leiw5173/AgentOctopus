@@ -167,6 +167,31 @@ describe('buildDockerArgs', () => {
     expect(httpsProxyValues.at(-1)).toBe(`HTTPS_PROXY=${prepare.proxyAddr}`);
   });
 
+  it('injects NODE_OPTIONS bootstrap AFTER spec.env so a skill cannot override it', () => {
+    const prepare = prepareOpts();
+    const args = buildDockerArgs({
+      config: unitConfig,
+      prepare,
+      spec: { command: ['node', '/skill/scripts/invoke.js'], env: { NODE_OPTIONS: '--evil', OCTOPUS_INPUT: '{}' } },
+      networkName: 'octopus-test-net',
+      containerName: 'octopus-test-container',
+    });
+    // findIndex on the VALUE array element (each '-e' flag is followed by its
+    // 'K=V' value) — predicate runs on the value, so check args[i-1]==='-e'.
+    // We scan ALL '-e NODE_OPTIONS=' occurrences and take the LAST one (Docker
+    // last-wins; the trusted injection is appended after the spec.env one).
+    const nodeOptionsIdxs = args
+      .map((a, i) => (args[i - 1] === '-e' && a.startsWith('NODE_OPTIONS=') ? i : -1))
+      .filter(i => i >= 0);
+    const specEnvIdx = args.findIndex((a, i) => args[i - 1] === '-e' && a === 'NODE_OPTIONS=--evil');
+    expect(nodeOptionsIdxs.length).toBeGreaterThan(0);
+    const lastIdx = nodeOptionsIdxs[nodeOptionsIdxs.length - 1];
+    expect(args[lastIdx]).toBe('NODE_OPTIONS=--require /opt/octopus-boot/bootstrap.cjs');
+    // The trusted injection must come after every spec.env -e entry (Docker last-wins on collision).
+    expect(specEnvIdx).toBeGreaterThan(-1);
+    expect(lastIdx).toBeGreaterThan(specEnvIdx);
+  });
+
   it('rejects a mutable runtime image before any Docker operation', async () => {
     const invalidConfig = { ...unitConfig, docker: { ...unitConfig.docker, image: 'example/runtime:latest' } } as typeof unitConfig;
     const be = new DockerBackend({ config: invalidConfig, sessionId: `invalid-${process.pid}` });
