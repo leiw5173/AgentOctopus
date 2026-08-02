@@ -823,9 +823,15 @@ jobs:
   # runs and fails normally when HVF IS available, e.g. a physical Apple Silicon
   # self-hosted runner). The probe compiles a 20-line C program that calls
   # hv_vm_create(NULL) directly: 0 = HVF available, anything else = nested block.
+  #
+  # Runner preference: a physical Apple Silicon self-hosted runner (label
+  # [self-hosted, macOS, arm64, physical]) when one is online — there the probe
+  # returns hvf=available and vm-lane runs for real. When no physical runner is
+  # registered the array falls back to the hosted macos-15 guest, where HVF is
+  # unavailable and vm-lane skips as before.
   vm-hvf-probe:
     name: vm-hvf-probe
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, arm64, physical, macos-15]
     outputs:
       hvf: ${{ steps.probe.outputs.hvf }}
     steps:
@@ -865,7 +871,7 @@ jobs:
 
   vm-lane:
     name: vm-lane
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, arm64, physical, macos-15]
     needs: [produce-linux-artifacts, vm-hvf-probe]
     # SKIPPED (result 'skipped') only for the recognized nested-virtualization
     # limitation surfaced by vm-hvf-probe. On a physical Apple Silicon runner
