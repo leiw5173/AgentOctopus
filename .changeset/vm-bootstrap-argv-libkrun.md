@@ -16,3 +16,8 @@ only the blob (`[launchSpecBlob]`), yielding guest `argv = [path, blob]` with
 the blob at argv[1] as the bootstrap protocol expects. Validation invariants
 in engine.ts, helper-launch-spec.ts, and vm-helper.c updated from
 "length 2 / argv[0]===bootstrapPath" to "length 1 / argv[0]!==bootstrapPath".
+
+The G1/G2 qualification-gate launch specs also moved `cwd` from `/tmp` to
+`/skill`: vm-init's R7 constraint requires the workload cwd to realpath()
+under the read-only `/skill` block-image mount, so a `/tmp` cwd was rejected
+with `cwd not under /skill` even after the argv fix.

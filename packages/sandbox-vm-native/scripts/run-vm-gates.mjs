@@ -202,7 +202,10 @@ async function runGateG1(targetDir, helperPath, rootfsImg, rootfsRef, skillBlock
   const { blob: launchSpecBlob } = await buildLaunchSpec({
     executable: '/usr/bin/node',
     argv: ['/usr/bin/node', '-e', probeScript],
-    cwd: '/tmp',
+    // vm-init enforces cwd resolves under /skill (R7: the workload's root is
+    // the read-only skill block image). The probe doesn't need /skill content,
+    // but its cwd must still satisfy that constraint — use /skill, not /tmp.
+    cwd: '/skill',
     env: [],
     allowedExecutables: { '/usr/bin/node': '/usr/bin/node' },
   });
@@ -264,7 +267,8 @@ async function runGateG2(targetDir, helperPath, rootfsImg, rootfsRef, skillBlock
   const { blob: launchSpecBlob } = await buildLaunchSpec({
     executable: '/usr/bin/node',
     argv: ['/usr/bin/node', '-e', probeScript],
-    cwd: '/tmp',
+    // cwd must resolve under /skill (vm-init's R7 constraint) — see G1 above.
+    cwd: '/skill',
     env: [],
     allowedExecutables: { '/usr/bin/node': '/usr/bin/node' },
   });
