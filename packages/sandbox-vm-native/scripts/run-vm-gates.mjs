@@ -87,10 +87,19 @@ async function loadNativeFd() {
   return nativeFd;
 }
 
-/** Open the verified rootfs image read-only (no symlink follow), for fd 5. */
+/** Open the verified rootfs image read-only (no symlink follow), for fd 5.
+ *  Returns the FileHandle (NOT just handle.fd): the caller must own and
+ *  explicitly close() it. Returning only the raw fd drops the FileHandle, and
+ *  modern Node treats a GC-collected FileHandle as an error (it closes the fd
+ *  underneath the parent's independent raw-fd lifecycle management). */
 async function openRootfsReadOnly(rootfsImg) {
-  const handle = await fs.open(rootfsImg, 'r');
-  return handle.fd;
+  return fs.open(rootfsImg, 'r');
+}
+
+/** Close a FileHandle, ignoring already-closed errors. */
+async function closeHandle(handle) {
+  if (!handle) return;
+  try { await handle.close(); } catch { /* already closed */ }
 }
 
 /** Close a raw fd, ignoring already-closed errors. */
@@ -376,7 +385,8 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
   const deps = createNativeDeps();
   const [h2gRead, h2gWrite] = await deps.pipe(); // host→guest
   const [g2hRead, g2hWrite] = await deps.pipe(); // guest→host (fd 4 in helper)
-  const rootfsFd = await openRootfsReadOnly(rootfsImg);
+  const rootfsHandle = await openRootfsReadOnly(rootfsImg);
+  const rootfsFd = rootfsHandle.fd;
 
   let raw;
   try {
@@ -427,7 +437,7 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
   } catch (err) {
     // Spawn (or fd setup) failed — close every parent fd and surface the error
     // so the gate records a real boot failure, not a silent empty-output NO-GO.
-    await closeFd(rootfsFd);
+    await closeHandle(rootfsHandle);
     await closeFd(h2gRead);
     await closeFd(h2gWrite);
     await closeFd(g2hRead);
@@ -460,7 +470,7 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
     h2gWriteStream.destroy();
     await closeFd(g2hRead);
     await closeFd(h2gWrite);
-    await closeFd(rootfsFd);
+    await closeHandle(rootfsHandle);
     await raw.close?.().catch(() => {});
     if (serverReady) await new Promise((r) => vsockServer.close(r));
     await fs.rm(vsockHostSocket, { force: true }).catch(() => {});
