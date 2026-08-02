@@ -132,6 +132,38 @@ export class DebugTelemetryBuffer {
     return latestRec;
   }
 
+  /**
+   * T3.7 — /ask-side request-start binding. Called DIRECTLY by the /ask
+   * handler (NOT through the shared TelemetrySink) so per-request metadata
+   * (apiKeyId, receivedAt, queryHash/query) stays out of the shared sink and
+   * is never visible to other concurrent requests. Creates the record if it
+   * does not yet exist (e.g. the terminal event has not fired yet); subsequent
+   * record() calls for the same traceId preserve the bound metadata.
+   */
+  recordRequestStart(
+    traceId: string,
+    meta: { apiKeyId?: string; receivedAt?: number; queryHash?: string; query?: string },
+  ): void {
+    let rec = this.records.get(traceId);
+    if (!rec) {
+      rec = {
+        runId: traceId,
+        status: 'pending',
+        completedAt: null,
+        receivedAt: meta.receivedAt ?? Date.now(),
+        apiKeyId: meta.apiKeyId,
+        runs: [],
+      };
+      this.records.set(traceId, rec);
+      this.evictIfNeeded();
+    } else {
+      if (meta.apiKeyId !== undefined) rec.apiKeyId = meta.apiKeyId;
+      if (meta.receivedAt !== undefined) rec.receivedAt = meta.receivedAt;
+    }
+    if (meta.queryHash !== undefined) rec.queryHash = meta.queryHash;
+    if (meta.query !== undefined) rec.query = meta.query;
+  }
+
   // -----------------------------------------------------------------------
   // Internals
   // -----------------------------------------------------------------------

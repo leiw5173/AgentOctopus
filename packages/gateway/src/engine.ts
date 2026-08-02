@@ -1,7 +1,8 @@
 import path from 'path';
 import os from 'os';
 import { SkillRegistry, syncFromCloud } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, createDefaultSandboxRunner, buildSecretProviderFromConfig, type ChatClient, type LLMConfig, getConfig, loadConfig } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, createDefaultSandboxRunner, buildSecretProviderFromConfig, type ChatClient, type LLMConfig, type TelemetryEvent, type TelemetrySink, getConfig, loadConfig } from '@agentoctopus/core';
+import { DebugTelemetryBuffer } from './debug-telemetry.js';
 
 export const DIRECT_ANSWER_SYSTEM_PROMPT = 'You are a helpful assistant. Answer the user\'s question concisely and accurately.';
 
@@ -12,6 +13,10 @@ export interface OctopusEngine {
   router: Router;
   executor: Executor;
   chatClient: ChatClient;
+  /** T3.6 aggregator; /agent/debug/last-run queries it. Per-request metadata
+   *  (apiKeyId/receivedAt/queryHash) is bound via recordRequestStart called
+   *  directly from /ask — NEVER via the shared sink below. */
+  telemetryBuffer: DebugTelemetryBuffer;
 }
 
 let _engine: OctopusEngine | null = null;
@@ -62,7 +67,17 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
         }
       : undefined;
 
-  const router = new Router(rerankConfig, embedConfig);
+  // T3.7 — shared TelemetrySink → DebugTelemetryBuffer. The sink is SHARED
+  // across all requests; per-request ExecutionContext (traceId, apiKeyId,
+  // receivedAt) is passed at CALL time (Router.route / Executor.execute) so
+  // no per-request state ever lives on the engine's singletons. The buffer
+  // ignores events without a traceId, so non-E2E traffic is a no-op.
+  const telemetryBuffer = new DebugTelemetryBuffer(config.gateway.debugEndpoints.bufferSize);
+  const telemetrySink: TelemetrySink = {
+    emit: (e: TelemetryEvent) => telemetryBuffer.record(e, {}),
+  };
+
+  const router = new Router(rerankConfig, embedConfig, telemetrySink);
   await router.buildIndex(registry.getAll());
 
   const chatClient = createChatClient(rerankConfig);
@@ -70,10 +85,10 @@ export async function bootstrapEngine(rootDir?: string): Promise<OctopusEngine> 
   // Executor's execution boundary on a runner that provisions credentials ONLY
   // to the trusted egress proxy — never into a prompt, env spec, log, or error.
   const secretProvider = buildSecretProviderFromConfig(config);
-  const sandboxRunner = createDefaultSandboxRunner(secretProvider);
-  const executor = new Executor(registry, chatClient, router, sandboxRunner);
+  const sandboxRunner = createDefaultSandboxRunner(secretProvider, { telemetrySink });
+  const executor = new Executor(registry, chatClient, router, sandboxRunner, { telemetrySink });
 
-  _engine = { registry, router, executor, chatClient };
+  _engine = { registry, router, executor, chatClient, telemetryBuffer };
   return _engine;
 }
 

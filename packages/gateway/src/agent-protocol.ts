@@ -1,12 +1,13 @@
 import express, { type Request, type Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { createHash } from 'node:crypto';
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, validateApiKey } from './auth-middleware.js';
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
 import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
-import { getConfig, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult } from '@agentoctopus/core';
+import { getConfig, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult, type ExecutionContext, type RequestTerminalEvent } from '@agentoctopus/core';
 import { eventBus } from './control-plane/event-bus.js';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
@@ -127,6 +128,42 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       return;
     }
 
+    // T3.7 — extract the [trace: oct-e2e-<uuid>] correlation marker (if any)
+    // BEFORE routing/execution/session, and strip it from the query text so
+    // downstream consumers never see it.
+    const traceMatch = query.match(/\[trace:\s*(oct-e2e-[0-9a-f-]+)\s*\]/i);
+    const traceId = traceMatch?.[1];
+    const cleanQuery = traceId ? query.replace(traceMatch![0], '').trim() : query;
+
+    // Per-request ExecutionContext. apiKeyId is a stable hash of the caller's
+    // identity — NEVER the raw key. Prefer the ApiKeyEntry's own userId when
+    // available; fall back to a truncated sha256 of the raw key material.
+    const apiKeyEntry = (req as any).apiKeyEntry as { userId?: string } | undefined;
+    const rawKey = (req as any).apiKey as string | undefined;
+    const apiKeyId = apiKeyEntry?.userId
+      ? `user:${apiKeyEntry.userId}`
+      : rawKey
+        ? `key:${createHash('sha256').update(rawKey).digest('hex').slice(0, 16)}`
+        : undefined;
+    const receivedAt = Date.now();
+    const execContext: ExecutionContext | undefined = traceId
+      ? { traceId, apiKeyId, receivedAt }
+      : undefined;
+
+    // Bind request-start metadata directly on the buffer (NOT through the
+    // shared sink) so it stays out of the cross-request channel. includeQuery
+    // gates whether the clean query text or its sha256 hash is stored.
+    if (traceId) {
+      const cfg = getConfig().gateway.debugEndpoints;
+      engine.telemetryBuffer.recordRequestStart(traceId, {
+        apiKeyId,
+        receivedAt,
+        ...(cfg.includeQuery
+          ? { query: cleanQuery }
+          : { queryHash: createHash('sha256').update(cleanQuery).digest('hex') }),
+      });
+    }
+
     // Resolve or create session
     // Without a sessionId, generate a fresh channelId so every request gets a new session.
     const channelId = sessionId ?? uuidv4();
@@ -135,18 +172,18 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       : sessionManager.getOrCreate(channelId, agentId, 'agent');
 
     session.metadata = { ...session.metadata, ...metadata };
-    sessionManager.addMessage(session, { role: 'user', content: query, timestamp: Date.now() });
+    sessionManager.addMessage(session, { role: 'user', content: cleanQuery, timestamp: Date.now() });
 
     // Auto-detect feedback: if session has a previous assistant message with a skillUsed,
     // and the current message looks like feedback (not a new query), record it automatically.
     const prevMessages = session.messages;
     const lastAssistant = [...prevMessages].reverse().find(m => m.role === 'assistant' && m.skillUsed);
-    if (lastAssistant && isLikelyFeedback(query)) {
-      const sentiment = detectSentiment(query);
+    if (lastAssistant && isLikelyFeedback(cleanQuery)) {
+      const sentiment = detectSentiment(cleanQuery);
       const positive = sentiment.sentiment === 'positive';
       const skillName = (lastAssistant as any).skillUsed as string;
 
-      engine.registry.recordFeedback(skillName, positive, query, 'openclaw');
+      engine.registry.recordFeedback(skillName, positive, cleanQuery, 'openclaw');
 
       sessionManager.addMessage(session, {
         role: 'assistant',
@@ -166,18 +203,32 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
         feedbackRecorded: true,
         sentiment: sentiment.sentiment,
       });
+      // Feedback path also counts as a completed request when a trace is present.
+      if (traceId && engine.telemetryBuffer) {
+        engine.telemetryBuffer.record(
+          { kind: 'request.completed', traceId, reason: null } satisfies RequestTerminalEvent,
+          {},
+        );
+      }
       return;
     }
 
+    // T3.7 — EXACTLY ONE terminal event per request, emitted LAST (after all
+    // router/executor emissions). The finally runs once regardless of which
+    // response branch fired (success / credential-missing / unsupported /
+    // no-route / 500 catch). no-route is NOT a failure — it completed normally
+    // with a direct LLM answer, so it records request.completed.
+    let terminalKind: 'request.completed' | 'request.failed' = 'request.completed';
+    let terminalReason: string | null = null;
     try {
       const startTime = Date.now();
       // Pass previous skill name from session for follow-up query routing
       const assistantMsgs = session.messages.filter(m => m.role === 'assistant');
       const prevSkill = lastAssistant ? (lastAssistant as any).skillUsed as string : undefined;
       console.log(`[AgentProtocol] session=${session.id} msgs=${session.messages.length} assistantMsgs=${assistantMsgs.length} lastAssistant=${!!lastAssistant} prevSkill=${prevSkill}`);
-      const [routing] = await engine.router.route(query, 20, { previousSkill: prevSkill });
+      const [routing] = await engine.router.route(cleanQuery, 20, { previousSkill: prevSkill, execContext });
       if (!routing) {
-        const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, query);
+        const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, cleanQuery);
 
         sessionManager.addMessage(session, {
           role: 'assistant',
@@ -198,7 +249,7 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       // Note: the `autoInstall` request field is accepted for schema
       // compatibility but intentionally ignored — skills are untrusted and
       // must never trigger host package-manager execution.
-      let result = await engine.executor.execute(routing.skill, { query });
+      let result = await engine.executor.execute(routing.skill, { query: cleanQuery }, { execContext });
 
       if (isCredentialMissing(result)) {
         const lines = result.missing
@@ -257,7 +308,22 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
         confidence: routing.score,
       });
     } catch (err) {
+      terminalKind = 'request.failed';
+      terminalReason = (err as Error).message ?? String(err);
       res.status(500).json({ success: false, error: (err as Error).message });
+    } finally {
+      // Single terminal emission — guaranteed to run AFTER all router/executor
+      // emissions (they complete synchronously within the try) and exactly once.
+      if (traceId) {
+        try {
+          engine.telemetryBuffer.record(
+            { kind: terminalKind, traceId, reason: terminalReason } satisfies RequestTerminalEvent,
+            {},
+          );
+        } catch {
+          // telemetry must never break /ask
+        }
+      }
     }
   });
 
@@ -426,6 +492,42 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     } catch (err) {
       res.status(500).json({ success: false, error: (err as Error).message });
     }
+  });
+
+  /**
+   * T3.7 — Admin-only debug endpoint: GET /agent/debug/last-run[?runId=<id>].
+   * Serves the aggregated per-request RunRecord from the DebugTelemetryBuffer.
+   *   - 404 when gateway.debugEndpoints.enabled=false (NOT 403 — the endpoint
+   *     is compiled out of the surface, not merely gated).
+   *   - 403 for non-admin keys.
+   *   - 200 {success:true, run:null} when no record matches (empty buffer or
+   *     unknown runId).
+   *   - 200 {success:true, run} on a hit; `run.query` is stripped unless
+   *     gateway.debugEndpoints.includeQuery (queryHash may remain).
+   */
+  router.get('/debug/last-run', (req: Request, res: Response) => {
+    const cfg = getConfig().gateway.debugEndpoints;
+    if (!cfg.enabled) {
+      res.status(404).json({ success: false, error: 'Not found' });
+      return;
+    }
+    const caller = (req as any).apiKeyEntry;
+    if (!caller || caller.tier !== 'admin') {
+      res.status(403).json({ success: false, error: 'Admin access required' });
+      return;
+    }
+
+    const runId = typeof req.query.runId === 'string' ? req.query.runId : undefined;
+    const run = runId ? engine.telemetryBuffer.getByRunId(runId) : engine.telemetryBuffer.latest();
+    if (!run) {
+      res.status(200).json({ success: true, run: null });
+      return;
+    }
+    const sanitized = { ...run };
+    if (!cfg.includeQuery) {
+      delete (sanitized as { query?: string }).query;
+    }
+    res.status(200).json({ success: true, run: sanitized });
   });
 
   return router;

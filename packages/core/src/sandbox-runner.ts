@@ -524,6 +524,30 @@ export class SandboxRunner {
   }
 
   /**
+   * T3.7 — return a NEW SandboxRunner sharing every constructor dep but with
+   * `execContext` overridden. The engine's SandboxRunner is a shared singleton
+   * serving concurrent requests; per-request telemetry (traceId/executionId)
+   * MUST NOT mutate that singleton (race). withExecContext lets a caller
+   * (Executor.execute) bind a per-request ExecutionContext without touching
+   * shared state — the returned runner is short-lived and request-scoped.
+   */
+  withExecContext(execContext: ExecutionContext): SandboxRunner {
+    return new SandboxRunner({
+      config: this.config,
+      snapshotStoreDir: this.snapshotStoreDir,
+      backends: this.backends,
+      proxyLauncher: this.proxyLauncher,
+      secretProvider: this.secretProvider,
+      installationIdFor: this.installationIdFor,
+      onEvent: this.onEvent,
+      afterBuildSnapshot: this.afterBuildSnapshot,
+      rmSessionDir: this.rmSessionDir,
+      execContext,
+      telemetrySink: this.telemetrySink,
+    });
+  }
+
+  /**
    * Fire-and-forget telemetry emission. A throwing sink MUST NEVER break
    * run/spawn/close — swallow any error at the call site. Telemetry is
    * strictly observational and never changes control flow or the result.
