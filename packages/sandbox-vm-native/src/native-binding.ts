@@ -43,6 +43,12 @@ const WNOHANG = 1;
 
 const SIGKILL = 9;
 
+// Child fd slot that aliases the stdout pipe write end, used by the VM helper
+// as the libkrun implicit-console output sink ("/dev/fd/6"). Must match
+// vm-helper.c CONSOLE_OUT_FD and its mass_close watermark. fd 1 cannot be used
+// because krun_start_enter takes over stdin/stdout (see spawnWithLibc).
+const CONSOLE_OUT_FD = 6;
+
 const PLATFORM: VmEngineDeps['platform'] =
   process.platform === 'darwin' && process.arch === 'arm64'
     ? 'darwin-arm64'
@@ -353,10 +359,20 @@ function spawnWithLibc(
 
   // Append the stdio file actions to the engine-supplied list. We copy the
   // array rather than mutating the caller's (the engine may reuse it).
+  //
+  // fd CONSOLE_OUT_FD (6) is a SECOND alias of the stdout pipe write end. The
+  // helper points libkrun's implicit-console output at "/dev/fd/6" so guest
+  // workload stdio reaches raw.stdout (-> vm.stdout). It CANNOT use fd 1:
+  // krun_start_enter "takes over stdin/stdout" (libkrun.h), so a console sink
+  // on fd 1 resolves back into the VMM's own console bridge and is dropped
+  // (verified: empty helper stdout). fd 6 is untouched by that takeover, and
+  // both the gate and the engine already read raw.stdout, so no extra bridging
+  // is needed on either side. The helper's mass_close watermark must keep fd 6.
   const allActions: SpawnFileAction[] = [
     ...fileActions,
     { kind: 'adddup2', src: stdoutWrite, target: 1 },
     { kind: 'adddup2', src: stderrWrite, target: 2 },
+    { kind: 'adddup2', src: stdoutWrite, target: CONSOLE_OUT_FD },
   ];
 
   // The parent must close the write ends after spawn so the read ends see EOF

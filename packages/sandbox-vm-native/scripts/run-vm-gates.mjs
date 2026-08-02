@@ -500,15 +500,15 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
 
   // The workload's stdio is relayed via the guest's implicit console
   // (/dev/console == hvc0): the helper points libkrun's implicit-console output
-  // at its own stdout via krun_set_console_output("/dev/fd/1"), and vm-init
-  // dup2's /dev/console onto the workload's fd 0/1/2 before execve. So
-  // G1-DONE/G2-DONE, any leaked sentinel, and any CONNECT-OK marker land in
-  // helperStdout (raw, on the stdout channel). The control port (fd 4 ->
-  // guestOut) carries ONLY the bootstrap ready/error frame. Return all three
-  // streams, LABELED, so the evaluators see the workload output AND a NO-GO
-  // still shows the bootstrap reason / helper exit status — and so the CI log
-  // reveals which stream the markers rode (stdout == clean; stderr == the
-  // console fell back to libkrun's logger).
+  // at "/dev/fd/6" -- the helper's stdout pipe, aliased to fd 6 by
+  // native-binding's spawn file actions (fd 1 is unusable: krun_start_enter
+  // takes over stdin/stdout) -- and vm-init dup2's /dev/console onto the
+  // workload's fd 0/1/2 before execve. So G1-DONE/G2-DONE, any leaked sentinel,
+  // and any CONNECT-OK marker land in helperStdout (raw, on the stdout channel).
+  // The control port (fd 4 -> guestOut) carries ONLY the bootstrap ready/error
+  // frame. Return all three streams, LABELED, so the evaluators see the workload
+  // output AND a NO-GO still shows the bootstrap reason / helper exit status —
+  // and so the CI log reveals which stream the markers rode (stdout == clean).
   const tail = [];
   tail.push(`[helper ${exitInfo}]`);
   tail.push(`[${probeInfo}]`);
@@ -518,7 +518,7 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
   return [
     '--- guest control console (fd 4 -> ready/error frame) ---',
     guestOut,
-    '--- helper stdout (fd 1 -> workload stdio via implicit console) ---',
+    '--- helper stdout (stdout pipe; workload stdio via /dev/fd/6 console alias) ---',
     helperStdout,
     '--- helper stderr (fd 2 -> libkrun logger) ---',
     helperStderr,

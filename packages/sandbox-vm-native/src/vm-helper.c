@@ -48,9 +48,10 @@
  * pipe ends into FIXED FDs -- fd 3 = h2gRead (guest input), fd 4 =
  * g2hWrite (guest output). The helper hands those exact ints to
  * krun_add_console_port_inout(ctx, console_id, "octopus-control", 3, 4).
- * Immediately on main() entry the helper mass-closes every fd >= 5
- * (R10 P1-2) so nothing besides 0/1/2 (stdio) + 3/4 (control) survives
- * into the VM.
+ * In launch mode the spawn also aliases the stdout pipe onto fd 6 (the
+ * krun_set_console_output sink) and the verified rootfs onto fd 5, so the
+ * helper mass-closes every fd >= 7 (R10 P1-2), keeping 0/1/2 (stdio) +
+ * 3/4 (control) + 5 (rootfs) + 6 (console output) alive into the VM.
  *
  * Pinned start sequence (spec (section)Pinned TSI-disable start sequence, EXACT
  * ORDER verified against include/libkrun.h v1.19.4):
@@ -67,14 +68,14 @@
  *   9. krun_set_vm_config(ctx, cpus, memMib)            -- vCPUs BEFORE RAM
  *  10. krun_add_virtio_console_multiport(ctx)           -> console_id (>=0)
  *      krun_add_console_port_inout(ctx, console_id, "octopus-control", 3, 4)
- *  10b. krun_set_console_output(ctx, "/dev/fd/1") -- point the guest's
- *       implicit console (hvc0 == /dev/console) output at the helper's own
- *       stdout (fd 1), so workload stdio reaches the host raw (no log prefix).
+ *  10b. krun_set_console_output(ctx, "/dev/fd/6") -- point the guest's
+ *       implicit console (hvc0 == /dev/console) output at the helper's stdout
+ *       pipe, aliased to fd 6 by native-binding's spawn file actions (NOT fd 1
+ *       -- krun_start_enter takes over stdin/stdout, so a sink on fd 1 is
+ *       dropped), so workload stdio reaches the host raw (no log prefix).
  *       vm-init (guest PID 1) dup2's /dev/console onto fd 0/1/2 before execve
- *       (libkrun's own init never runs). We must NOT register a console port on
- *       fd 0/1: krun_start_enter takes those over, and a port there is never
- *       relayed; likewise krun_add_virtio_console_default (a 2nd console
- *       device) and /dev/null-backed or 2nd data ports panic libkrun
+ *       (libkrun's own init never runs). krun_add_virtio_console_default (a 2nd
+ *       console device) and /dev/null-backed or 2nd data ports panic libkrun
  *       device.rs:263 "port rx queue should exist".
  *  11. krun_set_exec(ctx, bootstrapPath, bootstrapArgv, trustedEnv)
  *  12. krun_set_workdir(ctx, "/")                       -- pinned to "/"
@@ -134,11 +135,20 @@
  * across mass_close_fds() or krun_add_disk() gets a dead path. */
 #define ROOTFS_INHERIT_FD 5
 
+/* Fixed fd slot that aliases the helper's stdout pipe (installed by
+ * native-binding's posix_spawn file actions). krun_set_console_output points
+ * the guest's implicit-console output at "/dev/fd/6" so workload stdio reaches
+ * the host's helper stdout. fd 1 cannot be used: krun_start_enter takes over
+ * stdin/stdout, so a console sink on fd 1 is dropped. Must match
+ * native-binding.ts CONSOLE_OUT_FD; launch mode MUST preserve it across
+ * mass_close_fds() or the console sink gets a dead path. */
+#define CONSOLE_OUT_FD 6
+
 /* Stdio+control FDs preserved by mass_close_fds() in BLK-probe mode (fds
  * 0-4; there is no inherited rootfs fd on the --has-blk path). */
 #define FD_LOW_WATERMARK 5
-/* Launch mode preserves the rootfs fd too (fds 0-5). */
-#define FD_LOW_WATERMARK_LAUNCH (ROOTFS_INHERIT_FD + 1)
+/* Launch mode preserves the rootfs fd AND the console-output fd (fds 0-6). */
+#define FD_LOW_WATERMARK_LAUNCH (CONSOLE_OUT_FD + 1)
 
 /* Defensive cap for fallback close loops so a huge/INFINITY rlim_cur
  * cannot cause millions of EBADF close() iterations. */
@@ -214,9 +224,10 @@ static int fd_ceiling(int lowWatermark) {
 }
 
 /* Close every fd >= lowWatermark. Launch mode passes
- * FD_LOW_WATERMARK_LAUNCH (6) so the inherited pinned rootfs fd 5
- * survives for krun_add_disk("/dev/fd/5"); BLK-probe mode passes
- * FD_LOW_WATERMARK (5) — it has no rootfs fd to keep. */
+ * FD_LOW_WATERMARK_LAUNCH (7) so the inherited pinned rootfs fd 5 AND the
+ * console-output alias fd 6 survive (krun_add_disk("/dev/fd/5") and
+ * krun_set_console_output("/dev/fd/6")); BLK-probe mode passes
+ * FD_LOW_WATERMARK (5) — it has neither fd to keep. */
 static void mass_close_fds(int lowWatermark) {
 #ifdef __linux__
     /* Prefer close_range (Linux 5.9+). ~0u is the inclusive upper bound. */
@@ -722,15 +733,19 @@ int vm_helper_main(int argc, char **argv) {
                "add_console_port_inout");
 
     /* 10b. Point the guest's implicit console (hvc0 == /dev/console) output at
-     *      the helper's own stdout (fd 1), so workload stdio reaches the host
-     *      RAW (no libkrun log prefix). The guest bootstrap (vm-init) dup2's
-     *      /dev/console onto the workload's fd 0/1/2 before execve. We must NOT
-     *      register a console port on fd 0/1 instead: krun_start_enter takes
-     *      those over and a port there is never relayed (and the alternate
-     *      approaches -- krun_add_virtio_console_default, /dev/null-backed or
-     *      2nd data ports -- panic libkrun device.rs:263). This API is a NOOP
-     *      if the implicit console is disabled; we never disable it. */
-    krun_check(krun_set_console_output((uint32_t)ctx, "/dev/fd/1"),
+     *      "/dev/fd/6" -- the helper's stdout pipe, aliased to fd 6 by
+     *      native-binding's spawn file actions -- so workload stdio reaches the
+     *      host RAW (no libkrun log prefix). The guest bootstrap (vm-init)
+     *      dup2's /dev/console onto the workload's fd 0/1/2 before execve. We
+     *      must NOT target "/dev/fd/1": krun_start_enter takes over stdin/stdout
+     *      (libkrun.h), so a console sink on fd 1 resolves back into the VMM's
+     *      own console bridge and is dropped (verified: empty helper stdout).
+     *      fd 6 is untouched by that takeover. Rejected too: a console port on
+     *      fd 0/1 (never relayed), krun_add_virtio_console_default (2nd console
+     *      device), and /dev/null-backed or 2nd data ports -- those panic
+     *      libkrun device.rs:263. NOOP if the implicit console is disabled; we
+     *      never disable it. */
+    krun_check(krun_set_console_output((uint32_t)ctx, "/dev/fd/6"),
                "set_console_output");
 
     /* 11. Set the guest PID 1 to the trusted bootstrap. bootstrapArgv is
