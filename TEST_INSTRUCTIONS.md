@@ -1532,3 +1532,140 @@ Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lan
 | S17 | VM L4 adversarial escape matrix (zero-skip, fail-closed) | ✅ (CI, macOS Apple Silicon) |
 | S18 | VM release trust root / signed manifest verification | ✅ (unit) |
 | S19 | VM verified-object binding (realpath exec-path + private copies / fd-pin) | ✅ (unit) |
+
+## Phase E2E — Hermes Layered Telemetry & Debug Endpoint
+
+Tests for the end-to-end telemetry aggregation system (Tasks 3.1–3.7): `ExecutionContext` threading through Router/Executor/SandboxRunner, layered telemetry events (`routing.completed`, `sandbox.completed`, `adapter.completed`, `request.completed`/`request.failed`), `DebugTelemetryBuffer` aggregation, and the admin-only `GET /agent/debug/last-run` endpoint.
+
+### Automated Checks
+
+```bash
+# Run all telemetry-related unit/integration tests
+pnpm --filter @agentoctopus/core test -- config-types.test.ts
+pnpm --filter @agentoctopus/core test -- router-telemetry.test.ts
+pnpm --filter @agentoctopus/core test -- execution-context.test.ts
+pnpm --filter @agentoctopus/core test -- executor-telemetry.test.ts
+pnpm --filter @agentoctopus/core test -- sandbox-runner-telemetry.test.ts
+pnpm --filter @agentoctopus/gateway test -- debug-telemetry.test.ts
+pnpm --filter @agentoctopus/gateway test -- agent-protocol-debug.test.ts
+```
+
+**Expected:** All tests pass. Key coverage:
+- `config-types.test.ts` — `GatewayConfigSchema.debugEndpoints` Zod validation (enabled/includeQuery/bufferSize defaults, prefault behavior).
+- `router-telemetry.test.ts` — `route()` emits exactly one `routing.completed` per call via a shared sink, covering all return points (reranker, score-fallback, no-match). `intentSource`/`intentExtractionSucceeded` track whether the LLM intent-extraction phrase was actually used as `embedQuery`.
+- `execution-context.test.ts` — `ExecutionContext` type contract (all fields optional, traceId/executionId/apiKeyId/receivedAt).
+- `executor-telemetry.test.ts` — Executor emits only `adapter.completed` (real-adapter path, not early returns); `outputValidated` reflects `runOutputValidator` (Promise.race timeout wrapper).
+- `sandbox-runner-telemetry.test.ts` — `sandbox.completed` emission with `phase:'created'` on spawn-create, `phase:'final'` on run() complete and spawn-close. `withExecContext(execContext)` returns a NEW runner instance (no mutation of the shared singleton).
+- `debug-telemetry.test.ts` — `DebugTelemetryBuffer` aggregates events by traceId into a `RunRecord`; created/final sandbox events merge by executionId into `runs[]`; record stays `pending` until a terminal event AND all `runs[]` are final (empty `runs[]` = vacuously final, so no-route completes immediately); status is one-directional; ring buffer evicts oldest beyond bufferSize. `recordRequestStart(traceId, {apiKeyId, receivedAt, query|queryHash})` binds per-request metadata.
+- `agent-protocol-debug.test.ts` — `/ask` handler extracts correlation key `[trace: oct-e2e-<uuid>]` via regex from the raw query BEFORE routing, strips it (cleanQuery) before Router/Executor/session; computes `apiKeyId` as `user:<userId>` or `key:<sha256(rawKey).slice(0,16)>` (NEVER the raw key); emits EXACTLY ONE terminal event per request via a single `emitTerminal` helper gated by a `terminalEmitted` flag — covering feedback early-return, no-route fallback, credential-missing, unsupported-runtime, success, and exception paths (inner try/finally + outer catch that emits `request.failed` then rethrows). `GET /agent/debug/last-run[?runId=<id>]`: 404 when `debugEndpoints.enabled=false`; 403 for non-admin keys (`req.apiKeyEntry.tier === 'admin'`); `runId` → `getByRunId(runId)`, else `latest()`; no match → 200 `{success:true, run:null}`; hit → 200 `{success:true, run}` with `query` stripped unless `includeQuery` (queryHash may remain).
+
+### 3.8 Manual E2E Smoke — Debug Endpoint
+
+Start the gateway with debug endpoints enabled:
+
+```bash
+# Enable debug endpoints in octopus.json
+cat > ~/.agentoctopus/octopus.json << 'EOF'
+{
+  "version": 2,
+  "gateway": {
+    "debugEndpoints": {
+      "enabled": true,
+      "includeQuery": false,
+      "bufferSize": 10
+    }
+  }
+}
+EOF
+
+# Start the gateway
+node -e "import('@agentoctopus/gateway').then(g => g.startAgentGateway())"
+# Wait for: [Agent Gateway] Listening on port 3002
+```
+
+Generate an admin API key:
+
+```bash
+node -e "import('@agentoctopus/gateway').then(g => { const { key, entry } = g.createApiKey({ email: 'admin@test.com', tier: 'admin' }); console.log('key:', key, 'tier:', entry.tier); })"
+# Copy the key output
+```
+
+Send a traced request:
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' \
+  -d '{"query": "[trace: oct-e2e-12345678-abcd-1234-abcd-123456789abc] what is the weather in Tokyo?"}' | jq .
+```
+
+**Expected:** Returns weather data. The `[trace: ...]` marker is stripped from the query before routing — the Router/Executor never see it.
+
+Fetch the debug record:
+
+```bash
+# Latest run (no runId)
+curl -s http://localhost:3002/agent/debug/last-run \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+
+# Named run
+curl -s 'http://localhost:3002/agent/debug/last-run?runId=oct-e2e-12345678-abcd-1234-abcd-123456789abc' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+```
+
+**Expected:** Returns `{ success: true, run: { runId: "oct-e2e-...", status: "complete", receivedAt: ..., completedAt: ..., apiKeyId: "key:<sha256-16>", queryHash: "<sha256>", routing: { ... }, runs: [{ executionId: "...", status: "final", sandbox: { phase: "final", exitCode: 0, sandboxSuccess: true }, adapter: { adapterSuccess: true, outputValidated: true } }], terminal: { kind: "request.completed", reason: null } } }`. `run.query` is absent (because `includeQuery=false`); `run.queryHash` is present.
+
+Test access control:
+
+```bash
+# Disabled endpoint (set enabled:false in octopus.json, restart gateway)
+curl -s http://localhost:3002/agent/debug/last-run \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+# Expected: 404 { success: false, error: "Not found" }
+
+# Non-admin key (create a free-tier key, restart gateway with enabled:true)
+node -e "import('@agentoctopus/gateway').then(g => { const { key } = g.createApiKey({ email: 'free@test.com', tier: 'free' }); console.log(key); })"
+curl -s http://localhost:3002/agent/debug/last-run \
+  -H 'Authorization: Bearer <FREE_KEY>' | jq .
+# Expected: 403 { success: false, error: "Admin access required" }
+
+# No auth
+curl -s http://localhost:3002/agent/debug/last-run | jq .
+# Expected: 401 (auth middleware rejects before reaching the endpoint)
+
+# Unknown runId
+curl -s 'http://localhost:3002/agent/debug/last-run?runId=oct-e2e-nonexistent' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+# Expected: 200 { success: true, run: null }
+```
+
+Test `includeQuery=true`:
+
+```bash
+# Update octopus.json: gateway.debugEndpoints.includeQuery = true
+# Restart gateway, send a traced request, fetch the record
+curl -s 'http://localhost:3002/agent/debug/last-run?runId=oct-e2e-...' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq '.run.query'
+# Expected: "what is the weather in Tokyo?" (the stripped query, no [trace: ...] marker)
+```
+
+Test ring-buffer eviction:
+
+```bash
+# Set bufferSize=2, send 3 traced requests with distinct traceIds
+# Fetch the oldest by runId — expected: 200 { success: true, run: null } (evicted)
+# Fetch latest (no runId) — expected: 200 { success: true, run } (most recent)
+```
+
+## Pass / Fail Checklist (Phase E2E)
+
+| # | Test | Pass |
+|---|---|---|
+| E2E.1 | `config-types.test.ts` — debugEndpoints Zod validation | ✅ |
+| E2E.2 | `router-telemetry.test.ts` — one routing.completed per call, all return paths | ✅ |
+| E2E.3 | `execution-context.test.ts` — ExecutionContext type contract | ✅ |
+| E2E.4 | `executor-telemetry.test.ts` — adapter.completed only on real-adapter path, outputValidated | ✅ |
+| E2E.5 | `sandbox-runner-telemetry.test.ts` — sandbox.created/final phases, withExecContext no mutation | ✅ |
+| E2E.6 | `debug-telemetry.test.ts` — aggregation by traceId, executionId merge, pending→complete/failed transition, ring buffer | ✅ |
+| E2E.7 | `agent-protocol-debug.test.ts` — correlation-key extraction + trace stripping, exactly-one terminal, debug endpoint 404/403/200 states | ✅ |
+| E2E.8 | Manual E2E smoke — traced request, debug record fetch, access control, includeQuery, ring-buffer eviction | ⏭️ (requires running gateway) |
