@@ -986,6 +986,16 @@ jobs:
           echo "libclang provisioned: $LLVM_LIB/libclang.dylib"
       - name: Build mac-side VM helper + vendor libkrun/libkrunfw
         run: |
+          # libkrun is a Rust crate built via `make` driving cargo. Hosted
+          # macos-15 ships a Rust toolchain on PATH; a physical self-hosted
+          # runner may not. If rustup installed cargo under ~/.cargo/bin (the
+          # runner user's home), put it on PATH for this step and the ones
+          # below. No-op where cargo is already resolvable.
+          if [ -x "$HOME/.cargo/bin/cargo" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          command -v cargo >/dev/null || { echo "ERROR: cargo not on PATH — install a Rust toolchain (rustup) on this runner" >&2; exit 1; }
           pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/vendor-libkrun.mjs
           pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/build-vm-helper.mjs
       # ORDERING (F1): the G1/G2 gates + release-manifest signature MUST run
