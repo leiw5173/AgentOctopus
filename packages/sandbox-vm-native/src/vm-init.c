@@ -20,7 +20,10 @@
  * Exit status: vm-init FORKS the workload (it does not execve in-place),
  * waits on the workload child, and writes {"exit":<code>} on the control
  * port before exiting itself (WEXITSTATUS, or 128+WTERMSIG when signaled —
- * the same convention libkrun's init.krun uses). This frame is the ONLY way
+ * the same convention libkrun's init.krun uses). Bootstrap failures
+ * (die/die_errno) likewise write {"exit":127} alongside their {"error":...}
+ * frame, so post-ready rejections (e.g. an executable-allowlist miss) also
+ * surface a real exit code to the host. This frame is the ONLY way the
  * the workload exit code reaches the host: libkrun propagates a guest exit
  * code via a virtiofs ioctl (set_exit_code in init.krun), which is a no-op
  * unless the root is virtiofs — ours is a sealed ext4 block device, so the
@@ -131,6 +134,20 @@ static void control_write(const char *json_frame) {
     }
 }
 
+/* Report this process's final exit code on the control channel. This is the
+ * host's ONLY exit-code signal (libkrun's set_exit_code is virtiofs-only; the
+ * sealed ext4 root makes the helper always exit 0). Written by every exit
+ * path: die()/die_errno() (bootstrap failures, code 127) and the step-10
+ * parent after reaping the workload child. For post-ready failures the engine
+ * sees both the {"error":...} and this frame; for pre-ready failures
+ * waitForReady already fails start() on the error frame and this one is
+ * inert. */
+static void report_exit(int code) {
+    char frame[48];
+    snprintf(frame, sizeof(frame), "{\"exit\":%d}", code);
+    control_write(frame);
+}
+
 static void die(const char *reason) {
     char frame[MAX_STR_LEN];
     int n = snprintf(frame, sizeof(frame), "{\"error\":\"%s\"}", reason);
@@ -139,6 +156,7 @@ static void die(const char *reason) {
     /* truncate at frame boundary; the frame is already written above */
     (void)n;
     control_write(frame);
+    report_exit(127);
     _exit(127);
 }
 
@@ -149,6 +167,7 @@ static void die_errno(const char *prefix) {
     char frame[MAX_STR_LEN];
     snprintf(frame, sizeof(frame), "{\"error\":\"%s: %s\"}", prefix, strerror(errno));
     control_write(frame);
+    report_exit(127);
     _exit(127);
 }
 
@@ -735,11 +754,7 @@ int main(int argc, char **argv) {
     } else {
         code = 127;
     }
-    {
-        char frame[48];
-        snprintf(frame, sizeof(frame), "{\"exit\":%d}", code);
-        control_write(frame);
-    }
+    report_exit(code);
     /* Settle before exiting: init.krun reboots the guest the moment it
      * reaps THIS process, and a virtio-console tx queued but not yet copied
      * into the host's pipe by libkrun's process_tx would be dropped by the

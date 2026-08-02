@@ -658,6 +658,27 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     await inst.close();
   });
 
+  it('surfaces a post-ready bootstrap rejection ({"error"} + {"exit":127}) as exitCode 127', async () => {
+    // A post-ready guest rejection (e.g. executable-allowlist miss in step 9)
+    // writes {"error":"..."} + {"exit":127} and exits. Even though the helper
+    // process exits 0 (virtiofs-only exit propagation), exited must be 127.
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) =>
+        makeFakeChild(['{"ready":true}\n'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    controlReadStream.write('{"error":"unresolvable executable"}{"exit":127}');
+    await inst.kill();
+    const r = await inst.exited;
+    expect(r.exitCode).toBe(127);
+    await inst.close();
+  });
+
   it('passes the helper exit code through when no {"exit"} frame arrives', async () => {
     // Older guests (or a kill before the workload finishes) never write an
     // exit frame; the helper status must then pass through unchanged.
