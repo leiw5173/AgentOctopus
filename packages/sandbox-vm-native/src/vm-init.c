@@ -660,26 +660,32 @@ int main(int argc, char **argv) {
         launchspec_free(&ls); die("unresolvable executable");
     }
 
-    /* Step 10: chdir, CLOSE the control port fd, redirect stdio, execve. */
+    /* Step 10: chdir, redirect stdio, CLOSE control, execve. */
     if (chdir(cwd_real) < 0) {
         free(resolved); launchspec_free(&ls); die("chdir cwd failed");
     }
-    /* TEMP DIAG: report krun-stdio port discovery over the (still-open)
-     * control port so the CI log shows whether the guest finds the port. */
+    /* TEMP DIAG: full stdio-relay trace reported over the (still-open) control
+     * port. Does the open + dup2 + a probe write to fd 1, so the CI log shows
+     * exactly where the relay breaks. Replaces redirect_workload_stdio for this
+     * diagnostic build (it performs the same dup2s). */
     {
-        int dfd = open_named_port("krun-stdio");
-        char dframe[96];
-        int dn = snprintf(dframe, sizeof(dframe),
-                          "{\"diag\":\"stdio-port fd=%d\"}", dfd);
-        if (dn > 0) control_write(dframe);
-        if (dfd >= 0) close(dfd);
+        int p = open_named_port("krun-stdio");
+        int d_in  = (p >= 0) ? dup2(p, STDIN_FILENO)  : -1;
+        int d_out = (p >= 0) ? dup2(p, STDOUT_FILENO) : -1;
+        int d_err = (p >= 0) ? dup2(p, STDERR_FILENO) : -1;
+        int dup_errno = errno;
+        const char *m = "VM-INIT-STDIO-RELAY-OK\n";
+        ssize_t wr = (d_out >= 0) ? write(STDOUT_FILENO, m, strlen(m)) : -1;
+        int wr_errno = errno;
+        if (p >= 0) close(p);
+        char df[192];
+        int dn = snprintf(df, sizeof(df),
+            "{\"diag\":\"p=%d din=%d dout=%d derr=%d duperr=%d wr=%d wrerr=%d\"}",
+            p, d_in, d_out, d_err, dup_errno, (int)wr, wr_errno);
+        if (dn > 0) control_write(df);
+        (void)redirect_workload_stdio; /* keep -Werror happy while diag replaces it */
     }
     if (g_control_fd >= 0) { close(g_control_fd); g_control_fd = -1; }
-
-    /* Relay the workload's fd 0/1/2 onto the single krun-stdio port so its
-     * console output reaches the host (separate from the now-closed control
-     * port). Must run after the control fd is closed and before execve. */
-    redirect_workload_stdio();
 
     /* execve: pathname=resolved, argv=ls.argv (argv[0]=program name),
      * envp=ls.env. If env is empty, pass a minimal environ. */
