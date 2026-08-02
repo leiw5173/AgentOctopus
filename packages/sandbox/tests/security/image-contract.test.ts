@@ -221,4 +221,10 @@ describe('image contract', () => {
       }),
     ).toBeTruthy();
   });
+
+  it('lock pins undici version + sha256 for the vendored egress dependency', () => {
+    expect(lock.undiciVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(lock.undiciTarball).toMatch(/^https:\/\/registry\.npmjs\.org\/undici\/+-\/undici-.*\.tgz$/);
+    expect(lock.undiciSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
 });
