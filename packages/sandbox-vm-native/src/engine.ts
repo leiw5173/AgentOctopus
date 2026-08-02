@@ -751,18 +751,22 @@ export class VmEngineImpl implements VmEnginePort {
   }
 
   async start(config: VmStartConfig): Promise<VmInstance> {
-    // Contract: bootstrapArgv is exactly [bootstrapPath, <launch-spec blob>].
-    // The helper execs argv[0] (bootstrapPath) with argv[1] as the CBOR
-    // launch spec; a malformed argv would let the guest exec an arbitrary
-    // binary, so this is a security gate, not a convenience check.
-    if (!Array.isArray(config.bootstrapArgv) || config.bootstrapArgv.length !== 2) {
+    // Contract: bootstrapArgv is exactly [<launch-spec blob>] (length 1).
+    // libkrun's krun_set_exec uses bootstrapPath (exec_path) as the guest's
+    // argv[0] and appends bootstrapArgv AFTER it, so the array must NOT repeat
+    // bootstrapPath — otherwise the guest sees argv=[path, path, blob] and
+    // vm-init reads the path (not the blob) at argv[1] → "decode/validate
+    // failed". The helper execs argv[0] with argv[1] as the CBOR launch spec;
+    // a malformed argv would let the guest exec an arbitrary binary, so this
+    // is a security gate, not a convenience check.
+    if (!Array.isArray(config.bootstrapArgv) || config.bootstrapArgv.length !== 1) {
       throw new Error(
-        `bootstrapArgv must be [bootstrapPath, launchSpecBlob] (length 2); got length ${config.bootstrapArgv?.length}`,
+        `bootstrapArgv must be [launchSpecBlob] (length 1); got length ${config.bootstrapArgv?.length}`,
       );
     }
-    if (config.bootstrapArgv[0] !== config.bootstrapPath) {
+    if (config.bootstrapArgv[0] === config.bootstrapPath) {
       throw new Error(
-        `bootstrapArgv[0] must equal bootstrapPath (${config.bootstrapPath}); got ${config.bootstrapArgv[0]}`,
+        `bootstrapArgv must not repeat bootstrapPath (${config.bootstrapPath}); libkrun supplies argv[0]`,
       );
     }
     if (config.libkrunAbi !== 'v1.19.4') {

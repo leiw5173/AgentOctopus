@@ -590,31 +590,6 @@ int main(int argc, char **argv) {
 
     /* Step 6: decode + validate. */
     size_t tokenLen = strlen(argv[1]);
-    /* DIAGNOSTIC (temporary): report the FULL argv layout the guest receives
-     * (argc + argv[0..2] heads) so the vm-lane reveals exactly how libkrun's
-     * collapsed-string -> kernel cmdline -> init -> execve laid out argv.
-     * Confirmed so far: argv[1] == bootstrapPath (not the blob), so the path
-     * is duplicated somewhere; this captures argv[2] to locate the blob. */
-    {
-        char diag[512];
-        char a0[40]; char a1[40]; char a2[40];
-        const char *s0 = argv[0] ? argv[0] : "";
-        const char *s1 = argv[1] ? argv[1] : "";
-        const char *s2 = (argc > 2 && argv[2]) ? argv[2] : "";
-        size_t n0 = strlen(s0) < 39 ? strlen(s0) : 39;
-        size_t n1 = strlen(s1) < 39 ? strlen(s1) : 39;
-        size_t n2 = strlen(s2) < 39 ? strlen(s2) : 39;
-        memcpy(a0, s0, n0); a0[n0] = '\0';
-        memcpy(a1, s1, n1); a1[n1] = '\0';
-        memcpy(a2, s2, n2); a2[n2] = '\0';
-        for (char *p = a0; *p; p++) { char c=*p; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) *p='?'; }
-        for (char *p = a1; *p; p++) { char c=*p; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) *p='?'; }
-        for (char *p = a2; *p; p++) { char c=*p; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) *p='?'; }
-        int dn = snprintf(diag, sizeof(diag),
-            "{\"diag\":\"argv\",\"argc\":%d,\"len0\":%zu,\"len1\":%zu,\"len2\":%zu,\"a0\":\"%s\",\"a1\":\"%s\",\"a2\":\"%s\"}",
-            argc, strlen(s0), strlen(s1), strlen(s2), a0, a1, a2);
-        if (dn > 0) control_write(diag);
-    }
     size_t cborLen = 0;
     unsigned char *cbor = b64url_decode(argv[1], tokenLen, &cborLen);
     if (!cbor || cborLen == 0)
@@ -623,12 +598,6 @@ int main(int argc, char **argv) {
 
     LaunchSpec ls;
     if (decode_launchspec(cbor, cborLen, &ls) < 0) {
-        /* DIAGNOSTIC: report which structural check failed. */
-        char d2[160];
-        int dn2 = snprintf(d2, sizeof(d2),
-            "{\"diag\":\"decode\",\"cborLen\":%zu,\"first\":\"%02x%02x%02x\"}",
-            cborLen, cborLen>0?cbor[0]:0, cborLen>1?cbor[1]:0, cborLen>2?cbor[2]:0);
-        if (dn2 > 0) control_write(d2);
         free(cbor); die("launch-spec decode/validate failed");
     }
     free(cbor);

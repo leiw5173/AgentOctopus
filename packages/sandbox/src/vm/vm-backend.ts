@@ -168,7 +168,13 @@ export class VmSandboxBackend implements SandboxBackend {
     };
     // NUL rejection + size caps fire inside encodeLaunchSpec (Task 3).
     const { blob: launchSpecBlob } = encodeLaunchSpec(workloadSpec);
-    const bootstrapArgv = [BOOTSTRAP_PATH, launchSpecBlob]; // R6 P1-1/R7 P1-3: [path, base64url(CBOR)]
+    // R6 P1-1/R7 P1-3: bootstrapArgv carries ONLY the launch-spec blob.
+    // libkrun's krun_set_exec uses bootstrapPath (exec_path) as the guest's
+    // argv[0] and appends bootstrapArgv AFTER it — so the array must NOT
+    // repeat bootstrapPath, or the guest sees argv=[path, path, blob] and
+    // vm-init reads the path (not the blob) at argv[1] → "decode/validate
+    // failed". With argv=[blob] the guest gets argv=[path, blob]: argv[1]=blob.
+    const bootstrapArgv = [launchSpecBlob];
     const vm = await this.input.engine.start({
       rootfsArtifact: this.rootfsArtifact,
       skillBlockImage: this.skillBlockImage,

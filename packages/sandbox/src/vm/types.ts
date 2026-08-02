@@ -13,7 +13,8 @@ export interface VmProbeResult {
 
 /**
  * Backend-internal pre-encoding object (R7 P1-3). Constructed + validated in
- * spawn(), CBOR+base64url-encoded into bootstrapArgv[1], then discarded. Does
+ * spawn(), CBOR+base64url-encoded into the launch-spec blob that becomes the
+ * sole bootstrapArgv entry (guest argv[1]), then discarded. Does
  * NOT cross into the native layer as a VmStartConfig field.
  */
 export interface VmWorkloadSpec {

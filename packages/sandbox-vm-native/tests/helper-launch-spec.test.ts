@@ -7,7 +7,7 @@ const config = (over: Partial<VmStartConfig> = {}): VmStartConfig => ({
   skillBlockImage: { ref: 'sha256:bbb', absolutePath: '/var/skill.img', manifestDigest: 'sha256:bbb', size: 1, mode: 0o444 },
   caBlockImage: { ref: 'sha256:ccc', absolutePath: '/var/ca.img', manifestDigest: 'sha256:ccc', size: 1, mode: 0o444 },
   bootstrapPath: '/usr/libexec/octopus-vm-init',
-  bootstrapArgv: ['/usr/libexec/octopus-vm-init', 'PAYLOAD-BLOB'],
+  bootstrapArgv: ['PAYLOAD-BLOB'],
   vsockPort: 4242,
   vsockHostSocket: '/run/octopus-vsock-abc.sock',
   memMib: 512,
@@ -32,7 +32,7 @@ describe('buildHelperLaunchSpec', () => {
       cpus: 1,
       memMib: 512,
       bootstrapPath: '/usr/libexec/octopus-vm-init',
-      bootstrapArgv: ['/usr/libexec/octopus-vm-init', 'PAYLOAD-BLOB'],
+      bootstrapArgv: ['PAYLOAD-BLOB'],
       trustedEnv: [],
     });
   });
@@ -47,8 +47,17 @@ describe('buildHelperLaunchSpec', () => {
       .toThrow(/\.\./);
   });
 
-  it('rejects bootstrapArgv length != 2', () => {
-    expect(() => buildHelperLaunchSpec(config({ bootstrapArgv: ['/x'] }))).toThrow(/2/);
+  it('rejects bootstrapArgv length != 1', () => {
+    expect(() => buildHelperLaunchSpec(config({ bootstrapArgv: ['/x', '/y'] }))).toThrow(/1 entry/);
+  });
+
+  it('rejects bootstrapArgv repeating bootstrapPath (libkrun supplies argv[0])', () => {
+    expect(() => buildHelperLaunchSpec(config({ bootstrapArgv: ['/usr/libexec/octopus-vm-init'] })))
+      .toThrow(/must not repeat bootstrapPath/);
+  });
+
+  it('rejects an empty launchSpecBlob', () => {
+    expect(() => buildHelperLaunchSpec(config({ bootstrapArgv: [''] }))).toThrow(/must not be empty/);
   });
 
   it('rejects NUL bytes in any string field', () => {

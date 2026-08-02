@@ -133,8 +133,8 @@ function tryConnect(host, port, label) {
  *
  * Returns [helperPath, helperSpecToken] where helperSpecToken is the
  * base64url(JSON) helper launch spec consumed by vm-helper.c argv[1]. The
- * guest's per-probe launch spec blob is nested inside bootstrapArgv[1]; the
- * helper-spec's bootstrapPath matches bootstrapArgv[0].
+ * guest's per-probe launch spec blob is the sole bootstrapArgv entry (guest
+ * argv[1]); bootstrapPath is the guest argv[0] supplied by libkrun.
  */
 export async function buildHelperArgv(
   helperPath,
@@ -186,7 +186,11 @@ export async function buildHelperArgv(
       mode: 0,
     },
     bootstrapPath: BOOTSTRAP_PATH,
-    bootstrapArgv: [BOOTSTRAP_PATH, launchSpecBlob],
+    // libkrun's krun_set_exec uses bootstrapPath as the guest argv[0] and
+    // appends bootstrapArgv after it — so the array carries ONLY the blob
+    // (repeating BOOTSTRAP_PATH here would push the blob to argv[2] and make
+    // vm-init read the path at argv[1] → "decode/validate failed").
+    bootstrapArgv: [launchSpecBlob],
     vsockPort,
     vsockHostSocket,
     cpus,

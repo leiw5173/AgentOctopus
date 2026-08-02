@@ -31,13 +31,20 @@ export function buildHelperLaunchSpec(config: VmStartConfig, trustedEnv: string[
   assertPathField('bootstrapPath', config.bootstrapPath);
   if (config.vsockPort === 0 || !Number.isInteger(config.vsockPort) || config.vsockPort < 0 || config.vsockPort > 0xffffffff)
     throw new Error(`helper spec: vsockPort out of range (${config.vsockPort})`);
-  if (!Array.isArray(config.bootstrapArgv) || config.bootstrapArgv.length !== 2)
-    throw new Error('helper spec: bootstrapArgv must have exactly 2 entries');
-  if (config.bootstrapArgv[0] !== config.bootstrapPath)
-    throw new Error('helper spec: bootstrapArgv[0] must equal bootstrapPath');
+  // bootstrapArgv carries ONLY the launch-spec blob. libkrun's krun_set_exec
+  // uses bootstrapPath (exec_path) as the guest argv[0] and appends
+  // bootstrapArgv after it — so the array must NOT repeat bootstrapPath, or
+  // the guest sees argv=[path, path, blob] and vm-init reads the path (not
+  // the blob) at argv[1]. Exactly one entry: the non-empty blob.
+  if (!Array.isArray(config.bootstrapArgv) || config.bootstrapArgv.length !== 1)
+    throw new Error('helper spec: bootstrapArgv must have exactly 1 entry (the launchSpecBlob)');
+  if (config.bootstrapArgv[0] === config.bootstrapPath)
+    throw new Error('helper spec: bootstrapArgv must not repeat bootstrapPath (libkrun supplies argv[0])');
   for (const s of [config.bootstrapPath, ...config.bootstrapArgv, ...trustedEnv]) {
     if (typeof s !== 'string' || !NO_NUL(s)) throw new Error('helper spec: NUL byte in string field');
   }
+  if (config.bootstrapArgv[0].length === 0)
+    throw new Error('helper spec: bootstrapArgv[0] (launchSpecBlob) must not be empty');
   const spec: HelperLaunchSpec = {
     rootfsPath: config.rootfsArtifact.absolutePath,
     skillBlockPath: config.skillBlockImage.absolutePath,

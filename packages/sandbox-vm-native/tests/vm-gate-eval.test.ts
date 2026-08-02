@@ -70,8 +70,9 @@ describe('buildHelperArgv', () => {
     expect(spec.cpus).toBe(1);
     expect(spec.memMib).toBe(512);
     expect(spec.bootstrapPath).toBe(BOOTSTRAP_PATH);
-    expect(spec.bootstrapArgv).toEqual([BOOTSTRAP_PATH, 'INNER-SPEC-BLOB']);
-    expect(spec.bootstrapArgv[0]).toBe(spec.bootstrapPath);
+    // libkrun supplies argv[0]=bootstrapPath; bootstrapArgv carries only the blob.
+    expect(spec.bootstrapArgv).toEqual(['INNER-SPEC-BLOB']);
+    expect(spec.bootstrapArgv[0]).not.toBe(spec.bootstrapPath);
     expect(spec.trustedEnv).toEqual([]);
   });
 });

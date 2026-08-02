@@ -323,7 +323,7 @@ async function buildLaunchSpec(spec) {
 async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillBlockImg, caBlockImg, launchSpecBlob }) {
   // Build the helper launch spec (base64url JSON) and invoke the helper with
   // [helperPath, helperSpecToken]. The guest's per-probe launch spec blob is
-  // nested inside bootstrapArgv[1]; it is NOT the helper's own argv.
+  // the sole bootstrapArgv entry (guest argv[1]); it is NOT the helper's own argv.
   const vsockPort = 4242 + (process.pid % 1000);
   const vsockHostSocket = path.join(os.tmpdir(), `octopus-gate-vsock-${process.pid}-${Date.now()}.sock`);
   const vsockServer = net.createServer();

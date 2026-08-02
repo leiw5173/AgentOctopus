@@ -9,7 +9,7 @@
 //   - R10 P1-2: adddup2(tempH2gRead → fd3), adddup2(tempG2hWrite → fd4)
 //     with temp ≥10 ≠ 3/4 ⇒ guaranteed real dup2 (clears cloexec on target).
 //   - Darwin: POSIX_SPAWN_CLOEXEC_DEFAULT attr present.
-//   - bootstrapArgv asserted [bootstrapPath, launchSpecBlob], length===2.
+//   - bootstrapArgv asserted [launchSpecBlob] only, length===1 (libkrun supplies argv[0]).
 //   - After spawn: Node closes its h2gRead + g2hWrite + temp slots; retains
 //     g2hRead + h2gWrite.
 //   - Ready handshake: {"ready":true} on g2hRead ⇒ resolves VmInstance.
@@ -205,7 +205,7 @@ function baseConfig(rootfsArtifact?: {
     skillBlockImage: { ref: 'sha256:' + 'c'.repeat(64), absolutePath: '/fake/skill.img', manifestDigest: 'sha256:' + 'd'.repeat(64), size: 1, mode: 0o444 },
     caBlockImage: { ref: 'sha256:' + 'e'.repeat(64), absolutePath: '/fake/ca.img', manifestDigest: 'sha256:' + 'f'.repeat(64), size: 1, mode: 0o444 },
     bootstrapPath: '/usr/libexec/octopus-vm-init',
-    bootstrapArgv: ['/usr/libexec/octopus-vm-init', 'PAYLOAD_BLOB'],
+    bootstrapArgv: ['PAYLOAD_BLOB'],
     vsockPort: 1234,
     vsockHostSocket: '/tmp/vsock.sock',
     memMib: 512,
@@ -392,7 +392,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     const spec = JSON.parse(Buffer.from(recorded.argv[1], 'base64url').toString('utf8'));
     expect(spec.helperPath).toBeUndefined();
     expect(spec.bootstrapPath).toBe('/usr/libexec/octopus-vm-init');
-    expect(spec.bootstrapArgv).toEqual(['/usr/libexec/octopus-vm-init', 'PAYLOAD_BLOB']);
+    expect(spec.bootstrapArgv).toEqual(['PAYLOAD_BLOB']);
     // Round 5: the rootfs is attached via the inherited pinned fd, not a path.
     expect(spec.rootfsPath).toBe('/dev/fd/5');
     expect(spec.skillBlockPath).toBe('/fake/skill.img');
@@ -540,7 +540,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     expect(env.LD_LIBRARY_PATH).toBe(privateDir);
   });
 
-  it('rejects bootstrapArgv that violates the [path, blob] length===2 contract', async () => {
+  it('rejects bootstrapArgv that violates the [blob] length===1 contract', async () => {
     const controlReadStream = new PassThrough();
     const binding: FakeBinding = {
       pipe: () => [10, 11],
@@ -550,11 +550,11 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     const deps = makeDeps(binding, controlReadStream);
     const { engine, harness } = await makeStartEngine(deps);
     const cfg = baseConfig(harness.rootfsArtifact);
-    cfg.bootstrapArgv = ['/usr/libexec/octopus-vm-init', 'a', 'b']; // length 3
+    cfg.bootstrapArgv = ['a', 'b']; // length 2 — libkrun supplies argv[0], so only the blob belongs here
     await expect(engine.start(cfg as any)).rejects.toThrow(/bootstrapArgv/);
   });
 
-  it('rejects bootstrapArgv[0] !== bootstrapPath', async () => {
+  it('rejects bootstrapArgv[0] repeating bootstrapPath (libkrun supplies argv[0])', async () => {
     const controlReadStream = new PassThrough();
     const binding: FakeBinding = {
       pipe: () => [10, 11],
@@ -564,7 +564,7 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     const deps = makeDeps(binding, controlReadStream);
     const { engine, harness } = await makeStartEngine(deps);
     const cfg = baseConfig(harness.rootfsArtifact);
-    cfg.bootstrapArgv = ['/usr/libexec/SOMETHING-ELSE', 'blob'];
+    cfg.bootstrapArgv = ['/usr/libexec/octopus-vm-init']; // repeats bootstrapPath -> pushes blob off argv[1]
     await expect(engine.start(cfg as any)).rejects.toThrow(/bootstrapArgv/);
   });
 

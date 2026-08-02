@@ -30,15 +30,18 @@
  *     "cpus":             1,
  *     "memMib":           512,
  *     "bootstrapPath":    "/usr/libexec/octopus-vm-init",
- *     "bootstrapArgv":    ["/usr/libexec/octopus-vm-init", "<launchSpecBlob>"],
+ *     "bootstrapArgv":    ["<launchSpecBlob>"],
  *     "trustedEnv":       ["KEY=val", ...]
  *   }
  *
- * The helper does NOT interpret bootstrapArgv[1] (the launchSpecBlob) --
+ * The helper does NOT interpret bootstrapArgv[0] (the launchSpecBlob) --
  * that is the single authoritative workload representation, opaque to the
- * host, decoded only by the guest bootstrap (Task 12). The helper merely
- * asserts bootstrapArgv[0] === bootstrapPath and bootstrapArgv.length === 2
- * (R7 P1-3) and passes it verbatim to krun_set_exec.
+ * host, decoded only by the guest bootstrap (Task 12). libkrun's
+ * krun_set_exec uses bootstrapPath (exec_path) as the guest's argv[0] and
+ * appends bootstrapArgv AFTER it, so the array carries ONLY the blob. The
+ * helper asserts bootstrapArgv.length === 1 and bootstrapArgv[0] !==
+ * bootstrapPath (R7 P1-3) and passes it verbatim to krun_set_exec — yielding
+ * guest argv = [bootstrapPath, blob], so vm-init reads the blob at argv[1].
  *
  * Control pipe FD plumbing (R9/R10): the helper is spawned by
  * VmEngineImpl via posix_spawn with file actions that dup2 the VMM-side
@@ -584,13 +587,17 @@ static void parse_launch_spec(const char *json, size_t len, VmLaunchSpec *out) {
     if (strstr(out->bootstrapPath,   "..")) die("launch spec: bootstrapPath must not contain '..'");
 
     /* R7 P1-3: bootstrapArgv is the SINGLE authoritative workload
-     * representation. Assert [0] === bootstrapPath and length === 2. */
-    if (out->bootstrapArgvLen != 2)
-        die("launch spec: bootstrapArgv must have exactly 2 entries");
-    if (strcmp(out->bootstrapArgv[0], out->bootstrapPath) != 0)
-        die("launch spec: bootstrapArgv[0] must equal bootstrapPath");
-    if (out->bootstrapArgv[1][0] == '\0')
-        die("launch spec: bootstrapArgv[1] (launchSpecBlob) must not be empty");
+     * representation. libkrun's krun_set_exec uses bootstrapPath (exec_path)
+     * as the guest's argv[0] and appends bootstrapArgv AFTER it, so the array
+     * carries ONLY the launch-spec blob — exactly 1 entry, and it must NOT
+     * repeat bootstrapPath (that would push the blob to argv[2] and make
+     * vm-init read the path at argv[1] -> "decode/validate failed"). */
+    if (out->bootstrapArgvLen != 1)
+        die("launch spec: bootstrapArgv must have exactly 1 entry (the launchSpecBlob)");
+    if (strcmp(out->bootstrapArgv[0], out->bootstrapPath) == 0)
+        die("launch spec: bootstrapArgv must not repeat bootstrapPath (libkrun supplies argv[0])");
+    if (out->bootstrapArgv[0][0] == '\0')
+        die("launch spec: bootstrapArgv[0] (launchSpecBlob) must not be empty");
 
     /* Verify the fixed control FDs are actually open (the engine dup2'd
      * them into 3/4). If they aren't, krun would get EBADF later; fail

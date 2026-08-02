@@ -95,15 +95,16 @@ describe('VmSandboxBackend', () => {
     await expect(be.prepare(opts)).rejects.toThrow(/rootfs/);
   });
 
-  it('spawn constructs bootstrapArgv = [bootstrapPath, launchSpecBlob] and passes trustedEnv', async () => {
+  it('spawn constructs bootstrapArgv = [launchSpecBlob] and passes trustedEnv', async () => {
     const engine = new FakeVmEngine();
     const be = makeBackend(await mkdtemp(join(tmpdir(), 'vm-argv-')), engine);
     await be.prepare(await makeOpts());
     await be.spawn({ command: ['node', '-e', '1'] } as any);
     const cfg = engine.startCalls[0];
-    expect(cfg.bootstrapArgv[0]).toBe('/usr/libexec/octopus-vm-init');
-    expect(cfg.bootstrapArgv).toHaveLength(2);
-    expect(cfg.bootstrapArgv[1]).toMatch(/^[A-Za-z0-9_-]+$/); // base64url
+    // libkrun supplies argv[0]=bootstrapPath; bootstrapArgv carries only the blob.
+    expect(cfg.bootstrapArgv).toHaveLength(1);
+    expect(cfg.bootstrapArgv[0]).toMatch(/^[A-Za-z0-9_-]+$/); // base64url launch-spec blob
+    expect(cfg.bootstrapArgv[0]).not.toBe('/usr/libexec/octopus-vm-init');
     expect(cfg.vsockPort).toBeGreaterThan(0);
     expect(cfg.vsockHostSocket).toMatch(/^\//);
     expect(cfg.trustedEnv).toContain(`OCTOPUS_VSOCK_PORT=${cfg.vsockPort}`);
