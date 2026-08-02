@@ -590,6 +590,23 @@ int main(int argc, char **argv) {
 
     /* Step 6: decode + validate. */
     size_t tokenLen = strlen(argv[1]);
+    /* DIAGNOSTIC (temporary): report what the guest actually received as
+     * argv[1] so the vm-lane can distinguish a transport-layer corruption
+     * (wrong length / mangled bytes) from a decode-logic bug. */
+    {
+        char diag[160];
+        size_t head = tokenLen < 24 ? tokenLen : 24;
+        size_t tail = tokenLen > 8 ? 8 : 0;
+        char hb[25]; char tb[9];
+        memcpy(hb, argv[1], head); hb[head] = '\0';
+        if (tail) { memcpy(tb, argv[1] + tokenLen - tail, tail); tb[tail] = '\0'; } else tb[0] = '\0';
+        /* sanitize to printable (base64url only) so the JSON frame stays valid */
+        for (size_t k = 0; k < head; k++) { char c = hb[k]; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) hb[k] = '?'; }
+        for (size_t k = 0; k < tail; k++) { char c = tb[k]; if (!((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_')) tb[k] = '?'; }
+        int dn = snprintf(diag, sizeof(diag),
+            "{\"diag\":\"argv1\",\"len\":%zu,\"head\":\"%s\",\"tail\":\"%s\"}", tokenLen, hb, tb);
+        if (dn > 0) control_write(diag);
+    }
     size_t cborLen = 0;
     unsigned char *cbor = b64url_decode(argv[1], tokenLen, &cborLen);
     if (!cbor || cborLen == 0)
@@ -598,6 +615,12 @@ int main(int argc, char **argv) {
 
     LaunchSpec ls;
     if (decode_launchspec(cbor, cborLen, &ls) < 0) {
+        /* DIAGNOSTIC: report which structural check failed. */
+        char d2[160];
+        int dn2 = snprintf(d2, sizeof(d2),
+            "{\"diag\":\"decode\",\"cborLen\":%zu,\"first\":\"%02x%02x%02x\"}",
+            cborLen, cborLen>0?cbor[0]:0, cborLen>1?cbor[1]:0, cborLen>2?cbor[2]:0);
+        if (dn2 > 0) control_write(d2);
         free(cbor); die("launch-spec decode/validate failed");
     }
     free(cbor);
