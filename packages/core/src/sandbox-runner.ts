@@ -533,6 +533,7 @@ export class SandboxRunner {
     meta: SandboxResultMeta;
     exitCode: number | null;
     sandboxSuccess: boolean;
+    phase: 'created' | 'final';
   }): void {
     if (!this.telemetrySink) return;
     try {
@@ -543,6 +544,7 @@ export class SandboxRunner {
         meta: event.meta,
         exitCode: event.exitCode,
         sandboxSuccess: event.sandboxSuccess,
+        phase: event.phase,
       });
     } catch {
       /* telemetry must never break execution */
@@ -614,6 +616,7 @@ export class SandboxRunner {
         meta: output.meta,
         exitCode: null,
         sandboxSuccess: output.success,
+        phase: 'final',
       });
       return output;
     }
@@ -623,6 +626,7 @@ export class SandboxRunner {
       meta: output.meta,
       exitCode: result!.exitCode,
       sandboxSuccess: output.success,
+      phase: 'final',
     });
     return output;
   }
@@ -665,6 +669,7 @@ export class SandboxRunner {
         },
         exitCode: null,
         sandboxSuccess: false,
+        phase: 'created',
       });
 
       // Memoized close state (T3): the FIRST close() runs the teardown chain
@@ -758,6 +763,7 @@ export class SandboxRunner {
           meta: finalMeta,
           exitCode: null,
           sandboxSuccess: !containment,
+          phase: 'final',
         });
         if (containment) throw containment;
       };

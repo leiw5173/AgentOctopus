@@ -14,6 +14,12 @@ export interface SandboxCompletedEvent {
   kind: 'sandbox.completed';
   traceId?: string; executionId: string;
   meta: SandboxResultMeta; exitCode: number | null; sandboxSuccess: boolean;
+  /** STATIC emitter-site label, NOT derived from sandboxSuccess:
+   *  'created' only on the spawn-created event (right after backend.spawn
+   *  succeeds); 'final' on run() complete/error AND spawn-close. The
+   *  aggregator treats 'final' as closing its runs[] element regardless of
+   *  sandboxSuccess. */
+  phase: 'created' | 'final';
 }
 export interface AdapterCompletedEvent {
   kind: 'adapter.completed';

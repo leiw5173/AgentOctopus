@@ -177,6 +177,7 @@ describe('SandboxRunner — telemetry emission (T3.3)', () => {
     expect(ev.meta).toEqual(out.meta);
     expect(ev.exitCode).toBe(0);
     expect(ev.sandboxSuccess).toBe(true);
+    expect(ev.phase).toBe('final');
   });
 
   it('run() emits sandbox.completed with downgraded meta when cleanup throws ContainmentCleanupError', async () => {
@@ -201,6 +202,7 @@ describe('SandboxRunner — telemetry emission (T3.3)', () => {
     expect(ev.meta.degradationReasons).toContain('cgroup kill failed');
     expect(ev.sandboxSuccess).toBe(false);
     expect(ev.exitCode).toBe(0);
+    expect(ev.phase).toBe('final');
   });
 
   it('run() emits sandbox.completed with exitCode null on the error path', async () => {
@@ -222,6 +224,7 @@ describe('SandboxRunner — telemetry emission (T3.3)', () => {
     if (ev.kind !== 'sandbox.completed') throw new Error('unreachable');
     expect(ev.exitCode).toBeNull();
     expect(ev.sandboxSuccess).toBe(false);
+    expect(ev.phase).toBe('final');
   });
 
   it('run() generates a fresh executionId when the context omits one', async () => {
@@ -267,6 +270,7 @@ describe('SandboxRunner — telemetry emission (T3.3)', () => {
     });
     expect(created.exitCode).toBeNull();
     expect(created.sandboxSuccess).toBe(false);
+    expect(created.phase).toBe('created');
     expect(typeof created.executionId).toBe('string');
     expect(created.executionId.length).toBeGreaterThan(0);
 
@@ -281,6 +285,7 @@ describe('SandboxRunner — telemetry emission (T3.3)', () => {
     expect(final.meta).toEqual(meta);
     expect(final.sandboxSuccess).toBe(true);
     expect(final.exitCode).toBeNull();
+    expect(final.phase).toBe('final');
   });
 
   it('spawn() final event reflects containment downgrade when cleanup throws ContainmentCleanupError', async () => {
@@ -308,6 +313,8 @@ describe('SandboxRunner — telemetry emission (T3.3)', () => {
     expect(final.meta.degraded).toBe(true);
     expect(final.meta.degradationReasons).toContain('cgroup kill failed');
     expect(final.sandboxSuccess).toBe(false);
+    expect(created.phase).toBe('created');
+    expect(final.phase).toBe('final');
   });
 
   it('a throwing sink never breaks run()', async () => {
