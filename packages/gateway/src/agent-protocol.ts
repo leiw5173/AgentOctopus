@@ -150,180 +150,195 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       ? { traceId, apiKeyId, receivedAt }
       : undefined;
 
-    // Bind request-start metadata directly on the buffer (NOT through the
-    // shared sink) so it stays out of the cross-request channel. includeQuery
-    // gates whether the clean query text or its sha256 hash is stored.
-    if (traceId) {
-      const cfg = getConfig().gateway.debugEndpoints;
-      engine.telemetryBuffer.recordRequestStart(traceId, {
-        apiKeyId,
-        receivedAt,
-        ...(cfg.includeQuery
-          ? { query: cleanQuery }
-          : { queryHash: createHash('sha256').update(cleanQuery).digest('hex') }),
-      });
-    }
-
-    // Resolve or create session
-    // Without a sessionId, generate a fresh channelId so every request gets a new session.
-    const channelId = sessionId ?? uuidv4();
-    const session = sessionId
-      ? sessionManager.getById(sessionId) ?? sessionManager.getOrCreate(channelId, agentId, 'agent')
-      : sessionManager.getOrCreate(channelId, agentId, 'agent');
-
-    session.metadata = { ...session.metadata, ...metadata };
-    sessionManager.addMessage(session, { role: 'user', content: cleanQuery, timestamp: Date.now() });
-
-    // Auto-detect feedback: if session has a previous assistant message with a skillUsed,
-    // and the current message looks like feedback (not a new query), record it automatically.
-    const prevMessages = session.messages;
-    const lastAssistant = [...prevMessages].reverse().find(m => m.role === 'assistant' && m.skillUsed);
-    if (lastAssistant && isLikelyFeedback(cleanQuery)) {
-      const sentiment = detectSentiment(cleanQuery);
-      const positive = sentiment.sentiment === 'positive';
-      const skillName = (lastAssistant as any).skillUsed as string;
-
-      engine.registry.recordFeedback(skillName, positive, cleanQuery, 'openclaw');
-
-      sessionManager.addMessage(session, {
-        role: 'assistant',
-        content: positive
-          ? `Thanks for the positive feedback on ${skillName}!`
-          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
-        timestamp: Date.now(),
-      });
-
-      res.json({
-        success: true,
-        response: positive
-          ? `Thanks for the positive feedback on ${skillName}!`
-          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
-        skill: skillName,
-        sessionId: session.id,
-        feedbackRecorded: true,
-        sentiment: sentiment.sentiment,
-      });
-      // Feedback path also counts as a completed request when a trace is present.
-      if (traceId && engine.telemetryBuffer) {
+    // T3.7 — EXACTLY-ONE-TERMINAL guarantee. Every request with a traceId
+    // emits precisely one terminal event (request.completed | request.failed),
+    // regardless of which path it takes — including pre-routing setup
+    // (recordRequestStart, session getOrCreate/addMessage, feedback block),
+    // routing, execution, and the 500 catch. A single shared flag gates every
+    // emission site so no path can emit zero or two terminals. Telemetry must
+    // never break /ask — emission failures are swallowed.
+    let terminalEmitted = false;
+    const emitTerminal = (kind: 'request.completed' | 'request.failed', reason: string | null): void => {
+      if (terminalEmitted || !traceId) return;
+      terminalEmitted = true;
+      try {
         engine.telemetryBuffer.record(
-          { kind: 'request.completed', traceId, reason: null } satisfies RequestTerminalEvent,
+          { kind, traceId, reason } satisfies RequestTerminalEvent,
           {},
         );
+      } catch {
+        // telemetry must never break /ask
       }
-      return;
-    }
+    };
 
-    // T3.7 — EXACTLY ONE terminal event per request, emitted LAST (after all
-    // router/executor emissions). The finally runs once regardless of which
-    // response branch fired (success / credential-missing / unsupported /
-    // no-route / 500 catch). no-route is NOT a failure — it completed normally
-    // with a direct LLM answer, so it records request.completed.
-    let terminalKind: 'request.completed' | 'request.failed' = 'request.completed';
-    let terminalReason: string | null = null;
     try {
-      const startTime = Date.now();
-      // Pass previous skill name from session for follow-up query routing
-      const assistantMsgs = session.messages.filter(m => m.role === 'assistant');
-      const prevSkill = lastAssistant ? (lastAssistant as any).skillUsed as string : undefined;
-      console.log(`[AgentProtocol] session=${session.id} msgs=${session.messages.length} assistantMsgs=${assistantMsgs.length} lastAssistant=${!!lastAssistant} prevSkill=${prevSkill}`);
-      const [routing] = await engine.router.route(cleanQuery, 20, { previousSkill: prevSkill, execContext });
-      if (!routing) {
-        const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, cleanQuery);
+      // Bind request-start metadata directly on the buffer (NOT through the
+      // shared sink) so it stays out of the cross-request channel. includeQuery
+      // gates whether the clean query text or its sha256 hash is stored.
+      if (traceId) {
+        const cfg = getConfig().gateway.debugEndpoints;
+        engine.telemetryBuffer.recordRequestStart(traceId, {
+          apiKeyId,
+          receivedAt,
+          ...(cfg.includeQuery
+            ? { query: cleanQuery }
+            : { queryHash: createHash('sha256').update(cleanQuery).digest('hex') }),
+        });
+      }
+
+      // Resolve or create session
+      // Without a sessionId, generate a fresh channelId so every request gets a new session.
+      const channelId = sessionId ?? uuidv4();
+      const session = sessionId
+        ? sessionManager.getById(sessionId) ?? sessionManager.getOrCreate(channelId, agentId, 'agent')
+        : sessionManager.getOrCreate(channelId, agentId, 'agent');
+
+      session.metadata = { ...session.metadata, ...metadata };
+      sessionManager.addMessage(session, { role: 'user', content: cleanQuery, timestamp: Date.now() });
+
+      // Auto-detect feedback: if session has a previous assistant message with a skillUsed,
+      // and the current message looks like feedback (not a new query), record it automatically.
+      const prevMessages = session.messages;
+      const lastAssistant = [...prevMessages].reverse().find(m => m.role === 'assistant' && m.skillUsed);
+      if (lastAssistant && isLikelyFeedback(cleanQuery)) {
+        const sentiment = detectSentiment(cleanQuery);
+        const positive = sentiment.sentiment === 'positive';
+        const skillName = (lastAssistant as any).skillUsed as string;
+
+        engine.registry.recordFeedback(skillName, positive, cleanQuery, 'openclaw');
 
         sessionManager.addMessage(session, {
           role: 'assistant',
-          content: answer,
+          content: positive
+            ? `Thanks for the positive feedback on ${skillName}!`
+            : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
           timestamp: Date.now(),
         });
 
-        res.status(200).json({
+        res.json({
           success: true,
-          response: answer,
-          skill: null,
+          response: positive
+            ? `Thanks for the positive feedback on ${skillName}!`
+            : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
+          skill: skillName,
           sessionId: session.id,
-          confidence: null,
+          feedbackRecorded: true,
+          sentiment: sentiment.sentiment,
         });
+        // Feedback path also counts as a completed request. emitTerminal is
+        // idempotent via terminalEmitted — mutually exclusive with the
+        // finally's emission below.
+        emitTerminal('request.completed', null);
         return;
       }
 
-      // Note: the `autoInstall` request field is accepted for schema
-      // compatibility but intentionally ignored — skills are untrusted and
-      // must never trigger host package-manager execution.
-      let result = await engine.executor.execute(routing.skill, { query: cleanQuery }, { execContext });
+      let terminalKind: 'request.completed' | 'request.failed' = 'request.completed';
+      let terminalReason: string | null = null;
+      try {
+        const startTime = Date.now();
+        // Pass previous skill name from session for follow-up query routing
+        const assistantMsgs = session.messages.filter(m => m.role === 'assistant');
+        const prevSkill = lastAssistant ? (lastAssistant as any).skillUsed as string : undefined;
+        console.log(`[AgentProtocol] session=${session.id} msgs=${session.messages.length} assistantMsgs=${assistantMsgs.length} lastAssistant=${!!lastAssistant} prevSkill=${prevSkill}`);
+        const [routing] = await engine.router.route(cleanQuery, 20, { previousSkill: prevSkill, execContext });
+        if (!routing) {
+          const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, cleanQuery);
 
-      if (isCredentialMissing(result)) {
-        const lines = result.missing
-          .map(v => `  - ${v.key}${v.label ? ` — ${v.label}` : ''}`)
-          .join('\n');
-        const setupCmd = result.missing[0]?.key
-          ? `\n  Run: octopus config set ${result.missing[0].key} <your-key>`
-          : '';
-        res.json({
-          success: false,
-          type: 'credential_missing',
-          skillName: result.skillName,
-          missing: result.missing,
-          response: `I matched a skill that could answer this, but it needs an API key that isn't configured:\n${lines}${setupCmd}`,
-          skill: routing.skill.manifest.name,
-          sessionId: session.id,
-          confidence: routing.score,
-        });
-        return;
-      }
+          sessionManager.addMessage(session, {
+            role: 'assistant',
+            content: answer,
+            timestamp: Date.now(),
+          });
 
-      if (isUnsupportedRuntime(result)) {
-        res.json({
-          success: false,
-          type: 'unsupported_runtime_requirements',
-          skillName: result.skillName,
-          missing: result.missing,
-          response: `I matched a skill but it requires tools that aren't installed: ${result.missing.join(', ')}. No trusted runtime profile covers: ${result.missing.join(', ')}. Ask the operator to add one under \`sandbox.runtimeProfiles\`.`,
-          skill: routing.skill.manifest.name,
-          sessionId: session.id,
-          confidence: routing.score,
-        });
-        return;
-      }
-
-      sessionManager.addMessage(session, {
-        role: 'assistant',
-        content: result.formattedOutput,
-        timestamp: Date.now(),
-        skillUsed: routing.skill.manifest.name,
-      });
-
-      // Emit skill-executed event
-      eventBus.emit({
-        type: 'skill-executed',
-        skillName: routing.skill.manifest.name,
-        success: true,
-        latencyMs: Date.now() - startTime,
-      });
-
-      res.json({
-        success: true,
-        response: result.formattedOutput,
-        skill: routing.skill.manifest.name,
-        sessionId: session.id,
-        confidence: routing.score,
-      });
-    } catch (err) {
-      terminalKind = 'request.failed';
-      terminalReason = (err as Error).message ?? String(err);
-      res.status(500).json({ success: false, error: (err as Error).message });
-    } finally {
-      // Single terminal emission — guaranteed to run AFTER all router/executor
-      // emissions (they complete synchronously within the try) and exactly once.
-      if (traceId) {
-        try {
-          engine.telemetryBuffer.record(
-            { kind: terminalKind, traceId, reason: terminalReason } satisfies RequestTerminalEvent,
-            {},
-          );
-        } catch {
-          // telemetry must never break /ask
+          res.status(200).json({
+            success: true,
+            response: answer,
+            skill: null,
+            sessionId: session.id,
+            confidence: null,
+          });
+          return;
         }
+
+        // Note: the `autoInstall` request field is accepted for schema
+        // compatibility but intentionally ignored — skills are untrusted and
+        // must never trigger host package-manager execution.
+        let result = await engine.executor.execute(routing.skill, { query: cleanQuery }, { execContext });
+
+        if (isCredentialMissing(result)) {
+          const lines = result.missing
+            .map(v => `  - ${v.key}${v.label ? ` — ${v.label}` : ''}`)
+            .join('\n');
+          const setupCmd = result.missing[0]?.key
+            ? `\n  Run: octopus config set ${result.missing[0].key} <your-key>`
+            : '';
+          res.json({
+            success: false,
+            type: 'credential_missing',
+            skillName: result.skillName,
+            missing: result.missing,
+            response: `I matched a skill that could answer this, but it needs an API key that isn't configured:\n${lines}${setupCmd}`,
+            skill: routing.skill.manifest.name,
+            sessionId: session.id,
+            confidence: routing.score,
+          });
+          return;
+        }
+
+        if (isUnsupportedRuntime(result)) {
+          res.json({
+            success: false,
+            type: 'unsupported_runtime_requirements',
+            skillName: result.skillName,
+            missing: result.missing,
+            response: `I matched a skill but it requires tools that aren't installed: ${result.missing.join(', ')}. No trusted runtime profile covers: ${result.missing.join(', ')}. Ask the operator to add one under \`sandbox.runtimeProfiles\`.`,
+            skill: routing.skill.manifest.name,
+            sessionId: session.id,
+            confidence: routing.score,
+          });
+          return;
+        }
+
+        sessionManager.addMessage(session, {
+          role: 'assistant',
+          content: result.formattedOutput,
+          timestamp: Date.now(),
+          skillUsed: routing.skill.manifest.name,
+        });
+
+        // Emit skill-executed event
+        eventBus.emit({
+          type: 'skill-executed',
+          skillName: routing.skill.manifest.name,
+          success: true,
+          latencyMs: Date.now() - startTime,
+        });
+
+        res.json({
+          success: true,
+          response: result.formattedOutput,
+          skill: routing.skill.manifest.name,
+          sessionId: session.id,
+          confidence: routing.score,
+        });
+      } catch (err) {
+        terminalKind = 'request.failed';
+        terminalReason = (err as Error).message ?? String(err);
+        res.status(500).json({ success: false, error: (err as Error).message });
+      } finally {
+        // Single terminal emission — guaranteed to run AFTER all router/executor
+        // emissions (they complete synchronously within the inner try) and
+        // exactly once. The terminalEmitted guard makes this mutually exclusive
+        // with the feedback path's early emitTerminal above.
+        emitTerminal(terminalKind, terminalReason);
       }
+    } catch (err) {
+      // Pre-routing setup (recordRequestStart, session store, feedback block)
+      // threw. Emit the SINGLE request.failed terminal and rethrow so Express's
+      // default error handler still produces the 500 response. The
+      // terminalEmitted guard ensures this never double-fires.
+      emitTerminal('request.failed', (err as Error).message ?? String(err));
+      throw err;
     }
   });
 

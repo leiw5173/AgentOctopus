@@ -311,4 +311,43 @@ describe('POST /agent/ask telemetry', () => {
     expect(terminals).toHaveLength(0);
     expect(telemetryBuffer.latest()).toBeNull();
   });
+
+  it('emits exactly ONE request.failed terminal when pre-routing session setup throws (no stuck pending record)', async () => {
+    const { engine, telemetryBuffer, emitted } = makeEngine([]);
+    const router = await makeRouter(engine);
+    const traceId = 'oct-e2e-ffffffff-ffff-ffff-ffff-ffffffffffff';
+
+    // Force the pre-routing session setup to throw. The /ask handler invokes
+    // sessionManager.addMessage BEFORE the inner routing try/finally — this
+    // path used to leak a permanently-pending record.
+    const { sessionManager } = await import('../src/session.js');
+    const spy = vi.spyOn(sessionManager, 'addMessage').mockImplementationOnce(() => {
+      throw new Error('session store exploded');
+    });
+
+    try {
+      // The handler does not catch internally — Express's default error handler
+      // produces the 500. Our callRoute helper invokes the route function
+      // directly, so the throw propagates to the test. We assert the terminal
+      // emission even though the request errors out.
+      await expect(
+        callRoute(router, '/ask', 'post', {
+          body: { query: `setup explode [trace: ${traceId}]`, agentId: 'test-agent' },
+          apiKeyEntry: ADMIN_ENTRY,
+          apiKey: 'k',
+        }),
+      ).rejects.toThrow('session store exploded');
+    } finally {
+      spy.mockRestore();
+    }
+
+    const terminals = emitted.filter((e) => e.kind === 'request.completed' || e.kind === 'request.failed');
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]!.kind).toBe('request.failed');
+    expect((terminals[0] as { reason: string }).reason).toContain('session store exploded');
+
+    const rec = telemetryBuffer.getByRunId(traceId);
+    expect(rec).not.toBeNull();
+    expect(rec!.status).toBe('failed');
+  });
 });
