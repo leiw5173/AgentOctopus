@@ -3,6 +3,7 @@ import { getRequiredEnvVars, getRequiredBins, getSkillEntry } from '@agentoctopu
 import { shouldIncludeSkill, extractQueryTokens, scoreKeywordMatch, CJK_RANGE, type SkillEligibilityContext } from '@agentoctopus/skills';
 import type { SkillsConfig } from '@agentoctopus/skills';
 import { type ChatClient, type EmbedClient, type LLMConfig, createChatClient, createEmbedClient, skillToText } from './llm-client.js';
+import type { ExecutionContext, TelemetrySink, RoutingCompletedEvent } from './execution-context.js';
 import { isBinAvailable } from './utils.js';
 import { getConfig } from './config-resolver.js';
 import fs from 'fs';
@@ -81,16 +82,28 @@ interface RoutingResultCandidate {
   score: number;
 }
 
+/** Mutable per-route() telemetry state threaded through routeInner so the
+ *  public route() can emit exactly one routing.completed event regardless of
+ *  which return path produced the result. */
+interface RouteTelemetryState {
+  intent: string;
+  intentUsed: boolean;
+  selectionMethod: 'reranker' | 'score-fallback';
+  candidates: RoutingResultCandidate[];
+}
+
 export class Router {
   private index: VectorEntry[] = [];
   private chatClient: ChatClient;
   private embedClient: EmbedClient | null;
   private embedModel: string;
+  private readonly telemetrySink?: TelemetrySink;
 
-  constructor(chatConfig: LLMConfig, embedConfig?: LLMConfig) {
+  constructor(chatConfig: LLMConfig, embedConfig?: LLMConfig, telemetrySink?: TelemetrySink) {
     this.chatClient = createChatClient(chatConfig);
     this.embedClient = embedConfig ? createEmbedClient(embedConfig) : null;
     this.embedModel = embedConfig?.model ?? '';
+    this.telemetrySink = telemetrySink;
   }
 
   private embedCachePath(): string {
@@ -195,7 +208,49 @@ export class Router {
    * Route a query to the best skill.
    * Flow: translate → eligibility filter → embed query → cosine × routingScore → top K → LLM rerank
    */
-  async route(query: string, topK = 20, opts: { debug?: boolean; previousSkill?: string } = {}): Promise<RoutingResult[]> {
+  async route(query: string, topK = 20, opts: { debug?: boolean; previousSkill?: string; execContext?: ExecutionContext } = {}): Promise<RoutingResult[]> {
+    const { execContext } = opts;
+    const state: RouteTelemetryState = {
+      intent: query,
+      intentUsed: false,
+      selectionMethod: 'reranker',
+      candidates: [],
+    };
+    const results = await this.routeInner(query, topK, opts, state);
+
+    // Emit exactly one routing.completed per route() call, regardless of which
+    // return path produced the result. A throwing sink must never break routing.
+    if (this.telemetrySink) {
+      try {
+        const winner = results.length > 0 ? results[0] : undefined;
+        const sortedCandidates = state.candidates.slice().sort((a, b) => b.score - a.score);
+        const selectedCandidateRank = winner
+          ? sortedCandidates.findIndex(c => c.skill === winner.skill)
+          : null;
+        const event: RoutingCompletedEvent = {
+          kind: 'routing.completed',
+          traceId: execContext?.traceId,
+          intent: state.intent,
+          intentSource: state.intentUsed ? 'llm' : 'original-query-fallback',
+          intentExtractionSucceeded: state.intentUsed,
+          candidatesConsidered: state.candidates.length,
+          selected: winner ? winner.skill.manifest.name : null,
+          selectedRawScore: winner ? winner.score : null,
+          normalizedConfidence: winner ? winner.confidence : null,
+          candidates: state.candidates.map(c => ({ name: c.skill.manifest.name, rawScore: c.score })),
+          selectionMethod: state.selectionMethod,
+          selectedCandidateRank: selectedCandidateRank === -1 ? null : selectedCandidateRank,
+        };
+        this.telemetrySink.emit(event);
+      } catch {
+        // Telemetry sink failure is non-fatal — routing must not be affected.
+      }
+    }
+
+    return results;
+  }
+
+  private async routeInner(query: string, topK: number, opts: { debug?: boolean; previousSkill?: string; execContext?: ExecutionContext }, state: RouteTelemetryState): Promise<RoutingResult[]> {
     const { debug = false, previousSkill } = opts;
     if (this.index.length === 0) return [];
 
@@ -218,8 +273,12 @@ export class Router {
         try {
           const parsed = JSON.parse(combined.trim()) as { translation?: string; intent?: string };
           if (parsed.translation) routingQuery = `${query} ${parsed.translation}`;
-          if (parsed.intent && parsed.intent.length < routingQuery.length) embedQuery = parsed.intent;
-          else embedQuery = routingQuery;
+          if (parsed.intent && parsed.intent.length < routingQuery.length) {
+            embedQuery = parsed.intent;
+            state.intentUsed = true;
+          } else {
+            embedQuery = routingQuery;
+          }
         } catch {
           // JSON parse failed — fall back to full query
           embedQuery = routingQuery;
@@ -236,13 +295,17 @@ export class Router {
           query,
         );
         const trimmed = intent.trim();
-        if (trimmed && trimmed.length < query.length) embedQuery = trimmed;
+        if (trimmed && trimmed.length < query.length) {
+          embedQuery = trimmed;
+          state.intentUsed = true;
+        }
       } catch {
         // Intent extraction failed — use full query for embedding
       }
     }
 
     // Build eligibility context once for all skills
+    state.intent = embedQuery;
     const skillsConfig = getConfig().skills;
     const eligibility: SkillEligibilityContext = {
       hasBin: (bin: string) => isBinAvailable(bin),
@@ -362,6 +425,11 @@ export class Router {
       }
     }
 
+    // Snapshot the candidate list fed to the reranker for telemetry. This is
+    // the list after cosine topK + keyword-boost + penalize + previousSkill
+    // injection — the exact set the reranker prompt is built from.
+    state.candidates = candidates;
+
     // LLM rerank
     const candidateList = candidates
       .map((c, i) => {
@@ -411,6 +479,8 @@ Respond with ONLY the skill name (exactly as listed) or "none", nothing else.`;
       if (ranked.length === 0) return [];
       const top = ranked[0];
       dbg(debug, `Reranker fallback: ${top.skill.manifest.name} (score=${top.score.toFixed(3)})`);
+      state.selectionMethod = 'score-fallback';
+      state.candidates = ranked;
       return [{ skill: top.skill, score: top.score, confidence: normalizeConfidence(top.score), reason: 'embedding fallback (LLM unavailable)' }];
     }
 
