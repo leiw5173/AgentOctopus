@@ -634,6 +634,49 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     await inst.close();
   });
 
+  it('treats the guest {"exit"} control frame as authoritative over the helper exit code', async () => {
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) =>
+        makeFakeChild(['{"ready":true}\n'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    // The guest PID 1 (vm-init) reports the workload exit code over the
+    // control port because libkrun's own exit-code propagation is
+    // virtiofs-only (sealed ext4 root ⇒ the helper always exits 0). Report
+    // a workload exit of 42, then kill: exited must surface the GUEST code,
+    // not the helper's 137.
+    controlReadStream.write('{"exit":42}');
+    await inst.kill();
+    const r = await inst.exited;
+    expect(r.exitCode).toBe(42);
+    expect(r.timedOut).toBe(true);
+    await inst.close();
+  });
+
+  it('passes the helper exit code through when no {"exit"} frame arrives', async () => {
+    // Older guests (or a kill before the workload finishes) never write an
+    // exit frame; the helper status must then pass through unchanged.
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) =>
+        makeFakeChild(['{"ready":true}\n'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    await inst.kill(); // ends the control stream (EOF) with no exit frame
+    const r = await inst.exited;
+    expect(r.exitCode).toBe(137);
+    await inst.close();
+  });
+
   it('kills handshake after >2 malformed non-JSON control frames (HI-4)', async () => {
     const controlReadStream = new PassThrough();
     const binding: FakeBinding = {

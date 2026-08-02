@@ -942,25 +942,60 @@ export class VmEngineImpl implements VmEnginePort {
       throw new Error(ready.reason);
     }
 
-    // --- Bridge helper stdio (fd1/fd2) + control into a VmInstance. exited
-    // mirrors the helper subprocess exit (krun_start_enter authoritative). ---
+    // --- Bridge helper stdio (fd1/fd2) + control into a VmInstance. ---
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     raw.stdout.pipe(stdout);
     raw.stderr.pipe(stderr);
     stdin.pipe(raw.stdin);
-    // Drain controlRead after ready so the guest's later {"exit"}-equivalent
-    // (helper exit) and any diagnostic frames don't back up the pipe.
-    raw.controlRead.on('data', () => {
-      /* intentionally drained; exit status comes from `exited` */
+    // Capture the guest-reported workload exit code from the control stream.
+    // The guest PID 1 (vm-init) forks the workload, waitpid()s it, and writes
+    // {"exit":N} here before exiting. This frame is AUTHORITATIVE over the
+    // helper process exit code: libkrun propagates a guest exit code via a
+    // virtiofs-only ioctl (init.krun's set_exit_code is a no-op unless the
+    // root is virtiofs), and our sealed root is ext4 — so krun_start_enter
+    // (and therefore the helper subprocess) always exits 0 regardless of the
+    // workload's real status. Post-ready control frames ride the same channel
+    // as the ready handshake; they are vm-init's alone (the control fd is
+    // FD_CLOEXEC across the workload execve, so the workload itself can never
+    // write a frame here). Frames are not newline-delimited and concatenate
+    // on the stream, so match the frame shape rather than line-splitting.
+    let guestExit: number | undefined;
+    let controlBuf = '';
+    raw.controlRead.on('data', (chunk: Buffer) => {
+      controlBuf += chunk.toString('utf8');
+      const m = controlBuf.match(/\{"exit":(-?\d{1,5})\}/);
+      if (m) guestExit = Number(m[1]);
     });
+
+    // The exit frame is written just before the guest halts; its pipe bytes
+    // reach this stream before the helper's EOF, but the helper's exit event
+    // (which resolves raw.exited) can be delivered a tick ahead of the final
+    // 'data' events. Compose `exited` so it also waits — bounded — for the
+    // control stream to settle (a captured frame, or EOF), so the guest's
+    // reported code is never dropped to a delivery race.
+    const controlSettled = new Promise<void>((resolve) => {
+      if (guestExit !== undefined) return resolve();
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      const timer = setTimeout(finish, 2000);
+      timer.unref?.(); // never hold the event loop on the fallback path
+      const onFrame = () => { if (guestExit !== undefined) { clearTimeout(timer); finish(); } };
+      raw.controlRead.on('data', onFrame);
+      raw.controlRead.on('end', () => { clearTimeout(timer); finish(); });
+      raw.controlRead.on('close', () => { clearTimeout(timer); finish(); });
+      raw.controlRead.on('error', () => { clearTimeout(timer); finish(); });
+    });
+    const exited = Promise.all([raw.exited, controlSettled]).then(([status]) => (
+      guestExit !== undefined ? { ...status, exitCode: guestExit } : status
+    ));
 
     return {
       stdin,
       stdout,
       stderr,
-      exited: raw.exited,
+      exited,
       kill: async () => {
         await raw.kill();
       },

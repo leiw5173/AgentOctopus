@@ -9,15 +9,28 @@
  *
  * The workload executable/argv/env travel ONLY as that structured token
  * (NOT a shell string, NOT over the control channel). The control channel
- * (virtio-console port "octopus-control") carries ONLY {"ready":true} and
- * {"error":"<reason>"} frames; workload stdio rides a SECOND named port on
- * the same multiport device, "krun-stdio", which the host helper wires to
- * its stdout/stdin pipes (guest write -> host raw.stdout; host raw.stdin ->
- * guest read). vm-init opens the "krun-stdio" port by name (via
- * /sys/class/virtio-ports) and dup2's it onto fd 0/1/2 before execve.
- * Workload exit status is the krun_start_enter return
- * value read by the host helper subprocess -- this process execve's into
- * the workload and never returns to send an exit frame.
+ * (virtio-console port "octopus-control") carries {"ready":true},
+ * {"error":"<reason>"} and {"exit":<code>} frames; workload stdio rides a
+ * SECOND named port on the same multiport device, "krun-stdio", which the
+ * host helper wires to its stdout/stdin pipes (guest write -> host
+ * raw.stdout; host raw.stdin -> guest read). vm-init opens the "krun-stdio"
+ * port by name (via /sys/class/virtio-ports) and dup2's it onto fd 0/1/2
+ * before execve.
+ *
+ * Exit status: vm-init FORKS the workload (it does not execve in-place),
+ * waits on the workload child, and writes {"exit":<code>} on the control
+ * port before exiting itself (WEXITSTATUS, or 128+WTERMSIG when signaled —
+ * the same convention libkrun's init.krun uses). This frame is the ONLY way
+ * the workload exit code reaches the host: libkrun propagates a guest exit
+ * code via a virtiofs ioctl (set_exit_code in init.krun), which is a no-op
+ * unless the root is virtiofs — ours is a sealed ext4 block device, so the
+ * helper process (krun_start_enter) always exits 0. The host engine treats
+ * the control-frame exit code as authoritative over the helper's exit code.
+ * The octopus-control fd is set FD_CLOEXEC (NOT closed) before the execve:
+ * a successful exec auto-closes it (the workload can never write
+ * control frames — it cannot spoof {"error"}/{"exit"}), while an execve
+ * failure still lets the child report {"error":"execve failed: <errno>"}
+ * before _exit(127).
  *
  * Bootstrap protocol (spec §R4 P1-3 / R6 trusted bootstrap, exact order):
  *   1. mount -o ro /dev/vdb /skill
@@ -38,9 +51,13 @@
  *      /skill; rootfs-absolute EXACTLY matches an allowedExecutables
  *      value; bare name is a key in allowedExecutables. "other" =>
  *      {"error":"unresolvable executable"} + exit(127).
- *  10. chdir(cwd), CLOSE the control port fd, redirect fd 0/1/2 onto the
- *      "krun-stdio" named virtio-console port (workload stdio -> host via
- *      the helper's krun-stdio port pipes), execve(resolved, argv, envp).
+ *  10. chdir(cwd), redirect fd 0/1/2 onto the "krun-stdio" named
+ *      virtio-console port (workload stdio -> host via the helper's
+ *      krun-stdio port pipes), set FD_CLOEXEC on the control fd, fork:
+ *      child execve(resolved, argv, envp) — on failure reports
+ *      {"error":"execve failed: <errno>"} + _exit(127); parent waitpid()s
+ *      the child, writes {"exit":<code>} on the control port, and exits
+ *      (init.krun reaps this process and reboots the guest).
  *
  * Freestanding-ish C: no shell, no dlopen, no PATH lookup by execve
  * (the bootstrap resolves bare names itself). Every error is fatal and
@@ -121,6 +138,16 @@ static void die(const char *reason) {
     if ((size_t)n >= sizeof(frame)) n = sizeof(frame) - 1;
     /* truncate at frame boundary; the frame is already written above */
     (void)n;
+    control_write(frame);
+    _exit(127);
+}
+
+/* die() with the current errno rendered into the frame (used for the
+ * post-ready execve-failure path, where the actual errno — ENOENT for a
+ * missing interpreter, EACCES, ENOEXEC — is the only signal the host gets). */
+static void die_errno(const char *prefix) {
+    char frame[MAX_STR_LEN];
+    snprintf(frame, sizeof(frame), "{\"error\":\"%s: %s\"}", prefix, strerror(errno));
     control_write(frame);
     _exit(127);
 }
@@ -512,114 +539,28 @@ static int open_control_port(void) {
     return open_named_port("octopus-control");
 }
 
-/* TEMP DIAGNOSTIC helpers (remove with the diag block in
- * redirect_workload_stdio once the stdio relay is proven). */
-static void diag_report_ports(void) {
-    char msg[900];
-    size_t off = (size_t)snprintf(msg, sizeof(msg), "{\"diag\":\"ports=");
-    DIR *d = opendir("/sys/class/virtio-ports");
-    if (!d) {
-        snprintf(msg + off, sizeof(msg) - off, "NO_SYSFS\"}");
-        control_write(msg);
-        return;
-    }
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL && off < sizeof(msg) - 80) {
-        if (de->d_name[0] == '.') continue;
-        char np[512];
-        int n = snprintf(np, sizeof(np), "/sys/class/virtio-ports/%s/name", de->d_name);
-        if (n < 0 || (size_t)n >= sizeof(np)) continue;
-        int nf = open(np, O_RDONLY);
-        if (nf < 0) continue;
-        char buf[64];
-        ssize_t r = read(nf, buf, sizeof(buf) - 1);
-        close(nf);
-        if (r <= 0) continue;
-        buf[r] = '\0';
-        while (r > 0 && (buf[r-1] == '\n' || buf[r-1] == '\r')) buf[--r] = '\0';
-        off += (size_t)snprintf(msg + off, sizeof(msg) - off, "%s:%s;", de->d_name, buf);
-    }
-    closedir(d);
-    snprintf(msg + off, sizeof(msg) - off, "\"}");
-    control_write(msg);
-}
-
-static void diag_report_fd1(const char *tag) {
-    char link[128];
-    ssize_t n = readlink("/proc/self/fd/1", link, sizeof(link) - 1);
-    char msg[192];
-    if (n > 0) {
-        link[n] = '\0';
-        snprintf(msg, sizeof(msg), "{\"diag\":\"%s fd1=%s\"}", tag, link);
-    } else {
-        snprintf(msg, sizeof(msg), "{\"diag\":\"%s fd1=readlink-failed\"}", tag);
-    }
-    control_write(msg);
-}
-
-/* TEMP DIAGNOSTIC: dump exactly what execve is about to run (resolved path +
- * argv + counts), sanitizing for JSON. */
-static void diag_report_exec(const LaunchSpec *ls, const char *resolved) {
-    char msg[900];
-    snprintf(msg, sizeof(msg),
-             "{\"diag\":\"resolved=%.100s executable=%.60s argc=%zu envn=%zu aen=%zu\"}",
-             resolved, ls->executable ? ls->executable : "",
-             ls->argv_n, ls->env_n, ls->ae_n);
-    control_write(msg);
-    size_t off = (size_t)snprintf(msg, sizeof(msg), "{\"diag\":\"argv=");
-    for (size_t i = 0; i < ls->argv_n && i < 4 && off < sizeof(msg) - 70; i++) {
-        const char *a = ls->argv[i] ? ls->argv[i] : "(null)";
-        off += (size_t)snprintf(msg + off, sizeof(msg) - off, "[%zu]", i);
-        for (size_t j = 0; a[j] && j < 60 && off < sizeof(msg) - 10; j++) {
-            char c = a[j];
-            if (c == '"' || c == '\\' || (unsigned char)c < 0x20 ||
-                (unsigned char)c > 0x7e) {
-                c = '.';
-            }
-            msg[off++] = c;
-        }
-    }
-    snprintf(msg + off, sizeof(msg) - off, "\"}");
-    control_write(msg);
-}
-
 /* Redirect the workload's stdio onto the "krun-stdio" named virtio-console
  * port BEFORE execve. The host helper registers that port on the octopus-control
  * multiport device (input fd 7 / output fd 6 on the host), so anything the
  * workload writes to fd 1/2 reaches the host's helper stdout raw, and host
  * writes reach the workload's fd 0; the octopus-control port stays dedicated
- * to the ready/error frames. vm-init is the guest PID 1 (NOT libkrun's init),
- * so nothing else performs this redirection -- at boot this process's fd 1 is
- * a stray virtio-console port (e.g. /dev/vport2p2) that goes nowhere, and
- * without the redirect the workload's console.log never reaches the host (the
- * root cause of the G1/G2 NO-GO "DONE marker absent").
+ * to the ready/error/exit frames. vm-init is the guest PID 1 (NOT libkrun's
+ * init), so nothing else performs this redirection -- at boot this process's
+ * fd 1 is a stray virtio-console port (e.g. /dev/vport2p2) that goes nowhere,
+ * and without the redirect the workload's console.log never reaches the host.
  *
  * A named port is used (not /dev/console): krun_start_enter takes over the
  * helper's fd 0/1, so the implicit console's output cannot be sunk to the
  * host stdout, and krun_set_console_output to a /dev/fd/N alias drops the
- * bytes (verified twice). The named multiport port relays reliably -- the
+ * bytes (verified). The named multiport port relays reliably -- the
  * octopus-control ready frame on the same device proves it.
  *
  * Best-effort: if the port is absent the fds are left as-is rather than
- * failing the workload (ready/error frames ride octopus-control anyway). The
- * octopus-control fd is untouched. */
+ * failing the workload (ready/error/exit frames ride octopus-control
+ * anyway). The octopus-control fd is untouched. */
 static void redirect_workload_stdio(void) {
-    /* TEMP DIAGNOSTIC (remove once the stdio relay is proven end-to-end):
-     * report the guest's view of the console ports over octopus-control (the
-     * proven-reliable channel) so a host-side NO-GO is diagnosable from the
-     * INSIDE. Frames concatenate onto the control stream. */
-    diag_report_ports();
-    diag_report_fd1("before");
     int p = open_named_port("krun-stdio");
-    if (p < 0) {
-        control_write("{\"diag\":\"stdio=MISSING\"}");
-        return;
-    }
-    {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "{\"diag\":\"stdio_fd=%d\"}", p);
-        control_write(msg);
-    }
+    if (p < 0) return;
     dup2(p, STDIN_FILENO);
     dup2(p, STDOUT_FILENO);
     dup2(p, STDERR_FILENO);
@@ -627,19 +568,6 @@ static void redirect_workload_stdio(void) {
      * (open() could return fd 0 if stdin were free; closing it then would
      * undo the dup2). */
     if (p > STDERR_FILENO) close(p);
-    /* Prove the relay from the inside: one line through the new fd 1. If this
-     * reaches the host's helper stdout, the port delivers and any later
-     * missing workload output is a post-execve problem; if it does not, the
-     * port's host-side sink is the culprit. */
-    const char probe_line[] = "DIAG-STDOUT-ALIVE\n";
-    ssize_t w = write(STDOUT_FILENO, probe_line, sizeof(probe_line) - 1);
-    {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "{\"diag\":\"test_write=%d errno=%d\"}",
-                 (int)w, (w < 0) ? errno : 0);
-        control_write(msg);
-    }
-    diag_report_fd1("after");
 }
 
 /* ------------------------------------------------------------------ */
@@ -758,41 +686,68 @@ int main(int argc, char **argv) {
         launchspec_free(&ls); die("unresolvable executable");
     }
 
-    /* Step 10: chdir, redirect stdio, CLOSE control, execve. */
+    /* Step 10: chdir, redirect stdio, fork the workload, report its exit. */
     if (chdir(cwd_real) < 0) {
         free(resolved); launchspec_free(&ls); die("chdir cwd failed");
     }
     /* Route the workload's stdio onto the "krun-stdio" named port so its
      * output reaches the host via the helper's krun-stdio port pipe. */
     redirect_workload_stdio();
-    /* TEMP DIAGNOSTIC (remove once workload output arrives): dump the execve
-     * inputs, then sleep 300ms. libkrun's init.krun (guest) waitpid()s on THIS
-     * process and reboots the guest when it exits — so if the guest still
-     * halts <1ms after these frames, the halt is NOT this process exiting;
-     * if it lives ~300ms, the halt is workload-exit-driven and the argv dump
-     * shows what actually ran. Then write a pre-exec marker through the relay
-     * (second proof the port still carries bytes right before execve). */
-    diag_report_exec(&ls, resolved);
-    usleep(300 * 1000);
-    {
-        const char marker[] = "DIAG-PRE-EXEC\n";
-        ssize_t w = write(STDOUT_FILENO, marker, sizeof(marker) - 1);
-        char frame[80];
-        snprintf(frame, sizeof(frame), "{\"diag\":\"pre_exec_write=%d\"}", (int)w);
-        control_write(frame);
-    }
-    if (g_control_fd >= 0) { close(g_control_fd); g_control_fd = -1; }
 
     /* execve: pathname=resolved, argv=ls.argv (argv[0]=program name),
      * envp=ls.env. If env is empty, pass a minimal environ. */
     char *empty_envp[] = { NULL };
     char **envp = (ls.env && ls.env_n > 0) ? ls.env : empty_envp;
-    execve(resolved, ls.argv, envp);
 
-    /* execve only returns on failure. */
-    free(resolved);
-    launchspec_free(&ls);
-    die("execve failed");
+    /* CLOEXEC the control fd instead of closing it: a successful execve
+     * auto-closes it (the workload never sees it and can therefore never
+     * write {"error"}/{"exit"} frames onto the control channel), while an
+     * execve FAILURE leaves it open so the child's die_errno() can report
+     * the real reason to the host. Closing it here (as earlier revisions
+     * did) silenced execve failures — the host saw a silent 0-exit. */
+    if (g_control_fd >= 0) (void)fcntl(g_control_fd, F_SETFD, FD_CLOEXEC);
+
+    /* Fork the workload rather than execve-in-place: libkrun propagates a
+     * guest exit code only via its virtiofs-only set_exit_code ioctl (a
+     * no-op on this sealed ext4 root), so without this the host helper
+     * always exits 0 regardless of workload status. The parent waits on
+     * the workload child and reports the real code over the control
+     * channel ({"exit":N}), which the host engine treats as authoritative. */
+    pid_t child = fork();
+    if (child < 0) {
+        free(resolved); launchspec_free(&ls); die("fork workload failed");
+    }
+    if (child == 0) {
+        /* child: become the workload. execve only returns on failure. */
+        execve(resolved, ls.argv, envp);
+        die_errno("execve failed");
+    }
+
+    /* parent: reap the workload child (waitpid targets THIS child, not the
+     * forwarder or its descendants). */
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) { }
+    int code;
+    if (WIFEXITED(status)) {
+        code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        code = 128 + WTERMSIG(status);   /* init.krun's signaled convention */
+    } else {
+        code = 127;
+    }
+    {
+        char frame[48];
+        snprintf(frame, sizeof(frame), "{\"exit\":%d}", code);
+        control_write(frame);
+    }
+    /* Settle before exiting: init.krun reboots the guest the moment it
+     * reaps THIS process, and a virtio-console tx queued but not yet copied
+     * into the host's pipe by libkrun's process_tx would be dropped by the
+     * device reset. A short sleep gives the host's epoll tick time to drain
+     * the exit frame (the {"ready":true} frame proves the channel delivers
+     * within a tick during the VM lifetime; this bounds the shutdown race). */
+    usleep(50 * 1000);
+    _exit(code & 0xff);
     /* not reached */
     return 127;
 }
