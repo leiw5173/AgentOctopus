@@ -1,5 +1,6 @@
 export { Router, type RoutingResult } from './router.js';
-export { Executor, extractCredentialErrors, type ExecutionResult, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult } from './executor.js';
+export { Executor, extractCredentialErrors, type ExecutionResult, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult, type ExecutorOptions } from './executor.js';
+export { type OutputValidator, runOutputValidator } from './output-validator.js';
 export { createChatClient, createEmbedClient, skillToText, type ChatClient, type EmbedClient, type LLMConfig } from './llm-client.js';
 export { Planner, type ExecutionPlan, type PlanStep, type PlanStepResult, type PlanExecutionResult } from './planner.js';
 export { SkillComposer, type CompositionPlan, type CompositionStep, type CompositionResult } from './composer.js';

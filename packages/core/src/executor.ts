@@ -119,6 +119,10 @@ export interface ExecutorOptions {
   execContext?: ExecutionContext;
   telemetrySink?: TelemetrySink;
   outputValidator?: OutputValidator;
+  /** Per-skill output validators keyed by skill name. When present, the
+   *  validator for the executing skill is used; when absent for a skill, falls
+   *  back to the single outputValidator option (or 'no validator'). */
+  outputValidators?: Record<string, OutputValidator>;
 }
 
 export class Executor {
@@ -130,6 +134,7 @@ export class Executor {
   private readonly execContext?: ExecutionContext;
   private readonly telemetrySink?: TelemetrySink;
   private readonly outputValidator?: OutputValidator;
+  private readonly outputValidators?: Record<string, OutputValidator>;
 
   constructor(
     private registry: SkillRegistry,
@@ -148,6 +153,7 @@ export class Executor {
     this.execContext = options?.execContext;
     this.telemetrySink = options?.telemetrySink;
     this.outputValidator = options?.outputValidator;
+    this.outputValidators = options?.outputValidators;
   }
 
   /**
@@ -194,8 +200,19 @@ export class Executor {
     // into a short-lived SandboxRunner (via withExecContext) so sandbox
     // emissions share the same traceId. Never mutates the shared singletons —
     // safe under concurrent requests.
-    const effectiveExecContext = opts.execContext ?? this.execContext;
-    const runner = opts.execContext ? this.sandboxRunner.withExecContext(opts.execContext) : this.sandboxRunner;
+    //
+    // FIX: generate ONE executionId per call when the incoming ctx lacks one,
+    // and build the augmented context once. The SAME augmented context is used
+    // for BOTH the runner (withExecContext) AND emitAdapterCompleted, so
+    // adapter.completed and sandbox.completed share the same executionId.
+    // Without this, each fallback to randomUUID() produced a different UUID,
+    // preventing the DebugTelemetryBuffer from merging them into one runs[].
+    const baseExecContext = opts.execContext ?? this.execContext;
+    const executionId = baseExecContext?.executionId ?? randomUUID();
+    const effectiveExecContext: ExecutionContext | undefined = baseExecContext
+      ? { ...baseExecContext, executionId }
+      : { executionId };
+    const runner = opts.execContext ? this.sandboxRunner.withExecContext(effectiveExecContext) : this.sandboxRunner;
 
     let adapterResult: AdapterResult | undefined;
     let latencyMs: number = 0;
@@ -335,14 +352,20 @@ export class Executor {
     // When no validator is injected, surface the explicit 'no validator'
     // sentinel so downstream telemetry consumers can distinguish it from a
     // real validator failure.
+    //
+    // Validator lookup order:
+    //   1. Per-skill map (outputValidators[skill.name]) — preferred for E2E
+    //   2. Single outputValidator — backward-compatible fallback
+    //   3. No validator → 'no validator' sentinel
     let outputValidated = false;
     let outputValidationReason: string | null = null;
+    const activeValidator = this.outputValidators?.[skill.manifest.name] ?? this.outputValidator;
     if (!adapterResult.success) {
       outputValidationReason = 'adapter failed';
-    } else if (!this.outputValidator) {
+    } else if (!activeValidator) {
       outputValidationReason = 'no validator';
     } else {
-      const vr = await runOutputValidator(this.outputValidator, adapterResult, OUTPUT_VALIDATOR_TIMEOUT_MS);
+      const vr = await runOutputValidator(activeValidator, adapterResult, OUTPUT_VALIDATOR_TIMEOUT_MS);
       outputValidated = vr.ok;
       outputValidationReason = vr.reason;
     }
