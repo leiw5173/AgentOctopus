@@ -4,17 +4,22 @@
 // Fail-closed: if libc/posix_spawn symbols cannot be resolved, construction
 // throws a descriptive error. No silent degradation.
 //
-// Stream ownership (Approach A, post-review):
-//   - controlRead (g2hRead) + stdin (h2gWrite) are owned by the ENGINE, which
-//     created them via deps.pipe() and retains them. The engine overrides
-//     raw.controlRead/raw.stdin with fd-backed streams in start() BEFORE
-//     waitForReady() — see engine.ts. The binding returns throw-on-use
-//     placeholders for those two slots so any accidental access fails loudly.
-//   - stdout/stderr are owned by the BINDING: it creates two cloexec pipes,
-//     appends adddup2(writeEnd → fd1/fd2) file actions, keeps the read ends,
-//     and returns fd-backed Readables. The write ends are added to
-//     parentCloseFds so the parent closes them after spawn (otherwise the
-//     read ends never see EOF).
+// Stream ownership (Approach A, post-review; krun-stdio stdio relay):
+//   - controlRead (g2hRead) is owned by the ENGINE, which created it via
+//     deps.pipe() and retains it. The engine overrides raw.controlRead with an
+//     fd-backed stream in start() BEFORE waitForReady() — see engine.ts. The
+//     binding returns a throw-on-use placeholder (tagged with
+//     `__octopusNeedsEngineOverride`) so accidental early access fails loudly.
+//   - stdin/stdout/stderr are owned by the BINDING and returned as real
+//     fd-backed streams. stdout/stderr: two cloexec pipes, write ends dup2'd to
+//     child fd1/fd2 (read ends returned; write ends added to parentCloseFds so
+//     they see EOF on exit). stdin: the host end of the krun-stdio port's input
+//     pipe (consInWrite, child end dup2'd to STDIO_IN_FD). The guest workload's
+//     stdio rides the "krun-stdio" named virtio-console port the helper
+//     registers on (STDIO_IN_FD, STDIO_OUT_FD): guest write -> STDOUT pipe ->
+//     raw.stdout; host write to raw.stdin -> the workload's stdin. The engine
+//     keeps these streams as-is (no override marker), so vm.stdin/vm.stdout map
+//     straight through to the workload.
 
 import { createReadStream, createWriteStream } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
@@ -43,11 +48,20 @@ const WNOHANG = 1;
 
 const SIGKILL = 9;
 
-// Child fd slot that aliases the stdout pipe write end, used by the VM helper
-// as the libkrun implicit-console output sink ("/dev/fd/6"). Must match
-// vm-helper.c CONSOLE_OUT_FD and its mass_close watermark. fd 1 cannot be used
-// because krun_start_enter takes over stdin/stdout (see spawnWithLibc).
-const CONSOLE_OUT_FD = 6;
+// Child fd slots for the guest workload stdio relay. The VM helper registers a
+// named virtio-console port ("krun-stdio") on these fds, and the guest's
+// octopus-vm-init dup2's that port onto the workload's fd 0/1/2 — so workload
+// stdio rides the named port to the host: guest write -> fd STDIO_OUT_FD -> the
+// stdout pipe -> raw.stdout -> vm.stdout; host write to raw.stdin (consInWrite)
+// -> child fd STDIO_IN_FD -> the workload's stdin. Must match vm-helper.c
+// STDIO_OUT_FD/STDIO_IN_FD and its mass_close watermark. A named port is used
+// because krun_start_enter "takes over stdin/stdout" (libkrun.h): the implicit
+// console's output cannot be sunk to fd 1, nor to any /dev/fd/N via
+// krun_set_console_output (verified: the bytes are dropped), whereas a named
+// multiport-console port on real pipe fds relays reliably — proven by the
+// octopus-control ready frame reaching the host on fds 3/4.
+const STDIO_OUT_FD = 6;
+const STDIO_IN_FD = 7;
 
 const PLATFORM: VmEngineDeps['platform'] =
   process.platform === 'darwin' && process.arch === 'arm64'
@@ -356,28 +370,36 @@ function spawnWithLibc(
   // read ends and returns them as the raw.stdout/raw.stderr streams.
   const [stdoutRead, stdoutWrite] = cloexecPipe(libc);
   const [stderrRead, stderrWrite] = cloexecPipe(libc);
+  // Workload stdin relay pipe: the guest reads the krun-stdio port's input from
+  // consInRead (dup2'd into the child at STDIO_IN_FD); the parent keeps
+  // consInWrite and returns it as raw.stdin.
+  const [consInRead, consInWrite] = cloexecPipe(libc);
 
   // Append the stdio file actions to the engine-supplied list. We copy the
   // array rather than mutating the caller's (the engine may reuse it).
   //
-  // fd CONSOLE_OUT_FD (6) is a SECOND alias of the stdout pipe write end. The
-  // helper points libkrun's implicit-console output at "/dev/fd/6" so guest
-  // workload stdio reaches raw.stdout (-> vm.stdout). It CANNOT use fd 1:
-  // krun_start_enter "takes over stdin/stdout" (libkrun.h), so a console sink
-  // on fd 1 resolves back into the VMM's own console bridge and is dropped
-  // (verified: empty helper stdout). fd 6 is untouched by that takeover, and
-  // both the gate and the engine already read raw.stdout, so no extra bridging
-  // is needed on either side. The helper's mass_close watermark must keep fd 6.
+  // The workload's stdio reaches the host via the "krun-stdio" named
+  // virtio-console port, which the helper registers on (input=STDIO_IN_FD,
+  // output=STDIO_OUT_FD): guest write -> fd STDIO_OUT_FD (a second alias of the
+  // stdout pipe write end) -> raw.stdout -> vm.stdout; host write to raw.stdin
+  // -> child fd STDIO_IN_FD (consInRead) -> the workload's stdin. A named port
+  // is required because krun_start_enter takes over fd 0/1 (libkrun.h), so the
+  // implicit console cannot be sunk to fd 1 — and krun_set_console_output to a
+  // /dev/fd/N alias drops the bytes too (verified twice). A named multiport
+  // port on real pipe fds relays reliably (the octopus-control ready frame on
+  // fds 3/4 proves it). The helper's mass_close watermark must keep fds 6/7.
   const allActions: SpawnFileAction[] = [
     ...fileActions,
     { kind: 'adddup2', src: stdoutWrite, target: 1 },
     { kind: 'adddup2', src: stderrWrite, target: 2 },
-    { kind: 'adddup2', src: stdoutWrite, target: CONSOLE_OUT_FD },
+    { kind: 'adddup2', src: stdoutWrite, target: STDIO_OUT_FD },
+    { kind: 'adddup2', src: consInRead, target: STDIO_IN_FD },
   ];
 
-  // The parent must close the write ends after spawn so the read ends see EOF
-  // when the helper exits. Merge with the engine-supplied parentCloseFds.
-  const allParentCloseFds = [...parentCloseFds, stdoutWrite, stderrWrite];
+  // The parent must close the child-owned ends after spawn so the parent's read
+  // ends see EOF when the helper exits (and the stdin pipe isn't held open
+  // twice). Merge with the engine-supplied parentCloseFds.
+  const allParentCloseFds = [...parentCloseFds, stdoutWrite, stderrWrite, consInRead];
 
   const actions = {};
   const attr = {};
@@ -386,6 +408,7 @@ function spawnWithLibc(
   if (rc !== 0) {
     libc.close(stdoutRead); libc.close(stdoutWrite);
     libc.close(stderrRead); libc.close(stderrWrite);
+    libc.close(consInRead); libc.close(consInWrite);
     throw new Error(`native-binding: posix_spawn_file_actions_init failed (rc=${rc})`);
   }
   rc = libc.posix_spawnattr_init(attr);
@@ -393,6 +416,7 @@ function spawnWithLibc(
     libc.posix_spawn_file_actions_destroy(actions);
     libc.close(stdoutRead); libc.close(stdoutWrite);
     libc.close(stderrRead); libc.close(stderrWrite);
+    libc.close(consInRead); libc.close(consInWrite);
     throw new Error(`native-binding: posix_spawnattr_init failed (rc=${rc})`);
   }
 
@@ -437,17 +461,16 @@ function spawnWithLibc(
       libc.close(fd);
     }
 
-    // controlRead/stdin are owned by the ENGINE (it created g2hRead/h2gWrite
-    // and overrides raw.controlRead/raw.stdin with fd-backed streams in
-    // start() before waitForReady). Return throw-on-use sentinels here so
-    // any accidental access before the override fails loudly rather than
-    // silently hanging on an empty PassThrough.
+    // controlRead is owned by the ENGINE (it created g2hRead and overrides
+    // raw.controlRead with an fd-backed stream in start() before waitForReady).
+    // Return a throw-on-use sentinel here so any accidental access before the
+    // override fails loudly rather than silently hanging on an empty stream.
     //
-    // We tag the sentinels with a non-enumerable `__octopusNeedsEngineOverride`
-    // property so the engine can detect them and override ONLY when the
-    // binding expects it — the L1 fake returns a real working PassThrough
-    // for controlRead/stdin (its fds are fake numbers), so the engine must
-    // NOT clobber those. The production binding sets this marker; fakes don't.
+    // We tag the sentinel with a non-enumerable `__octopusNeedsEngineOverride`
+    // property so the engine can detect it and override ONLY when the binding
+    // expects it — the L1 fake returns a real working PassThrough for
+    // controlRead (its fds are fake numbers), so the engine must NOT clobber
+    // that. The production binding sets this marker; fakes don't.
     const controlRead = new Readable({
       read() {
         throw new Error(
@@ -459,17 +482,15 @@ function spawnWithLibc(
       value: true,
       enumerable: false,
     });
-    const stdin = new Writable({
-      write(_chunk, _enc, cb) {
-        cb(new Error(
-          'native-binding: stdin must be overridden by the engine (h2gWrite fd-backed stream)',
-        ));
-      },
-    });
-    Object.defineProperty(stdin, '__octopusNeedsEngineOverride', {
-      value: true,
-      enumerable: false,
-    });
+
+    // raw.stdin is a REAL fd-backed stream (the host end of the krun-stdio
+    // port's input pipe) — NOT a sentinel, and NOT tagged with the override
+    // marker. The engine therefore keeps it as-is, so writes to vm.stdin reach
+    // the guest workload's stdin via the named port. (The old design routed
+    // vm.stdin to the host->guest control pipe; the control channel carries
+    // only ready/error frames, so workload stdin belongs on the krun-stdio
+    // port instead.)
+    const stdin = fdToWritable(consInWrite);
 
     const exited = pollWaitpid(libc, pid[0]);
 

@@ -498,12 +498,13 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
     await fs.rm(vsockHostSocket, { force: true }).catch(() => {});
   }
 
-  // The workload's stdio is relayed via the guest's implicit console
-  // (/dev/console == hvc0): the helper points libkrun's implicit-console output
-  // at "/dev/fd/6" -- the helper's stdout pipe, aliased to fd 6 by
-  // native-binding's spawn file actions (fd 1 is unusable: krun_start_enter
-  // takes over stdin/stdout) -- and vm-init dup2's /dev/console onto the
-  // workload's fd 0/1/2 before execve. So G1-DONE/G2-DONE, any leaked sentinel,
+  // The workload's stdio is relayed via the "krun-stdio" named virtio-console
+  // port: the helper registers it on the octopus-control multiport device with
+  // output fd 6 (the helper's stdout pipe, dup2'd by native-binding's spawn
+  // file actions) and input fd 7, and vm-init opens the port by name and dup2's
+  // it onto the workload's fd 0/1/2 before execve. (A named port is required:
+  // krun_start_enter takes over fd 0/1, and krun_set_console_output to a
+  // /dev/fd/N alias drops the bytes.) So G1-DONE/G2-DONE, any leaked sentinel,
   // and any CONNECT-OK marker land in helperStdout (raw, on the stdout channel).
   // The control port (fd 4 -> guestOut) carries ONLY the bootstrap ready/error
   // frame. Return all three streams, LABELED, so the evaluators see the workload
@@ -518,7 +519,7 @@ async function bootVmAndCaptureStdout({ targetDir, helperPath, rootfsImg, skillB
   return [
     '--- guest control console (fd 4 -> ready/error frame) ---',
     guestOut,
-    '--- helper stdout (stdout pipe; workload stdio via /dev/fd/6 console alias) ---',
+    '--- helper stdout (stdout pipe; workload stdio via the krun-stdio named port) ---',
     helperStdout,
     '--- helper stderr (fd 2 -> libkrun logger) ---',
     helperStderr,

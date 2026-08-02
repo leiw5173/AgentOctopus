@@ -48,10 +48,11 @@
  * pipe ends into FIXED FDs -- fd 3 = h2gRead (guest input), fd 4 =
  * g2hWrite (guest output). The helper hands those exact ints to
  * krun_add_console_port_inout(ctx, console_id, "octopus-control", 3, 4).
- * In launch mode the spawn also aliases the stdout pipe onto fd 6 (the
- * krun_set_console_output sink) and the verified rootfs onto fd 5, so the
- * helper mass-closes every fd >= 7 (R10 P1-2), keeping 0/1/2 (stdio) +
- * 3/4 (control) + 5 (rootfs) + 6 (console output) alive into the VM.
+ * In launch mode the spawn also dup2's the stdout pipe write end onto fd 6
+ * (the krun-stdio port's output) and the stdin pipe read end onto fd 7 (the
+ * krun-stdio port's input), plus the verified rootfs onto fd 5, so the helper
+ * mass-closes every fd >= 8 (R10 P1-2), keeping 0/1/2 (stdio) + 3/4 (control)
+ * + 5 (rootfs) + 6/7 (workload stdio port) alive into the VM.
  *
  * Pinned start sequence (spec (section)Pinned TSI-disable start sequence, EXACT
  * ORDER verified against include/libkrun.h v1.19.4):
@@ -68,15 +69,20 @@
  *   9. krun_set_vm_config(ctx, cpus, memMib)            -- vCPUs BEFORE RAM
  *  10. krun_add_virtio_console_multiport(ctx)           -> console_id (>=0)
  *      krun_add_console_port_inout(ctx, console_id, "octopus-control", 3, 4)
- *  10b. krun_set_console_output(ctx, "/dev/fd/6") -- point the guest's
- *       implicit console (hvc0 == /dev/console) output at the helper's stdout
- *       pipe, aliased to fd 6 by native-binding's spawn file actions (NOT fd 1
- *       -- krun_start_enter takes over stdin/stdout, so a sink on fd 1 is
- *       dropped), so workload stdio reaches the host raw (no log prefix).
- *       vm-init (guest PID 1) dup2's /dev/console onto fd 0/1/2 before execve
- *       (libkrun's own init never runs). krun_add_virtio_console_default (a 2nd
- *       console device) and /dev/null-backed or 2nd data ports panic libkrun
- *       device.rs:263 "port rx queue should exist".
+ *      krun_add_console_port_inout(ctx, console_id, "krun-stdio", 7, 6)
+ *       Two generic I/O ports on the SAME multiport device (proven not to
+ *       panic, unlike a 2nd console device / /dev/null-backed input / a 2nd
+ *       default console, which panic libkrun device.rs:263 "port rx queue
+ *       should exist"). octopus-control (fds 3/4) carries ONLY the ready/error
+ *       frame. krun-stdio (input fd 7 = host writes, output fd 6 = guest
+ *       writes) carries the WORKLOAD's stdio: vm-init (guest PID 1) opens the
+ *       "krun-stdio" port by name via /sys/class/virtio-ports and dup2's it
+ *       onto fd 0/1/2 before execve (libkrun's own init never runs). A named
+ *       port is REQUIRED: krun_start_enter takes over fd 0/1, so the implicit
+ *       console (hvc0) cannot be sunk to fd 1, and krun_set_console_output to
+ *       a /dev/fd/N alias drops the bytes (verified twice). The implicit
+ *       console is left in place but unused (its libkrun logger output keeps
+ *       going to the helper's stderr for diagnostics).
  *  11. krun_set_exec(ctx, bootstrapPath, bootstrapArgv, trustedEnv)
  *  12. krun_set_workdir(ctx, "/")                       -- pinned to "/"
  *  13. krun_start_enter(ctx)                            -- blocks; exits with
@@ -135,20 +141,23 @@
  * across mass_close_fds() or krun_add_disk() gets a dead path. */
 #define ROOTFS_INHERIT_FD 5
 
-/* Fixed fd slot that aliases the helper's stdout pipe (installed by
- * native-binding's posix_spawn file actions). krun_set_console_output points
- * the guest's implicit-console output at "/dev/fd/6" so workload stdio reaches
- * the host's helper stdout. fd 1 cannot be used: krun_start_enter takes over
- * stdin/stdout, so a console sink on fd 1 is dropped. Must match
- * native-binding.ts CONSOLE_OUT_FD; launch mode MUST preserve it across
- * mass_close_fds() or the console sink gets a dead path. */
-#define CONSOLE_OUT_FD 6
+/* Fixed fd slots for the guest workload stdio relay, installed by
+ * native-binding's posix_spawn file actions: fd 6 = stdout pipe write end
+ * (the "krun-stdio" port's output: guest writes -> host raw.stdout), fd 7 =
+ * stdin pipe read end (the port's input: host raw.stdin -> guest reads). A
+ * named virtio-console port on these real pipe fds is used because
+ * krun_start_enter takes over fd 0/1 (so the implicit console cannot be sunk
+ * there) and krun_set_console_output to a /dev/fd/N alias drops the bytes.
+ * Must match native-binding.ts STDIO_OUT_FD/STDIO_IN_FD; launch mode MUST
+ * preserve both across mass_close_fds() or the port gets a dead path. */
+#define STDIO_OUT_FD 6
+#define STDIO_IN_FD  7
 
 /* Stdio+control FDs preserved by mass_close_fds() in BLK-probe mode (fds
  * 0-4; there is no inherited rootfs fd on the --has-blk path). */
 #define FD_LOW_WATERMARK 5
-/* Launch mode preserves the rootfs fd AND the console-output fd (fds 0-6). */
-#define FD_LOW_WATERMARK_LAUNCH (CONSOLE_OUT_FD + 1)
+/* Launch mode preserves the rootfs fd AND the krun-stdio port fds (0-7). */
+#define FD_LOW_WATERMARK_LAUNCH (STDIO_IN_FD + 1)
 
 /* Defensive cap for fallback close loops so a huge/INFINITY rlim_cur
  * cannot cause millions of EBADF close() iterations. */
@@ -224,9 +233,9 @@ static int fd_ceiling(int lowWatermark) {
 }
 
 /* Close every fd >= lowWatermark. Launch mode passes
- * FD_LOW_WATERMARK_LAUNCH (7) so the inherited pinned rootfs fd 5 AND the
- * console-output alias fd 6 survive (krun_add_disk("/dev/fd/5") and
- * krun_set_console_output("/dev/fd/6")); BLK-probe mode passes
+ * FD_LOW_WATERMARK_LAUNCH (8) so the inherited pinned rootfs fd 5 AND the
+ * krun-stdio port fds 6/7 survive (krun_add_disk("/dev/fd/5") and
+ * krun_add_console_port_inout("krun-stdio", 7, 6)); BLK-probe mode passes
  * FD_LOW_WATERMARK (5) — it has neither fd to keep. */
 static void mass_close_fds(int lowWatermark) {
 #ifdef __linux__
@@ -633,6 +642,14 @@ static void parse_launch_spec(const char *json, size_t len, VmLaunchSpec *out) {
     if (fcntl(ROOTFS_INHERIT_FD, F_GETFD) < 0)
         die("rootfs fd %d not open -- engine did not dup2 it (or mass-close dropped it)",
             ROOTFS_INHERIT_FD);
+    /* The workload stdio relay rides the "krun-stdio" named port on fd 6
+     * (output) / fd 7 (input) — verify native-binding dup2'd them and the
+     * mass-close (watermark 8) preserved them, before the port registration
+     * would hand libkrun dead fds. */
+    if (fcntl(STDIO_OUT_FD, F_GETFD) < 0)
+        die("stdio fd %d (krun-stdio output) not open -- binding did not dup2 it", STDIO_OUT_FD);
+    if (fcntl(STDIO_IN_FD, F_GETFD) < 0)
+        die("stdio fd %d (krun-stdio input) not open -- binding did not dup2 it", STDIO_IN_FD);
 }
 
 /* ------------------------------------------------------------------ */
@@ -647,8 +664,8 @@ int main(int argc, char **argv) {
 int vm_helper_main(int argc, char **argv) {
     /* Decide the mode BEFORE mass-closing: the BLK probe has no inherited
      * rootfs fd, so it may close everything >= FD_LOW_WATERMARK (5); launch
-     * mode must preserve the pinned rootfs fd 5 that the launch spec
-     * references as /dev/fd/5, so its watermark is 6. */
+     * mode must preserve the pinned rootfs fd 5 plus the krun-stdio port fds
+     * 6/7, so its watermark is 8 (FD_LOW_WATERMARK_LAUNCH). */
     const int isBlkProbe = (argc >= 2 && strcmp(argv[1], "--has-blk") == 0);
     mass_close_fds(isBlkProbe ? FD_LOW_WATERMARK : FD_LOW_WATERMARK_LAUNCH);
 
@@ -722,31 +739,37 @@ int vm_helper_main(int argc, char **argv) {
     /* 9. VM config: vCPUs BEFORE RAM (v1.19.4 signature). */
     krun_check(krun_set_vm_config((uint32_t)ctx, spec.cpus, spec.memMib), "set_vm_config");
 
-    /* 10. Control port: multiport console, then register the
-     *     "octopus-control" port on fd 3 (input) / fd 4 (output). */
+    /* 10. Console: one multiport device carrying two named generic I/O ports.
+     *     - "octopus-control" on fd 3 (input) / fd 4 (output): ONLY the
+     *       ready/error frame (proven to relay and survive krun_start_enter's
+     *       stdin/stdout takeover).
+     *     - "krun-stdio" on fd 7 (input: host writes) / fd 6 (output: guest
+     *       writes): the WORKLOAD's stdio. The guest bootstrap (vm-init) opens
+     *       this port BY NAME via /sys/class/virtio-ports and dup2's it onto
+     *       the workload's fd 0/1/2 before execve, so workload output reaches
+     *       the host's raw.stdout and host writes to raw.stdin reach the
+     *       workload. Two inout ports on one multiport device do NOT panic
+     *       (verified), unlike krun_add_virtio_console_default (2nd console
+     *       device) or /dev/null-backed input, which panic device.rs:263.
+     *
+     *     A named port is REQUIRED for workload stdio: krun_start_enter takes
+     *     over fd 0/1 (libkrun.h), so the implicit console (hvc0) cannot be
+     *     sunk to fd 1, and krun_set_console_output("/dev/fd/N") drops the
+     *     bytes too (verified twice). The implicit console is left in place
+     *     but unused; its libkrun logger output keeps flowing to the helper's
+     *     stderr for diagnostics. */
     int32_t console_id = krun_add_virtio_console_multiport((uint32_t)ctx);
     if (console_id < 0) die("krun_add_virtio_console_multiport failed: %d", (int)console_id);
     krun_check(krun_add_console_port_inout((uint32_t)ctx, (uint32_t)console_id,
                                            "octopus-control",
                                            /*input_fd=*/ H2G_READ_FD,
                                            /*output_fd=*/ G2H_WRITE_FD),
-               "add_console_port_inout");
-
-    /* 10b. Point the guest's implicit console (hvc0 == /dev/console) output at
-     *      "/dev/fd/6" -- the helper's stdout pipe, aliased to fd 6 by
-     *      native-binding's spawn file actions -- so workload stdio reaches the
-     *      host RAW (no libkrun log prefix). The guest bootstrap (vm-init)
-     *      dup2's /dev/console onto the workload's fd 0/1/2 before execve. We
-     *      must NOT target "/dev/fd/1": krun_start_enter takes over stdin/stdout
-     *      (libkrun.h), so a console sink on fd 1 resolves back into the VMM's
-     *      own console bridge and is dropped (verified: empty helper stdout).
-     *      fd 6 is untouched by that takeover. Rejected too: a console port on
-     *      fd 0/1 (never relayed), krun_add_virtio_console_default (2nd console
-     *      device), and /dev/null-backed or 2nd data ports -- those panic
-     *      libkrun device.rs:263. NOOP if the implicit console is disabled; we
-     *      never disable it. */
-    krun_check(krun_set_console_output((uint32_t)ctx, "/dev/fd/6"),
-               "set_console_output");
+               "add_console_port_inout(octopus-control)");
+    krun_check(krun_add_console_port_inout((uint32_t)ctx, (uint32_t)console_id,
+                                           "krun-stdio",
+                                           /*input_fd=*/ STDIO_IN_FD,
+                                           /*output_fd=*/ STDIO_OUT_FD),
+               "add_console_port_inout(krun-stdio)");
 
     /* 11. Set the guest PID 1 to the trusted bootstrap. bootstrapArgv is
      *     the single authoritative workload representation; trustedEnv is

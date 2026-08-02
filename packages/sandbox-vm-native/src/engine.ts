@@ -147,7 +147,8 @@ const H2G_READ_FD = 3;
 const G2H_WRITE_FD = 4;
 /** Fixed fd slot the rootfs image is inherited at; the launch spec references /dev/fd/5. */
 const ROOTFS_INHERIT_FD = 5;
-/** Minimum temp slot for F_DUPFD_CLOEXEC — comfortably above 0/1/2/3/4/5. */
+/** Minimum temp slot for F_DUPFD_CLOEXEC — comfortably above 0-7 (the child's
+ * stdio 0/1/2, control 3/4, rootfs 5, and krun-stdio port 6/7). */
 const DUPFD_MIN = 10;
 
 /** A single file_actions entry handed to the spawn binding. */
@@ -156,10 +157,13 @@ export type SpawnFileAction =
   | { kind: 'addclose'; fd: number };
 
 /**
- * The raw child returned by `deps.spawn`. stdio here are the helper's
- * fd1/fd2 (workload stdout/stderr) bridged into Node streams; the control
- * read stream is the parent's g2hRead end. `exited` resolves with the helper
- * subprocess exit status (krun_start_enter is authoritative inside the helper).
+ * The raw child returned by `deps.spawn`. stdout/stderr are Node streams over
+ * the pipes the binding dup2'd into the child (fd1/fd2); the guest workload's
+ * stdout rides the "krun-stdio" named console port onto that same stdout pipe
+ * (child fd 6). stdin is the host end of the krun-stdio port's input pipe
+ * (writes reach the workload's fd 0). The control read stream is the parent's
+ * g2hRead end. `exited` resolves with the helper subprocess exit status
+ * (krun_start_enter is authoritative inside the helper).
  */
 export interface VmInstanceRaw {
   stdin: NodeJS.WritableStream;
@@ -896,31 +900,31 @@ export class VmEngineImpl implements VmEnginePort {
       parentCloseFds,
     );
 
-    // --- Approach A: bridge the retained control + stdin fds HERE, before
+    // --- Approach A: bridge the retained control fd HERE, before
     // waitForReady(). The engine created g2hRead/h2gWrite via deps.pipe() and
-    // retains them (engine.ts:475-476, NOT in parentCloseFds:519). The binding
-    // cannot bridge them because the locked spawn() signature does not carry
-    // the retained fd numbers. The VmInstanceRaw doc-comment (engine.ts:122-
-    // 132) says controlRead IS the parent's g2hRead end; waitForReady()
-    // attaches data/end listeners to raw.controlRead (683-685), so it MUST be
-    // a real fd-backed stream emitting the guest's {"ready":true} frame — an
-    // empty PassThrough would hang until readyTimeoutMs and throw (CR-5
-    // review Critical #1). autoClose:false keeps fd ownership with the
-    // VmInstance lifecycle.
+    // retains them (NOT in parentCloseFds). The binding cannot bridge g2hRead
+    // because the locked spawn() signature does not carry the retained fd
+    // number. waitForReady() attaches data/end listeners to raw.controlRead,
+    // so it MUST be a real fd-backed stream emitting the guest's
+    // {"ready":true} frame — an empty PassThrough would hang until
+    // readyTimeoutMs and throw (CR-5 review Critical #1). autoClose:false
+    // keeps fd ownership with the VmInstance lifecycle.
     //
     // We only override when the binding tags its placeholder with
-    // `__octopusNeedsEngineOverride` (the production koffi binding does this;
-    // the L1 fake returns a real working PassThrough and must NOT be
-    // clobbered — its fds are fake numbers).
+    // `__octopusNeedsEngineOverride` (the production koffi binding does this
+    // for controlRead; the L1 fake returns a real working PassThrough and
+    // must NOT be clobbered — its fds are fake numbers).
+    //
+    // raw.stdin/raw.stdout are NOT overridden: the production binding returns
+    // real fd-backed streams wired to the guest's "krun-stdio" named console
+    // port (workload stdin/stdout), and the L1 fake returns working
+    // PassThroughs. (h2gWrite — the host->guest control input — is retained
+    // for future commands but is not the workload's stdin.)
     const rawAny = raw as {
       controlRead: NodeJS.ReadableStream & { __octopusNeedsEngineOverride?: boolean };
-      stdin: NodeJS.WritableStream & { __octopusNeedsEngineOverride?: boolean };
     };
     if (rawAny.controlRead?.__octopusNeedsEngineOverride) {
       rawAny.controlRead = createReadStream('', { fd: g2hRead, autoClose: false });
-    }
-    if (rawAny.stdin?.__octopusNeedsEngineOverride) {
-      rawAny.stdin = createWriteStream('', { fd: h2gWrite, autoClose: false });
     }
 
     // --- Ready handshake: wait for {"ready":true} on g2hRead, or {"error":...},
