@@ -535,6 +535,13 @@ static void redirect_workload_stdio(void) {
     dup2(p, STDOUT_FILENO);
     dup2(p, STDERR_FILENO);
     close(p);
+    /* TEMP DIAG: prove the relay end-to-end. If this line reaches the host's
+     * helper stdout, then fd 1 -> krun-stdio port -> host works, and any
+     * missing workload output is a workload (node) buffering issue, not a
+     * wiring issue. */
+    const char *m = "VM-INIT-STDIO-RELAY-OK\n";
+    ssize_t wr = write(STDOUT_FILENO, m, strlen(m));
+    (void)wr;
 }
 
 /* ------------------------------------------------------------------ */
@@ -657,9 +664,19 @@ int main(int argc, char **argv) {
     if (chdir(cwd_real) < 0) {
         free(resolved); launchspec_free(&ls); die("chdir cwd failed");
     }
+    /* TEMP DIAG: report krun-stdio port discovery over the (still-open)
+     * control port so the CI log shows whether the guest finds the port. */
+    {
+        int dfd = open_named_port("krun-stdio");
+        char dframe[96];
+        int dn = snprintf(dframe, sizeof(dframe),
+                          "{\"diag\":\"stdio-port fd=%d\"}", dfd);
+        if (dn > 0) control_write(dframe);
+        if (dfd >= 0) close(dfd);
+    }
     if (g_control_fd >= 0) { close(g_control_fd); g_control_fd = -1; }
 
-    /* Relay the workload's fd 0/1/2 to the krun default-console ports so its
+    /* Relay the workload's fd 0/1/2 onto the single krun-stdio port so its
      * console output reaches the host (separate from the now-closed control
      * port). Must run after the control fd is closed and before execve. */
     redirect_workload_stdio();
