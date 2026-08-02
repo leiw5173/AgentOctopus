@@ -167,8 +167,14 @@ jobs:
       # darwin-arm64 host-side helper + libkrun/libkrunfw are built in the
       # macOS vm-lane itself. This matches the release shipping model:
       # linux-produced rootfs, darwin runtime.
-      - name: Install e2fsprogs for VM rootfs build
-        run: sudo apt-get install -y --no-install-recommends e2fsprogs
+      - name: Install e2fsprogs + aarch64 cross toolchain for VM rootfs build
+        run: |
+          # e2fsprogs: mke2fs for the ext4 rootfs. gcc-aarch64-linux-gnu: the
+          # cross compiler build-vm-rootfs.mjs uses to build the arm64 guest
+          # vm-init/vsock-forwarder (the x64 host cc would emit x86-64 binaries
+          # that the ARM guest cannot exec). libc6-dev-arm64-cross provides the
+          # aarch64 libc needed for -static linking.
+          sudo apt-get install -y --no-install-recommends e2fsprogs gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Fetch pinned ARM64 Linux guest node (for the linux-arm64 rootfs)
         shell: bash
         run: |
