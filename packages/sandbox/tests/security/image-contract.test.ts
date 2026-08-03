@@ -137,6 +137,28 @@ describe('image contract', () => {
     expect(JSON.parse(out.stdout.trim())).toEqual([]);
   }, DOCKER_TIMEOUT);
 
+  it('runtime ships a read-only root-owned /opt/octopus-boot bootstrap', async (ctx) => {
+    if (!dockerAvailable) return ctx.skip();
+    const probe = [
+      'const fs=require("fs");',
+      'const out={};',
+      'out.boot=fs.readdirSync("/opt/octopus-boot");',
+      'const bs=fs.statSync("/opt/octopus-boot/bootstrap.cjs");',
+      'out.mode=(bs.mode&0o777).toString(8);out.uid=bs.uid;out.gid=bs.gid;',
+      'out.undici=fs.existsSync("/opt/octopus-boot/undici/index.js");',
+      // Writable by uid 65534? Attempt to open for write must fail (read-only fs + 0555/0444).
+      'try{fs.writeFileSync("/opt/octopus-boot/_w","x");out.writable=true}catch{out.writable=false}',
+      'console.log(JSON.stringify(out));',
+    ].join('');
+    const out = await dockerRun(runtimeImage, ['node', '-e', probe]);
+    expect(out.exitCode).toBe(0);
+    const r = JSON.parse(out.stdout.trim());
+    expect(r.boot).toContain('bootstrap.cjs');
+    expect(r.undici).toBe(true);
+    expect(r.uid).toBe(0);           // root-owned
+    expect(r.writable).toBe(false);  // not writable by the runtime uid (65534)
+  }, DOCKER_TIMEOUT);
+
   it('proxy boots from its own filesystem without source or node_modules mounts', async (ctx) => {
     if (!dockerAvailable) return ctx.skip();
     // Start the proxy image with NO mounts and NO network; provision the
@@ -220,5 +242,11 @@ describe('image contract', () => {
         proxy: { artifact: lock.proxyImage },
       }),
     ).toBeTruthy();
+  });
+
+  it('lock pins undici version + sha256 for the vendored egress dependency', () => {
+    expect(lock.undiciVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(lock.undiciTarball).toMatch(/^https:\/\/registry\.npmjs\.org\/undici\/+-\/undici-.*\.tgz$/);
+    expect(lock.undiciSha256).toMatch(/^[0-9a-f]{64}$/);
   });
 });

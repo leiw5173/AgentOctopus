@@ -51,6 +51,12 @@ export function buildDockerArgs(input: {
   args.push('-e', `SSL_CERT_FILE=${prepare.guestCaBundlePath}`);
   args.push('-e', `NODE_EXTRA_CA_CERTS=${prepare.guestCaBundlePath}`);
   args.push('-e', `REQUESTS_CA_BUNDLE=${prepare.guestCaBundlePath}`);
+  // Route built-in Node fetch through the egress proxy (P1): the distroless
+  // guest's fetch ignores HTTP(S)_PROXY, so force-load the read-only bootstrap
+  // via NODE_OPTIONS. Placed AFTER spec.env so Docker last-wins — a skill cannot
+  // override it (and OCTOPUS_INPUT/env-hygiene already rejects caller NODE_OPTIONS,
+  // but defense-in-depth: trusted env always appended last).
+  args.push('-e', `NODE_OPTIONS=--require /opt/octopus-boot/bootstrap.cjs`);
   args.push(image, ...spec.command);
   return args;
 }

@@ -33,7 +33,7 @@ import { DefaultProxyLauncher, type ProxyHandle } from '../../src/proxy/launcher
 import type { ResolvedSecrets } from '../../src/proxy/egress-proxy.js';
 import type { SandboxSkillDescriptor, SandboxRequest } from '../../src/types.js';
 import { requirePinnedImageRef, makeProbeSkill } from './harness.js';
-import { LANE_PROBE_SCRIPT, LANE_PROBE_REL, HTTP_PROBE_SCRIPT, HTTP_PROBE_REL } from './lane-probe.js';
+import { LANE_PROBE_SCRIPT, LANE_PROBE_REL, HTTP_PROBE_SCRIPT, HTTP_PROBE_REL, FETCH_PROBE_SCRIPT, FETCH_PROBE_REL } from './lane-probe.js';
 
 /** Default per-probe resource caps (tight, so caps/timeout tests stay fast). */
 const DEFAULT_TIMEOUT_MS = 2_000;
@@ -102,6 +102,7 @@ export async function setupDockerSandbox(opts: DockerSandboxOptions = {}): Promi
   await makeProbeSkill(skillSrc);
   await writeFile(join(skillSrc, LANE_PROBE_REL), LANE_PROBE_SCRIPT, 'utf8');
   await writeFile(join(skillSrc, HTTP_PROBE_REL), HTTP_PROBE_SCRIPT, 'utf8');
+  await writeFile(join(skillSrc, FETCH_PROBE_REL), FETCH_PROBE_SCRIPT, 'utf8');
 
   const snapshot = await buildSnapshot({
     sourceDir: skillSrc,

@@ -243,6 +243,25 @@ program
   });
 
 program
+  .command('doctor')
+  .description('Check whether skills can execute in the sandbox (runtime profiles, images, installationId)')
+  .action(async () => {
+    const { runDoctor } = await import('./doctor.js');
+    const { ok, report } = await runDoctor();
+    console.log(chalk.bold('\n🐙 Sandbox readiness\n'));
+    for (const c of report) {
+      const mark = c.ok ? chalk.green('✔') : chalk.red('✘');
+      console.log(`${mark} ${c.name} ${chalk.gray('— ' + c.detail)}`);
+    }
+    if (!ok) {
+      console.log(chalk.yellow('\nSee docs/core-concepts/sandbox.md to fix the failing checks.\n'));
+      process.exitCode = 1;
+    } else {
+      console.log(chalk.green('\nSandbox execution ready.\n'));
+    }
+  });
+
+program
   .command('ask <query>')
   .description('Ask AgentOctopus to route your request to the best skill')
   .option('--no-prompt', 'Skip the interactive feedback prompt (for programmatic use)')

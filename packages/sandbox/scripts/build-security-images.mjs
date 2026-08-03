@@ -104,7 +104,11 @@ function renderRuntimeDockerfile(nodeBase, distrolessBase) {
 FROM ${nodeBase} AS node-source
 FROM ${distrolessBase}
 COPY --from=node-source /usr/local/bin/node /usr/local/bin/node
-USER 65532:65532
+# octopus-boot: read-only, root-owned bootstrap + vendored undici. Mode 0555/0444
+# so the runtime uid (65534) can read but never write. Build context stages
+# bootstrap.cjs and undici/ under octopus-boot/.
+COPY --chmod=0555 octopus-boot/ /opt/octopus-boot/
+USER 65534:65534
 WORKDIR /skill
 ENV NODE_ENV=production PATH=/usr/local/bin
 # Deliberately NO ENTRYPOINT and NO CMD: DockerBackend appends ExecSpec.command verbatim.
@@ -184,6 +188,20 @@ async function main() {
     await fs.mkdir(rtDir, { recursive: true });
     const rtDockerfile = path.join(rtDir, 'Dockerfile');
     await fs.writeFile(rtDockerfile, renderRuntimeDockerfile(nodeBase, distrolessBase));
+    // Stage octopus-boot (bootstrap.cjs + vendored undici) into the runtime context.
+    const bootDir = path.join(rtDir, 'octopus-boot');
+    await fs.mkdir(bootDir, { recursive: true });
+    await fs.copyFile(
+      path.join(PKG_ROOT, 'images', 'runtime', 'bootstrap.cjs'),
+      path.join(bootDir, 'bootstrap.cjs'),
+    );
+    // Vendor undici (pinned + sha256-checked) then copy it in.
+    await execFileAsync(process.execPath, [path.join(PKG_ROOT, 'scripts', 'vendor-undici.mjs')]);
+    await fs.cp(
+      path.join(PKG_ROOT, 'images', 'runtime', 'undici'),
+      path.join(bootDir, 'undici'),
+      { recursive: true },
+    );
     await dockerBuild({ contextDir: rtDir, dockerfile: rtDockerfile, tag: RUNTIME_TAG });
 
     // Proxy context (needs the bundle in-context).

@@ -11,8 +11,15 @@ import { SkillComposer } from './composer.js';
 import type { Router } from './router.js';
 import { SandboxRunner } from './sandbox-runner.js';
 import { createDefaultSandboxRunner } from './sandbox-runner-factory.js';
+import type { ExecutionContext, TelemetrySink, AdapterCompletedEvent } from './execution-context.js';
+import { runOutputValidator, type OutputValidator } from './output-validator.js';
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
+
+/** Bounded budget for the injected output validator — a hung validator must
+ *  never stall execute(). */
+const OUTPUT_VALIDATOR_TIMEOUT_MS = 5000;
 
 const SKILL_EXECUTION_SYSTEM_PROMPT = `You are a skill execution agent. Given a skill's instructions and a user query, determine the exact command to run.
 
@@ -108,18 +115,33 @@ export interface UnsupportedRuntimeRequirementsResult {
   message: string;
 }
 
+export interface ExecutorOptions {
+  execContext?: ExecutionContext;
+  telemetrySink?: TelemetrySink;
+  outputValidator?: OutputValidator;
+  /** Per-skill output validators keyed by skill name. When present, the
+   *  validator for the executing skill is used; when absent for a skill, falls
+   *  back to the single outputValidator option (or 'no validator'). */
+  outputValidators?: Record<string, OutputValidator>;
+}
+
 export class Executor {
   private http = new HttpAdapter();
   private mcp = new McpAdapter();
   private subprocess = new SubprocessAdapter();
   private composer?: SkillComposer;
   private readonly sandboxRunner: SandboxRunner;
+  private readonly execContext?: ExecutionContext;
+  private readonly telemetrySink?: TelemetrySink;
+  private readonly outputValidator?: OutputValidator;
+  private readonly outputValidators?: Record<string, OutputValidator>;
 
   constructor(
     private registry: SkillRegistry,
     private chatClient?: ChatClient,
     private router?: Router,
     sandboxRunner?: SandboxRunner,
+    options?: ExecutorOptions,
   ) {
     // The SandboxRunner is the SOLE execution boundary for every non-MCP skill
     // path. Inject one in tests; production call sites get the default built
@@ -128,15 +150,19 @@ export class Executor {
     if (this.router && this.chatClient) {
       this.composer = new SkillComposer(this.registry, this.router, this, this.chatClient);
     }
+    this.execContext = options?.execContext;
+    this.telemetrySink = options?.telemetrySink;
+    this.outputValidator = options?.outputValidator;
+    this.outputValidators = options?.outputValidators;
   }
 
   /**
    * Build the invocation context every adapter call receives: a sandbox port
    * already bound to this skill, plus the payload and timeout.
    */
-  private invocationContext(skill: LoadedSkill, payload: unknown): AdapterInvocationContext {
+  private invocationContext(skill: LoadedSkill, payload: unknown, runner: SandboxRunner = this.sandboxRunner): AdapterInvocationContext {
     return {
-      sandbox: this.sandboxRunner.bind(skill),
+      sandbox: runner.bind(skill),
       payload,
       timeoutMs: getConfig().execution.timeoutMs,
     };
@@ -167,8 +193,26 @@ export class Executor {
     return view;
   }
 
-  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean } = {}): Promise<ExecutionResult | CredentialMissingResult | UnsupportedRuntimeRequirementsResult> {
+  async execute(skill: LoadedSkill, input: Record<string, unknown>, opts: { debug?: boolean; execContext?: ExecutionContext } = {}): Promise<ExecutionResult | CredentialMissingResult | UnsupportedRuntimeRequirementsResult> {
     const { debug = false } = opts;
+    // T3.7 — per-request ExecutionContext. When provided, it overrides the
+    // constructor-level execContext for THIS call's telemetry AND is threaded
+    // into a short-lived SandboxRunner (via withExecContext) so sandbox
+    // emissions share the same traceId. Never mutates the shared singletons —
+    // safe under concurrent requests.
+    //
+    // FIX: generate ONE executionId per call when the incoming ctx lacks one,
+    // and build the augmented context once. The SAME augmented context is used
+    // for BOTH the runner (withExecContext) AND emitAdapterCompleted, so
+    // adapter.completed and sandbox.completed share the same executionId.
+    // Without this, each fallback to randomUUID() produced a different UUID,
+    // preventing the DebugTelemetryBuffer from merging them into one runs[].
+    const baseExecContext = opts.execContext ?? this.execContext;
+    const executionId = baseExecContext?.executionId ?? randomUUID();
+    const effectiveExecContext: ExecutionContext | undefined = baseExecContext
+      ? { ...baseExecContext, executionId }
+      : { executionId };
+    const runner = opts.execContext ? this.sandboxRunner.withExecContext(effectiveExecContext) : this.sandboxRunner;
 
     let adapterResult: AdapterResult | undefined;
     let latencyMs: number = 0;
@@ -258,12 +302,12 @@ export class Executor {
     try {
       // For subprocess skills, check if we should use LLM-guided execution
       if (adapter === this.subprocess && this.chatClient) {
-        adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter, instructions);
+        adapterResult = await this.executeSubprocessWithLLM(skill, input, adapter, instructions, runner);
       } else if (skill.manifest.adapter === 'http' && !skill.manifest.endpoint && this.chatClient) {
         // HTTP skill with no endpoint — use LLM-guided curl execution
-        adapterResult = await this.executeHttpWithLLM(skill, input, instructions);
+        adapterResult = await this.executeHttpWithLLM(skill, input, instructions, runner);
       } else {
-        adapterResult = await adapter.invoke({ skill, input }, this.invocationContext(skill, input));
+        adapterResult = await adapter.invoke({ skill, input }, this.invocationContext(skill, input, runner));
       }
     } catch (err) {
       latencyMs = Date.now() - startTime;
@@ -302,6 +346,35 @@ export class Executor {
         adapterResult = { success: false, error: httpError, rawText: adapterResult.rawText };
       }
     }
+
+    // Post-execution: optional caller-injected output validation. Runs ONLY
+    // when the adapter succeeded — a failed output has no payload to validate.
+    // When no validator is injected, surface the explicit 'no validator'
+    // sentinel so downstream telemetry consumers can distinguish it from a
+    // real validator failure.
+    //
+    // Validator lookup order:
+    //   1. Per-skill map (outputValidators[skill.name]) — preferred for E2E
+    //   2. Single outputValidator — backward-compatible fallback
+    //   3. No validator → 'no validator' sentinel
+    let outputValidated = false;
+    let outputValidationReason: string | null = null;
+    const activeValidator = this.outputValidators?.[skill.manifest.name] ?? this.outputValidator;
+    if (!adapterResult.success) {
+      outputValidationReason = 'adapter failed';
+    } else if (!activeValidator) {
+      outputValidationReason = 'no validator';
+    } else {
+      const vr = await runOutputValidator(activeValidator, adapterResult, OUTPUT_VALIDATOR_TIMEOUT_MS);
+      outputValidated = vr.ok;
+      outputValidationReason = vr.reason;
+    }
+
+    // T3.4: emit adapter.completed AFTER the detectHttpErrorInOutput mutation
+    // so adapterSuccess reflects the FINAL success flag, and after the output
+    // validator so the event carries its verdict. Fire-and-forget: a throwing
+    // sink must never break execute(). NEVER carry rawText/output content.
+    this.emitAdapterCompleted(adapterResult, outputValidated, outputValidationReason, effectiveExecContext);
 
     // Post-execution: detect auth errors and append setup guidance
     const authGuidance = await this.diagnoseAuthError(adapterResult, skill, instructions);
@@ -368,18 +441,19 @@ If you're not confident about the URL, say "Visit the provider's website" instea
     input: Record<string, unknown>,
     adapter: { invoke: (input: { skill: LoadedSkill; input: Record<string, unknown> }, context: AdapterInvocationContext) => Promise<AdapterResult> },
     instructions: string,
+    runner: SandboxRunner = this.sandboxRunner,
   ): Promise<AdapterResult> {
     // If skill has invoke.js, use standard subprocess execution
     const fs = await import('fs');
     const path = await import('path');
     const invokeJs = path.join(skill.dirPath, 'scripts', 'invoke.js');
     if (fs.existsSync(invokeJs)) {
-      return adapter.invoke({ skill, input }, this.invocationContext(skill, input));
+      return adapter.invoke({ skill, input }, this.invocationContext(skill, input, runner));
     }
 
     // LLM-guided: ask the LLM what command to run based on SKILL.md instructions
     if (!this.chatClient) {
-      return adapter.invoke({ skill, input }, this.invocationContext(skill, input));
+      return adapter.invoke({ skill, input }, this.invocationContext(skill, input, runner));
     }
 
     const query = (input.query ?? input.text ?? '') as string;
@@ -415,7 +489,7 @@ If you're not confident about the URL, say "Visit the provider's website" instea
 
     if (!trimmedCommand) {
       // Fallback to standard subprocess execution
-      return adapter.invoke({ skill, input }, this.invocationContext(skill, input));
+      return adapter.invoke({ skill, input }, this.invocationContext(skill, input, runner));
     }
 
     // Safety net: rewrite any absolute path to the skill's scripts/ directory.
@@ -449,7 +523,7 @@ If you're not confident about the URL, say "Visit the provider's website" instea
     // Execute the LLM-determined command INSIDE the sandbox. The runner
     // rewrites relative script paths to /skill/..., sets cwd=/skill, and
     // applies guest env hygiene (payload → OCTOPUS_INPUT). No host spawn.
-    const result = await this.sandboxRunner.bind(skill).run({
+    const result = await runner.bind(skill).run({
       command: ['bash', '-c', trimmedCommand],
       invocation: { payload: input },
       timeoutMs: getConfig().execution.timeoutMs,
@@ -474,6 +548,7 @@ If you're not confident about the URL, say "Visit the provider's website" instea
     skill: LoadedSkill,
     input: Record<string, unknown>,
     instructions: string,
+    runner: SandboxRunner = this.sandboxRunner,
   ): Promise<AdapterResult> {
     if (!this.chatClient) {
       return { success: false, error: `Skill "${skill.manifest.name}" has no endpoint and no LLM available for guided execution` };
@@ -566,7 +641,7 @@ If you're not confident about the URL, say "Visit the provider's website" instea
     // Execute the LLM-determined curl command INSIDE the sandbox. Egress goes
     // only through the per-session egress proxy, which enforces host/method/path
     // and injects credentials — no host fetch/spawn, no process.env keys passed.
-    const result = await this.sandboxRunner.bind(skill).run({
+    const result = await runner.bind(skill).run({
       command: ['bash', '-c', trimmedCommand],
       invocation: { payload: input },
       timeoutMs: getConfig().execution.timeoutMs,
@@ -837,5 +912,52 @@ If you're not confident about the URL, say "Visit the provider's website" instea
         error.includes('too many requests') || desc.includes('too many requests')) return true;
 
     return false;
+  }
+
+  /**
+   * T3.4 — emit `adapter.completed` through the optional injected sink.
+   * Fire-and-forget: a throwing sink is caught and ignored. NEVER carries
+   * rawText/output content — only structured metadata. Per the binding brief
+   * note, the Executor NEVER emits `request.completed`/`request.failed`; the
+   * gateway /ask handler owns the terminal event.
+   */
+  private emitAdapterCompleted(
+    adapterResult: AdapterResult,
+    outputValidated: boolean,
+    outputValidationReason: string | null,
+    execContextOverride?: ExecutionContext,
+  ): void {
+    if (!this.telemetrySink) return;
+    try {
+      const ctx = execContextOverride ?? this.execContext;
+      const event: AdapterCompletedEvent = {
+        kind: 'adapter.completed',
+        traceId: ctx?.traceId,
+        executionId: ctx?.executionId ?? randomUUID(),
+        adapterSuccess: adapterResult.success,
+        errorCode: this.normalizeErrorCode(adapterResult.error),
+        outputValidated,
+        outputValidationReason,
+      };
+      this.telemetrySink.emit(event);
+    } catch {
+      // telemetry must never break execute()
+    }
+  }
+
+  /**
+   * Normalize an adapter error string to a stable machine-readable code.
+   * Maps common cases; falls back to the first whitespace-separated token;
+   * returns null when there is no error.
+   */
+  private normalizeErrorCode(error: string | undefined): string | null {
+    if (!error) return null;
+    if (/EAI_AGAIN/.test(error)) return 'EAI_AGAIN';
+    if (/ECONNREFUSED/.test(error)) return 'ECONNREFUSED';
+    if (/host not granted/i.test(error)) return 'host not granted';
+    const httpMatch = error.match(/\b(4\d\d|5\d\d)\b/);
+    if (httpMatch) return httpMatch[1]!;
+    const firstToken = error.trim().split(/\s+/)[0];
+    return firstToken && firstToken.length > 0 ? firstToken : null;
   }
 }

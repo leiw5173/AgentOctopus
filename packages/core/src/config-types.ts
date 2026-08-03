@@ -27,6 +27,13 @@ export const GatewayConfigSchema = z.object({
   corsOrigins: z.array(z.string()).default(['*']),
   cloudUrl: z.string().nullable().default(null),
   syncOnStartup: z.boolean().default(true),
+  debugEndpoints: z
+    .object({
+      enabled: z.boolean().default(false),
+      includeQuery: z.boolean().default(false),
+      bufferSize: z.number().int().positive().default(10),
+    })
+    .prefault({}),
 });
 export type GatewayConfigSection = z.infer<typeof GatewayConfigSchema>;
 

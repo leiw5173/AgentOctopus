@@ -45,7 +45,7 @@ export function defaultSnapshotStoreDir(): string {
  * working for call sites that cannot reach the LLM-guided credential paths
  * (web singleton, multi-agent instances).
  */
-export function createDefaultSandboxRunner(secretProvider?: SecretProvider): SandboxRunner {
+export function createDefaultSandboxRunner(secretProvider?: SecretProvider, options?: { telemetrySink?: import('./execution-context.js').TelemetrySink }): SandboxRunner {
   const config = getConfig().sandbox;
   const sessionId = randomUUID().slice(0, 8);
   const backends: SandboxBackend[] = [
@@ -57,6 +57,7 @@ export function createDefaultSandboxRunner(secretProvider?: SecretProvider): San
     snapshotStoreDir: defaultSnapshotStoreDir(),
     backends,
     ...(secretProvider ? { secretProvider } : {}),
+    ...(options?.telemetrySink ? { telemetrySink: options.telemetrySink } : {}),
   });
 }
 
