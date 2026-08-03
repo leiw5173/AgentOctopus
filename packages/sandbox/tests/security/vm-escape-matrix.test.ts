@@ -44,7 +44,10 @@ beforeAll(async () => {
       imageBuilder: built.imageBuilder,
     });
     vmAvailable = await be.probe();
-  } catch { vmAvailable = false; }
+    if (!vmAvailable) {
+      try { console.error('[vm-lane DIAG] engine.probe() =>', JSON.stringify(await built.engine.probe())); } catch (e) { console.error('[vm-lane DIAG] engine.probe() threw:', e); }
+    }
+  } catch (e) { console.error('[vm-lane DIAG] beforeAll threw:', e); vmAvailable = false; }
 });
 
 function needVm(ctx: { skip: () => void }): boolean {

@@ -50,7 +50,12 @@ beforeAll(async () => {
       imageBuilder: built.imageBuilder,
     });
     vmAvailable = await be.probe();
-  } catch { vmAvailable = false; }
+    // DIAG: surface WHY the probe is unavailable — the boolean alone skips
+    // all 16 tests silently and the fail-closed gate gives no reason.
+    if (!vmAvailable) {
+      try { console.error('[vm-lane DIAG] engine.probe() =>', JSON.stringify(await built.engine.probe())); } catch (e) { console.error('[vm-lane DIAG] engine.probe() threw:', e); }
+    }
+  } catch (e) { console.error('[vm-lane DIAG] beforeAll threw:', e); vmAvailable = false; }
 });
 
 /** Skip helper: every case requires the real VM lane. */
