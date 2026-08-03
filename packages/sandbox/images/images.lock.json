@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "nodeSourceBase": "node@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3",
+  "distrolessBase": "gcr.io/distroless/cc-debian12@sha256:e8e7ee4b8b106d4c5fde9e422a321b2b8a2d5cca546c97adcce927f3e1d36e36",
+  "runtimeImage": "agentoctopus/skill-runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "proxyImage": "agentoctopus/egress-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "undiciVersion": "6.24.1",
+  "undiciTarball": "https://registry.npmjs.org/undici/-/undici-6.24.1.tgz",
+  "undiciSha256": "e9c2dfa0751da52ebe52b3475f0ee56ed37c0f8b85fabdfaa1eb39aad52b4222",
+  "_comment": "nodeSourceBase/distrolessBase are the reviewed, registry-resolved source digests pinned once by the maintainer (node:22-bookworm-slim + gcr.io/distroless/cc-debian12). runtimeImage/proxyImage are the PUSHED manifest-list digests, written atomically by 'security:images -- --push <registry>' (a maintainer/CI step). For local builds the immutable reference is the local image ID from `docker image inspect --format '{{.Id}}' agentoctopus/skill-runtime:test`; the placeholder digests below are never consumed locally because the local lane passes OCTOPUS_TEST_RUNTIME_IMAGE/OCTOPUS_TEST_PROXY_IMAGE."
+}

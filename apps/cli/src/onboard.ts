@@ -12,7 +12,10 @@ interface AgentOnboardConfig {
   name: string;
   dmPolicy: 'pairing' | 'open';
   sandboxEnabled: boolean;
-  sandboxBackend: 'docker' | 'ssh' | 'openshell' | 'none';
+  // Mirrors the canonical SandboxConfigSchema.defaultBackend enum
+  // (packages/sandbox/src/schema.ts) — feat/sandbox removed 'openshell';
+  // restricted local execution is now opt-in 'os' + minIsolationLevel.
+  sandboxBackend: 'auto' | 'docker' | 'os' | 'vm' | 'ssh' | 'none';
 }
 
 interface OnboardConfig {
@@ -35,7 +38,7 @@ interface OnboardConfig {
   disabledSkills: string[];
   enableEvolution: boolean;
   agents: AgentOnboardConfig[];
-  sandboxDefaultBackend: 'docker' | 'ssh' | 'openshell' | 'none';
+  sandboxDefaultBackend: 'auto' | 'docker' | 'os' | 'vm' | 'ssh' | 'none';
   enableSlack: boolean;
   enableDiscord: boolean;
   enableTelegram: boolean;
@@ -220,15 +223,17 @@ function saveOnboardConfig(config: OnboardConfig, credentials?: Record<string, s
     };
   }
 
-  // Sandbox
+  // Sandbox. feat/sandbox's canonical schema (packages/sandbox/src/schema.ts)
+  // is fail-closed: docker.image must be an immutable digest (not a mutable
+  // tag like 'node:20-alpine'), and docker.network was removed entirely —
+  // the egress proxy is the skill's sole network egress. The wizard can't
+  // prompt for a 64-hex digest, so it sets only defaultBackend (the user's
+  // choice) and leaves docker.image/runtimeProfiles to be filled by the
+  // resolver defaults or an operator-supplied octopus.json. 'auto' is the
+  // fail-closed default; 'none' disables sandboxing.
   if (config.sandboxDefaultBackend !== 'none') {
     v2.sandbox = {
       defaultBackend: config.sandboxDefaultBackend,
-      docker: config.sandboxDefaultBackend === 'docker' ? {
-        image: 'node:20-alpine',
-        memory: '512m',
-        network: 'none',
-      } : undefined,
     };
   }
 
@@ -567,9 +572,11 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
       const sandboxBackend = sandboxEnabled ? await select({
         message: 'Sandbox backend:',
         choices: [
-          { value: 'docker' as const, name: '🐳  Docker' },
-          { value: 'ssh' as const, name: '🔑  SSH (remote)' },
-          { value: 'openshell' as const, name: '💻  OpenShell (local)' },
+          { value: 'auto' as const, name: '🛡️  Auto — fail-closed best available (recommended)', description: 'Picks the strongest isolation the host can enforce; never falls back to host' },
+          { value: 'docker' as const, name: '🐳  Docker — isolated containers', description: 'Requires Docker daemon + immutable runtime image' },
+          { value: 'os' as const, name: '🖥️  OS — restricted local execution', description: 'Opt-in restricted floor; not a pass-through' },
+          { value: 'vm' as const, name: '📦  VM — microVM (libkrun)', description: 'Strongest local isolation; macOS/Linux only' },
+          { value: 'ssh' as const, name: '🔑  SSH — remote host execution', description: 'Requires SSH access to a remote host' },
         ],
       }) : 'none' as const;
 
@@ -595,14 +602,16 @@ export async function runOnboarding(_rootDir?: string): Promise<void> {
     config.sandboxDefaultBackend = await select({
       message: 'Default sandbox backend:',
       choices: [
-        { value: 'docker' as const, name: '🐳  Docker — isolated containers', description: 'Requires Docker daemon' },
+        { value: 'auto' as const, name: '🛡️  Auto — fail-closed best available (recommended)', description: 'Picks the strongest isolation the host can enforce; never falls back to host' },
+        { value: 'docker' as const, name: '🐳  Docker — isolated containers', description: 'Requires Docker daemon + immutable runtime image' },
+        { value: 'os' as const, name: '🖥️  OS — restricted local execution', description: 'Opt-in restricted floor; not a pass-through' },
+        { value: 'vm' as const, name: '📦  VM — microVM (libkrun)', description: 'Strongest local isolation; macOS/Linux only' },
         { value: 'ssh' as const, name: '🔑  SSH — remote host execution', description: 'Requires SSH access to a remote host' },
-        { value: 'openshell' as const, name: '💻  OpenShell — local pass-through', description: 'No real isolation' },
       ],
     });
 
     if (config.sandboxDefaultBackend === 'docker') {
-      console.log(chalk.gray('  Docker sandbox configured with image: node:20-alpine'));
+      console.log(chalk.gray('  Docker sandbox uses the immutable runtime image from your octopus.json (sandbox.docker.image).'));
     } else if (config.sandboxDefaultBackend === 'ssh') {
       console.log(chalk.yellow('  ⚠  Remember to configure ssh.host and ssh.user in ~/.agentoctopus/octopus.json'));
     }

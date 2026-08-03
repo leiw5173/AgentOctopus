@@ -143,16 +143,20 @@ Optional — omit for LLM-only routing (all eligible skills go directly to LLM r
 | `agents.entries[].workspace` | string | auto | Agent workspace directory |
 | `agents.entries[].dmPolicy` | `"pairing" \| "open"` | `"pairing"` | DM security policy |
 | `agents.entries[].sandbox.enabled` | boolean | `false` | Enable sandbox for this agent |
-| `agents.entries[].sandbox.backend` | `"docker" \| "ssh" \| "openshell" \| "none"` | `"none"` | Sandbox backend |
+| `agents.entries[].sandbox.backend` | `"auto" \| "docker" \| "os" \| "vm" \| "subprocess" \| "ssh" \| "none"` | `"none"` | Sandbox backend |
 
 ### Sandbox (global defaults)
 
+The sandbox section is fail-closed: `selectBackend` probes each backend's isolation before ranking and rejects any backend below `minIsolationLevel`. Under the default `auto` + `minIsolationLevel:'full'`, if no full-isolation backend is available the run throws — never a host fallback.
+
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `sandbox.defaultBackend` | `"docker" \| "ssh" \| "openshell" \| "none"` | `"none"` | Default sandbox backend |
-| `sandbox.docker.image` | string | `"node:20-alpine"` | Default Docker image |
+| `sandbox.defaultBackend` | `"auto" \| "docker" \| "os" \| "vm" \| "subprocess" \| "ssh" \| "none"` | `"auto"` | Default sandbox backend |
+| `sandbox.minIsolationLevel` | `"full" \| "restricted" \| "remote-unverified" \| "none"` | `"full"` | Minimum isolation the selected backend must enforce |
+| `sandbox.docker.image` | string (immutable digest) | — | Runtime image ref — must be `repo@sha256:<64hex>` or `sha256:<64hex>`; mutable tags are rejected |
 | `sandbox.docker.memory` | string | `"512m"` | Memory limit |
-| `sandbox.docker.network` | `"bridge" \| "none" \| "host"` | `"none"` | Container network mode |
+| `sandbox.docker.cpus` | string | `"0.5"` | CPU limit |
+| `sandbox.docker.pids` | number | `64` | PID limit |
 | `sandbox.ssh.host` | string | — | SSH remote host |
 | `sandbox.ssh.user` | string | — | SSH remote user |
 | `sandbox.ssh.keyPath` | string | — | SSH private key path |

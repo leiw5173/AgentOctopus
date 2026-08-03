@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "kind": "compile-only-smoke",
+  "sourceSha256": "f8e4d3053a3b0ebe35f624ca0ad79db54628b7cfedbfe975ef8765f87e1d3df9",
+  "headerSha256": "b569a42506d94d81e2c5447ae1c8be3544854bc0e48ce0083165c405f67608a3",
+  "objectSha256": "246c7de60ee57c0acc2b614d87c8cfde552d048dd3be67aaff5a83eeb665b2a0",
+  "objectSize": 17936,
+  "note": "vm-helper.c typechecks against the vendored libkrun.h v1.19.4 pin. Full link awaits vendored libkrun/libkrunfw dylibs (Task 15). No runnable sandbox-vm-helper binary was produced."
+}

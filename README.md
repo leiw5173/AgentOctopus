@@ -25,7 +25,7 @@ User: "Translate hello to French"
 | **Multi-Agent** | Isolate agents with separate workspaces, models, and skill registries |
 | **Multi-Channel** | CLI, REST API, Slack, Discord, Telegram, WebSocket WebChat, generic Webhooks |
 | **Skill Composition** | Chain skills into execution DAGs with input/output mapping |
-| **Sandbox Execution** | Run skills in Docker, SSH, or OpenShell for isolation |
+| **Sandbox Execution** | Skills run in a fail-closed isolation backend (Docker / privileged Linux / macOS restricted) — never on the host |
 | **DM Security** | Pairing mode for unknown direct-message senders |
 | **Self-Evolving** | Skills auto-improve based on execution signals and user feedback |
 
@@ -51,6 +51,31 @@ Full documentation is available at the [GitBook docs site](https://agentoctopus.
 - [Deployment](docs/deployment/docker.md)
 - [Contributing](docs/contributing/adding-skills.md)
 
+## Sandbox execution
+
+Every skill runs inside a sandbox backend selected at runtime. Backend selection is **fail-closed**: candidates are probed before ranking, and a backend is admitted only when its post-probe `isolationLevel` meets `minIsolationLevel`. Under the default `auto` + `minIsolationLevel:'full'` configuration, AgentOctopus never silently degrades to a weaker backend — when no `full` backend is available, execution refuses with `NoFullBackendError` rather than running untrusted code unprotected. A missing full backend is an **execution error, not a host fallback**.
+
+**Threat model.** Skills are untrusted code. The sandbox must deny an untrusted skill the ability to read or mutate host files outside its granted snapshot, reach the network except through the controlled egress proxy, exfiltrate host credentials, or escape process cleanup. Each backend proves its own isolation via a real capability probe before it is ever admitted; no backend is trusted on configuration alone.
+
+**Immutable identity.** A skill never executes from its live directory. The runner builds a content-addressed snapshot, records `identity = installationId + digest` (`sha256:` + 64 lowercase hex), and re-verifies the digest immediately before backend preparation. Any mutation between build and verify aborts the run with `SNAPSHOT_MISMATCH`. Runtime and proxy images are referenced only by immutable digest (`repo@sha256:<64hex>` or `sha256:<64hex>`); mutable tags are rejected.
+
+**Requested ∩ granted capabilities.** The caller requests a capability set per execution; the backend grants only the intersection with what its isolation actually allows. No skill receives a capability it did not request, and no backend grants a capability it cannot enforce.
+
+**Proxy-only egress.** A skill's only network path is the per-session egress proxy (`http://egress-proxy:8080`), which enforces the requested∩granted allowlist. Direct internet, cloud metadata endpoints, and loopback services are denied. Credentials are injected into the proxy for exact-match grant scopes only — they never enter the child environment, argv, or logs.
+
+**Direct-argv runtime.** The runtime image launches the skill with a direct argv (e.g. `node /skill/invoke.js`). There is no shell, `curl`, `bash`, `npm`, or `wget` in the trusted runtime image — verified by the image-contract tests.
+
+**Isolation levels by backend.**
+
+| Backend | Isolation | When it is admissible |
+|---|---|---|
+| Docker | `full` | Only when the real Docker probe passes (container create + network + capability enforcement). |
+| Privileged Linux (named netns + cgroup v2 + nftables) | `full` | Only on a provisioned self-hosted CI runner with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN`; CI-owned, zero-skip. Never claimed from macOS. |
+| macOS restricted (`sandbox-exec`) | `restricted` (never `full`) | Explicit opt-in only: a trusted caller must set BOTH `defaultBackend:'os'` AND `minIsolationLevel:'restricted'`. `auto` never picks it implicitly, and `minIsolationLevel:'full'` fails closed without Docker. |
+| VM (libkrun) | `full` | macOS Apple Silicon + qualified Linux x64 (with `/dev/kvm`). Skills run inside a Linux guest booted from a sealed read-only ext4 rootfs; the snapshot is a read-only ext4 block image, NOT virtiofs. Implicit TSI disabled — the sole network egress is a vsock-bridged in-process egress proxy. Qualification gates (G1 host-file-unreachable, G2 network-canary-unreachable) bind a signed gate manifest at CI time. |
+
+macOS is **never** described as full isolation via `sandbox-exec`: the dyld shared-cache feasibility gate proved `file-read-data` containment cannot be established on Darwin, so the restricted production backend was abandoned and a VM backend supersedes it for full isolation. Restricted use on macOS is opt-in only. The VM backend (`@agentoctopus/sandbox-vm-native`) provides `full` isolation on macOS Apple Silicon via libkrun + Hypervisor.framework.
+
 ## Development
 
 ```bash
@@ -69,7 +94,7 @@ From source:
 
 ```bash
 pnpm install && pnpm build
-pnpm test          # 313+ tests across 8 packages
+pnpm test          # 883 declared tests across 9 packages (111 in the sandbox security suite)
 ```
 
 ### Publishing

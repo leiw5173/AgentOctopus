@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SandboxConfigSchema as CanonicalSandboxConfigSchema } from '@agentoctopus/sandbox';
 
 export const LLMConfigSchema = z.object({
   provider: z.enum(['openai', 'gemini', 'ollama', 'anthropic']).default('openai'),
@@ -26,6 +27,13 @@ export const GatewayConfigSchema = z.object({
   corsOrigins: z.array(z.string()).default(['*']),
   cloudUrl: z.string().nullable().default(null),
   syncOnStartup: z.boolean().default(true),
+  debugEndpoints: z
+    .object({
+      enabled: z.boolean().default(false),
+      includeQuery: z.boolean().default(false),
+      bufferSize: z.number().int().positive().default(10),
+    })
+    .prefault({}),
 });
 export type GatewayConfigSection = z.infer<typeof GatewayConfigSchema>;
 
@@ -114,7 +122,11 @@ export const AgentConfigSchema = z.object({
   dmPolicy: z.enum(['pairing', 'open']).default('pairing'),
   sandbox: z.object({
     enabled: z.boolean().default(false),
-    backend: z.enum(['docker', 'ssh', 'openshell', 'none']).default('none'),
+    // Aligned to the canonical SandboxConfigSchema.defaultBackend enum
+    // (packages/sandbox/src/schema.ts). 'openshell' was removed by feat/sandbox's
+    // fail-closed rewrite; restricted OS execution is now opt-in via 'os' +
+    // minIsolationLevel:'restricted', never a free local pass-through.
+    backend: z.enum(['auto', 'docker', 'os', 'vm', 'subprocess', 'ssh', 'none']).default('none'),
     image: z.string().optional(),
     memory: z.string().optional(),
     timeout: z.number().int().optional(),
@@ -130,20 +142,10 @@ export const AgentsConfigSchema = z.object({
 export type AgentsConfigSection = z.infer<typeof AgentsConfigSchema>;
 
 // ── Sandbox Config (global defaults) ─────────────────────────────────────
-
-export const SandboxConfigSchema = z.object({
-  defaultBackend: z.enum(['docker', 'ssh', 'openshell', 'none']).default('none'),
-  docker: z.object({
-    image: z.string().default('node:20-alpine'),
-    memory: z.string().default('512m'),
-    network: z.enum(['bridge', 'none', 'host']).default('none'),
-  }).optional(),
-  ssh: z.object({
-    host: z.string().optional(),
-    user: z.string().optional(),
-    keyPath: z.string().optional(),
-  }).optional(),
-});
+//
+// The canonical shape is owned by @agentoctopus/sandbox (Plan 1). Core
+// re-exports it so callers see one definition; it must NOT be redefined here.
+export const SandboxConfigSchema = CanonicalSandboxConfigSchema;
 export type SandboxConfigSection = z.infer<typeof SandboxConfigSchema>;
 
 // ── Canvas Config ────────────────────────────────────────────────────────

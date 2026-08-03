@@ -1,28 +1,21 @@
 import express, { type Request, type Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { createHash } from 'node:crypto';
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
 import { authMiddleware, loadApiKeys, createApiKey, revokeApiKey, flushApiKeys, validateApiKey } from './auth-middleware.js';
 import { rateLimiter, resetRateLimiter } from './rate-limiter.js';
 import { auditLogger, closeAuditLog } from './audit-logger.js';
 import { syncFromCloud, isLikelyFeedback, detectSentiment } from '@agentoctopus/registry';
-import { getConfig, type CredentialMissingResult, type BinaryMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult } from '@agentoctopus/core';
+import { getConfig, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult, type ExecutionContext, type RequestTerminalEvent } from '@agentoctopus/core';
 import { eventBus } from './control-plane/event-bus.js';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
 }
 
-function isBinaryMissing(result: unknown): result is BinaryMissingResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
-}
-
-function isBinaryInstallable(result: unknown): result is BinaryInstallableResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_installable';
-}
-
-function isBinaryInstallFailed(result: unknown): result is BinaryInstallFailedResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_install_failed';
+function isUnsupportedRuntime(result: unknown): result is UnsupportedRuntimeRequirementsResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'unsupported_runtime_requirements';
 }
 
 /**
@@ -135,165 +128,217 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
       return;
     }
 
-    // Resolve or create session
-    // Without a sessionId, generate a fresh channelId so every request gets a new session.
-    const channelId = sessionId ?? uuidv4();
-    const session = sessionId
-      ? sessionManager.getById(sessionId) ?? sessionManager.getOrCreate(channelId, agentId, 'agent')
-      : sessionManager.getOrCreate(channelId, agentId, 'agent');
+    // T3.7 — extract the [trace: oct-e2e-<uuid>] correlation marker (if any)
+    // BEFORE routing/execution/session, and strip it from the query text so
+    // downstream consumers never see it.
+    const traceMatch = query.match(/\[trace:\s*(oct-e2e-[0-9a-f-]+)\s*\]/i);
+    const traceId = traceMatch?.[1];
+    const cleanQuery = traceId ? query.replace(traceMatch![0], '').trim() : query;
 
-    session.metadata = { ...session.metadata, ...metadata };
-    sessionManager.addMessage(session, { role: 'user', content: query, timestamp: Date.now() });
+    // Per-request ExecutionContext. apiKeyId is a stable hash of the caller's
+    // identity — NEVER the raw key. Prefer the ApiKeyEntry's own userId when
+    // available; fall back to a truncated sha256 of the raw key material.
+    const apiKeyEntry = (req as any).apiKeyEntry as { userId?: string } | undefined;
+    const rawKey = (req as any).apiKey as string | undefined;
+    const apiKeyId = apiKeyEntry?.userId
+      ? `user:${apiKeyEntry.userId}`
+      : rawKey
+        ? `key:${createHash('sha256').update(rawKey).digest('hex').slice(0, 16)}`
+        : undefined;
+    const receivedAt = Date.now();
+    const execContext: ExecutionContext | undefined = traceId
+      ? { traceId, apiKeyId, receivedAt }
+      : undefined;
 
-    // Auto-detect feedback: if session has a previous assistant message with a skillUsed,
-    // and the current message looks like feedback (not a new query), record it automatically.
-    const prevMessages = session.messages;
-    const lastAssistant = [...prevMessages].reverse().find(m => m.role === 'assistant' && m.skillUsed);
-    if (lastAssistant && isLikelyFeedback(query)) {
-      const sentiment = detectSentiment(query);
-      const positive = sentiment.sentiment === 'positive';
-      const skillName = (lastAssistant as any).skillUsed as string;
-
-      engine.registry.recordFeedback(skillName, positive, query, 'openclaw');
-
-      sessionManager.addMessage(session, {
-        role: 'assistant',
-        content: positive
-          ? `Thanks for the positive feedback on ${skillName}!`
-          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
-        timestamp: Date.now(),
-      });
-
-      res.json({
-        success: true,
-        response: positive
-          ? `Thanks for the positive feedback on ${skillName}!`
-          : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
-        skill: skillName,
-        sessionId: session.id,
-        feedbackRecorded: true,
-        sentiment: sentiment.sentiment,
-      });
-      return;
-    }
+    // T3.7 — EXACTLY-ONE-TERMINAL guarantee. Every request with a traceId
+    // emits precisely one terminal event (request.completed | request.failed),
+    // regardless of which path it takes — including pre-routing setup
+    // (recordRequestStart, session getOrCreate/addMessage, feedback block),
+    // routing, execution, and the 500 catch. A single shared flag gates every
+    // emission site so no path can emit zero or two terminals. Telemetry must
+    // never break /ask — emission failures are swallowed.
+    let terminalEmitted = false;
+    const emitTerminal = (kind: 'request.completed' | 'request.failed', reason: string | null): void => {
+      if (terminalEmitted || !traceId) return;
+      terminalEmitted = true;
+      try {
+        engine.telemetryBuffer.record(
+          { kind, traceId, reason } satisfies RequestTerminalEvent,
+          {},
+        );
+      } catch {
+        // telemetry must never break /ask
+      }
+    };
 
     try {
-      const startTime = Date.now();
-      // Pass previous skill name from session for follow-up query routing
-      const assistantMsgs = session.messages.filter(m => m.role === 'assistant');
-      const prevSkill = lastAssistant ? (lastAssistant as any).skillUsed as string : undefined;
-      console.log(`[AgentProtocol] session=${session.id} msgs=${session.messages.length} assistantMsgs=${assistantMsgs.length} lastAssistant=${!!lastAssistant} prevSkill=${prevSkill}`);
-      const [routing] = await engine.router.route(query, 20, { previousSkill: prevSkill });
-      if (!routing) {
-        const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, query);
+      // Bind request-start metadata directly on the buffer (NOT through the
+      // shared sink) so it stays out of the cross-request channel. includeQuery
+      // gates whether the clean query text or its sha256 hash is stored.
+      if (traceId) {
+        const cfg = getConfig().gateway.debugEndpoints;
+        engine.telemetryBuffer.recordRequestStart(traceId, {
+          apiKeyId,
+          receivedAt,
+          ...(cfg.includeQuery
+            ? { query: cleanQuery }
+            : { queryHash: createHash('sha256').update(cleanQuery).digest('hex') }),
+        });
+      }
+
+      // Resolve or create session
+      // Without a sessionId, generate a fresh channelId so every request gets a new session.
+      const channelId = sessionId ?? uuidv4();
+      const session = sessionId
+        ? sessionManager.getById(sessionId) ?? sessionManager.getOrCreate(channelId, agentId, 'agent')
+        : sessionManager.getOrCreate(channelId, agentId, 'agent');
+
+      session.metadata = { ...session.metadata, ...metadata };
+      sessionManager.addMessage(session, { role: 'user', content: cleanQuery, timestamp: Date.now() });
+
+      // Auto-detect feedback: if session has a previous assistant message with a skillUsed,
+      // and the current message looks like feedback (not a new query), record it automatically.
+      const prevMessages = session.messages;
+      const lastAssistant = [...prevMessages].reverse().find(m => m.role === 'assistant' && m.skillUsed);
+      if (lastAssistant && isLikelyFeedback(cleanQuery)) {
+        const sentiment = detectSentiment(cleanQuery);
+        const positive = sentiment.sentiment === 'positive';
+        const skillName = (lastAssistant as any).skillUsed as string;
+
+        engine.registry.recordFeedback(skillName, positive, cleanQuery, 'openclaw');
 
         sessionManager.addMessage(session, {
           role: 'assistant',
-          content: answer,
+          content: positive
+            ? `Thanks for the positive feedback on ${skillName}!`
+            : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
           timestamp: Date.now(),
         });
 
-        res.status(200).json({
+        res.json({
           success: true,
-          response: answer,
-          skill: null,
+          response: positive
+            ? `Thanks for the positive feedback on ${skillName}!`
+            : `Sorry to hear that. Your feedback on ${skillName} has been recorded.`,
+          skill: skillName,
           sessionId: session.id,
-          confidence: null,
+          feedbackRecorded: true,
+          sentiment: sentiment.sentiment,
         });
+        // Feedback path also counts as a completed request. emitTerminal is
+        // idempotent via terminalEmitted — mutually exclusive with the
+        // finally's emission below.
+        emitTerminal('request.completed', null);
         return;
       }
 
-      let result = await engine.executor.execute(routing.skill, { query }, { autoInstall });
+      let terminalKind: 'request.completed' | 'request.failed' = 'request.completed';
+      let terminalReason: string | null = null;
+      try {
+        const startTime = Date.now();
+        // Pass previous skill name from session for follow-up query routing
+        const assistantMsgs = session.messages.filter(m => m.role === 'assistant');
+        const prevSkill = lastAssistant ? (lastAssistant as any).skillUsed as string : undefined;
+        console.log(`[AgentProtocol] session=${session.id} msgs=${session.messages.length} assistantMsgs=${assistantMsgs.length} lastAssistant=${!!lastAssistant} prevSkill=${prevSkill}`);
+        const [routing] = await engine.router.route(cleanQuery, 20, { previousSkill: prevSkill, execContext });
+        if (!routing) {
+          const answer = await engine.chatClient.chat(DIRECT_ANSWER_SYSTEM_PROMPT, cleanQuery);
 
-      if (isCredentialMissing(result)) {
-        const lines = result.missing
-          .map(v => `  - ${v.key}${v.label ? ` — ${v.label}` : ''}`)
-          .join('\n');
-        const setupCmd = result.missing[0]?.key
-          ? `\n  Run: octopus config set ${result.missing[0].key} <your-key>`
-          : '';
+          sessionManager.addMessage(session, {
+            role: 'assistant',
+            content: answer,
+            timestamp: Date.now(),
+          });
+
+          res.status(200).json({
+            success: true,
+            response: answer,
+            skill: null,
+            sessionId: session.id,
+            confidence: null,
+          });
+          return;
+        }
+
+        // Note: the `autoInstall` request field is accepted for schema
+        // compatibility but intentionally ignored — skills are untrusted and
+        // must never trigger host package-manager execution.
+        let result = await engine.executor.execute(routing.skill, { query: cleanQuery }, { execContext });
+
+        if (isCredentialMissing(result)) {
+          const lines = result.missing
+            .map(v => `  - ${v.key}${v.label ? ` — ${v.label}` : ''}`)
+            .join('\n');
+          const setupCmd = result.missing[0]?.key
+            ? `\n  Run: octopus config set ${result.missing[0].key} <your-key>`
+            : '';
+          res.json({
+            success: false,
+            type: 'credential_missing',
+            skillName: result.skillName,
+            missing: result.missing,
+            response: `I matched a skill that could answer this, but it needs an API key that isn't configured:\n${lines}${setupCmd}`,
+            skill: routing.skill.manifest.name,
+            sessionId: session.id,
+            confidence: routing.score,
+          });
+          return;
+        }
+
+        if (isUnsupportedRuntime(result)) {
+          res.json({
+            success: false,
+            type: 'unsupported_runtime_requirements',
+            skillName: result.skillName,
+            missing: result.missing,
+            response: `I matched a skill but it requires tools that aren't installed: ${result.missing.join(', ')}. No trusted runtime profile covers: ${result.missing.join(', ')}. Ask the operator to add one under \`sandbox.runtimeProfiles\`.`,
+            skill: routing.skill.manifest.name,
+            sessionId: session.id,
+            confidence: routing.score,
+          });
+          return;
+        }
+
+        sessionManager.addMessage(session, {
+          role: 'assistant',
+          content: result.formattedOutput,
+          timestamp: Date.now(),
+          skillUsed: routing.skill.manifest.name,
+        });
+
+        // Emit skill-executed event
+        eventBus.emit({
+          type: 'skill-executed',
+          skillName: routing.skill.manifest.name,
+          success: true,
+          latencyMs: Date.now() - startTime,
+        });
+
         res.json({
-          success: false,
-          type: 'credential_missing',
-          skillName: result.skillName,
-          missing: result.missing,
-          response: `I matched a skill that could answer this, but it needs an API key that isn't configured:\n${lines}${setupCmd}`,
+          success: true,
+          response: result.formattedOutput,
           skill: routing.skill.manifest.name,
           sessionId: session.id,
           confidence: routing.score,
         });
-        return;
+      } catch (err) {
+        terminalKind = 'request.failed';
+        terminalReason = (err as Error).message ?? String(err);
+        res.status(500).json({ success: false, error: (err as Error).message });
+      } finally {
+        // Single terminal emission — guaranteed to run AFTER all router/executor
+        // emissions (they complete synchronously within the inner try) and
+        // exactly once. The terminalEmitted guard makes this mutually exclusive
+        // with the feedback path's early emitTerminal above.
+        emitTerminal(terminalKind, terminalReason);
       }
-
-      if (isBinaryInstallable(result)) {
-        res.json({
-          success: false,
-          type: 'binary_installable',
-          skillName: result.skillName,
-          missing: result.missing,
-          installSpecs: result.installSpecs,
-          response: `I matched a skill but it requires tools that aren't installed: ${(result.missing as string[]).join(', ')}. Retry with autoInstall=true to install automatically, or install them manually.`,
-          skill: routing.skill.manifest.name,
-          sessionId: session.id,
-          confidence: routing.score,
-        });
-        return;
-      }
-
-      if (isBinaryInstallFailed(result)) {
-        res.json({
-          success: false,
-          type: 'binary_install_failed',
-          skillName: result.skillName,
-          missing: result.missing,
-          manualInstructions: result.manualInstructions,
-          response: `Installation of required tools failed. Manual steps:\n${(result.manualInstructions as string[]).map(i => `  ${i}`).join('\n')}`,
-          skill: routing.skill.manifest.name,
-          sessionId: session.id,
-          confidence: routing.score,
-        });
-        return;
-      }
-
-      if (isBinaryMissing(result)) {
-        const tools = result.missing.map(b => `  - ${b}`).join('\n');
-        res.json({
-          success: false,
-          type: 'binary_missing',
-          skillName: result.skillName,
-          missing: result.missing,
-          response: `I matched a skill but it requires tools that aren't installed:\n${tools}\n\nInstall the tool(s) above, then retry.`,
-          skill: routing.skill.manifest.name,
-          sessionId: session.id,
-          confidence: routing.score,
-        });
-        return;
-      }
-
-      sessionManager.addMessage(session, {
-        role: 'assistant',
-        content: result.formattedOutput,
-        timestamp: Date.now(),
-        skillUsed: routing.skill.manifest.name,
-      });
-
-      // Emit skill-executed event
-      eventBus.emit({
-        type: 'skill-executed',
-        skillName: routing.skill.manifest.name,
-        success: true,
-        latencyMs: Date.now() - startTime,
-      });
-
-      res.json({
-        success: true,
-        response: result.formattedOutput,
-        skill: routing.skill.manifest.name,
-        sessionId: session.id,
-        confidence: routing.score,
-      });
     } catch (err) {
-      res.status(500).json({ success: false, error: (err as Error).message });
+      // Pre-routing setup (recordRequestStart, session store, feedback block)
+      // threw. Emit the SINGLE request.failed terminal and rethrow so Express's
+      // default error handler still produces the 500 response. The
+      // terminalEmitted guard ensures this never double-fires.
+      emitTerminal('request.failed', (err as Error).message ?? String(err));
+      throw err;
     }
   });
 
@@ -462,6 +507,42 @@ export async function createAgentRouter(rootDir?: string): Promise<express.Route
     } catch (err) {
       res.status(500).json({ success: false, error: (err as Error).message });
     }
+  });
+
+  /**
+   * T3.7 — Admin-only debug endpoint: GET /agent/debug/last-run[?runId=<id>].
+   * Serves the aggregated per-request RunRecord from the DebugTelemetryBuffer.
+   *   - 404 when gateway.debugEndpoints.enabled=false (NOT 403 — the endpoint
+   *     is compiled out of the surface, not merely gated).
+   *   - 403 for non-admin keys.
+   *   - 200 {success:true, run:null} when no record matches (empty buffer or
+   *     unknown runId).
+   *   - 200 {success:true, run} on a hit; `run.query` is stripped unless
+   *     gateway.debugEndpoints.includeQuery (queryHash may remain).
+   */
+  router.get('/debug/last-run', (req: Request, res: Response) => {
+    const cfg = getConfig().gateway.debugEndpoints;
+    if (!cfg.enabled) {
+      res.status(404).json({ success: false, error: 'Not found' });
+      return;
+    }
+    const caller = (req as any).apiKeyEntry;
+    if (!caller || caller.tier !== 'admin') {
+      res.status(403).json({ success: false, error: 'Admin access required' });
+      return;
+    }
+
+    const runId = typeof req.query.runId === 'string' ? req.query.runId : undefined;
+    const run = runId ? engine.telemetryBuffer.getByRunId(runId) : engine.telemetryBuffer.latest();
+    if (!run) {
+      res.status(200).json({ success: true, run: null });
+      return;
+    }
+    const sanitized = { ...run };
+    if (!cfg.includeQuery) {
+      delete (sanitized as { query?: string }).query;
+    }
+    res.status(200).json({ success: true, run: sanitized });
   });
 
   return router;

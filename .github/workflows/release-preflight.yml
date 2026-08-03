@@ -9,9 +9,25 @@ concurrency:
   group: preflight-master
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
+  sandbox-security:
+    name: Sandbox Security
+    uses: ./.github/workflows/sandbox-security.yml
+    # Reusable workflows do NOT receive the caller's secrets automatically
+    # (GitHub requires jobs.<id>.secrets or `secrets: inherit`). The vm-lane
+    # and privileged-linux signing steps need OCTOPUS_VM_RELEASE_PRIVATE_KEY;
+    # without this, both fail under workflow_call and the security gate can
+    # never pass on a master push. Preflight triggers only on push:master
+    # (never fork PRs), so inheriting secrets crosses no trust boundary.
+    secrets: inherit
+
   validate-version:
     name: 🔍 Validate Version
+    needs: sandbox-security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -45,25 +61,145 @@ jobs:
   pack:
     name: 📦 Pack Tarballs
     runs-on: ubuntu-latest
-    needs: audit
+    needs: [audit, sandbox-security]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-node-env
       - name: Build all packages
         run: pnpm -r --workspace-concurrency=1 build
-      - name: Pack and write metadata
+      - name: Resolve API-visible security gate job
+        id: security-job
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREFLIGHT_RUN_ID: ${{ github.run_id }}
+          PREFLIGHT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PREFLIGHT_SHA: ${{ github.sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$PREFLIGHT_RUN_ID/attempts/$PREFLIGHT_RUN_ATTEMPT/jobs?per_page=100" > /tmp/preflight-security-job-pages.json
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          const pages = JSON.parse(readFileSync('/tmp/preflight-security-job-pages.json', 'utf8'));
+          if (!Array.isArray(pages)) throw new Error('GitHub jobs response is not a paginated array');
+          const jobs = pages.flatMap((page) => Array.isArray(page.jobs) ? page.jobs : []);
+          const matches = jobs.filter((job) =>
+            typeof job.name === 'string' &&
+            job.name.startsWith('Sandbox Security / ') &&
+            job.name.endsWith(' / security-gate'));
+          if (matches.length !== 1) throw new Error(`expected one API-visible Sandbox Security gate job, found ${matches.length}`);
+          const job = matches[0];
+          if (job.status !== 'completed' || job.conclusion !== 'success') {
+            throw new Error(`security gate job did not succeed (status=${job.status}, conclusion=${job.conclusion})`);
+          }
+          if (typeof job.head_sha !== 'string' || job.head_sha !== process.env.PREFLIGHT_SHA) {
+            throw new Error(`security gate job SHA missing or mismatched (${String(job.head_sha)} != ${process.env.PREFLIGHT_SHA})`);
+          }
+          if (/[\r\n]/.test(job.name)) throw new Error('security gate job name is not a single line');
+          appendFileSync(process.env.GITHUB_OUTPUT, `name=${job.name}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `conclusion=${job.conclusion}\n`);
+          NODE
+      # F3: the native package tarball must contain the REAL signed VM TCB for
+      # both platforms — not the empty prebuilds/ of a fresh checkout. The lane
+      # artifacts below were produced + qualified + signed by the sandbox-security
+      # lanes in THIS run (vm-lane: darwin-arm64; privileged-linux: linux-x64).
+      # Any missing artifact fails the pack job before anything is published.
+      #
+      # Layout note (F4): BOTH qualified artifacts are now tarred (colon-safe
+      # transport for rootfs/sha256:<hex>, which upload-artifact@v4 rejects) —
+      # each tar preserves its platform prefix (prebuilds/darwin-arm64/... and
+      # prebuilds/linux-x64/...), so both untar into the shared prebuilds/ tree
+      # to restore the exact on-disk layout.
+      - name: Download qualified darwin-arm64 VM TCB (vm-lane)
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-tcb-darwin-arm64
+          path: /tmp/vm-tcb-darwin-arm64-dl
+      - name: Download qualified linux-x64 VM TCB (privileged-linux)
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-tcb-linux-x64-qualified
+          path: /tmp/vm-tcb-linux-x64-qualified-dl
+      # The qualified artifacts are tarred (colon-safe transport for
+      # <platform>/rootfs/sha256:<hex>); untar into the shared prebuilds tree.
+      - name: Untar qualified darwin-arm64 VM TCB into prebuilds
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf /tmp/vm-tcb-darwin-arm64-dl/vm-tcb-darwin-arm64.tar \
+            -C packages/sandbox-vm-native/prebuilds
+      - name: Untar qualified linux-x64 VM TCB into prebuilds
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf /tmp/vm-tcb-linux-x64-qualified-dl/vm-tcb-linux-x64-qualified.tar \
+            -C packages/sandbox-vm-native/prebuilds
+      - name: Enforce complete signed VM TCB in both platform prebuilds (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=packages/sandbox-vm-native/prebuilds
+          for plat in darwin-arm64 linux-x64; do
+            d="$base/$plat"
+            case "$plat" in
+              darwin-arm64) libkrun=libkrun.dylib; libkrunfw=libkrunfw.dylib ;;
+              linux-x64)    libkrun=libkrun.so;    libkrunfw=libkrunfw.so ;;
+            esac
+            for f in sandbox-vm-helper vm-image-builder "$libkrun" "$libkrunfw" \
+                     vm-tcb-manifest.json gate-manifest.json rootfs.manifest.json \
+                     release-manifest.json release-manifest.json.sig; do
+              test -f "$d/$f" || { echo "ERROR: $d/$f missing — VM TCB incomplete; refusing to pack the native package." >&2; exit 1; }
+            done
+            test -f "$d/rootfs.img" || { echo "ERROR: $d/rootfs.img missing" >&2; exit 1; }
+            ls "$d"/rootfs/sha256:* >/dev/null 2>&1 || { echo "ERROR: $d/rootfs/<digest> runtime placement missing" >&2; exit 1; }
+            echo "VM TCB complete for $plat"
+          done
+      - name: Pack and write metadata
+        env:
+          PREFLIGHT_RUN_ID: ${{ github.run_id }}
+          PREFLIGHT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SECURITY_JOB_NAME: ${{ steps.security-job.outputs.name }}
+          SECURITY_GATE_CONCLUSION: ${{ steps.security-job.outputs.conclusion }}
+          SECURITY_RUNTIME_DIGEST: ${{ needs.sandbox-security.outputs.runtime_digest }}
+          SECURITY_PROXY_DIGEST: ${{ needs.sandbox-security.outputs.proxy_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
           SHA=$(git rev-parse HEAD)
           VERSION=$(node -p "require('./packages/agentoctopus/package.json').version")
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           mkdir -p /tmp/preflight
           echo "$SHA" > /tmp/preflight/release-sha.txt
           echo "v$VERSION" > /tmp/preflight/release-tag.txt
           echo "$VERSION" > /tmp/preflight/release-version.txt
 
-          PACKAGES="skills registry adapters core gateway cli agentoctopus"
+          printf '%s\n' "$PREFLIGHT_RUN_ID" > /tmp/preflight/security-preflight-run-id.txt
+          printf '%s\n' "$PREFLIGHT_RUN_ATTEMPT" > /tmp/preflight/security-preflight-run-attempt.txt
+          printf '%s\n' "$SHA" > /tmp/preflight/security-sha.txt
+          printf '%s\n' "$SECURITY_JOB_NAME" > /tmp/preflight/security-job-name.txt
+          printf '%s\n' "$SECURITY_GATE_CONCLUSION" > /tmp/preflight/security-gate-conclusion.txt
+          printf '%s\n' "$SECURITY_RUNTIME_DIGEST" > /tmp/preflight/runtime-image-digest.txt
+          printf '%s\n' "$SECURITY_PROXY_DIGEST" > /tmp/preflight/proxy-image-digest.txt
+
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const read = (name) => readFileSync(`/tmp/preflight/${name}`, 'utf8').trim();
+          const metadata = {
+            schemaVersion: 1,
+            preflightRunId: read('security-preflight-run-id.txt'),
+            preflightRunAttempt: Number(read('security-preflight-run-attempt.txt')),
+            securitySha: read('security-sha.txt'),
+            securityJobName: read('security-job-name.txt'),
+            securityGateConclusion: read('security-gate-conclusion.txt'),
+            runtimeDigest: read('runtime-image-digest.txt'),
+            proxyDigest: read('proxy-image-digest.txt'),
+          };
+          writeFileSync('/tmp/preflight/security-metadata.json', JSON.stringify(metadata, null, 2) + '\n');
+          NODE
+
+          PACKAGES="sandbox sandbox-vm-native skills registry adapters core gateway cli agentoctopus"
           for pkg in $PACKAGES; do
             case "$pkg" in
               cli)       cd apps/cli && pnpm pack --pack-destination /tmp/preflight && cd - > /dev/null ;;
@@ -74,7 +210,34 @@ jobs:
 
           echo "Packed tarballs:"
           ls -la /tmp/preflight/*.tgz
+      - name: Assert the native tarball contains the full signed VM TCB
         shell: bash
+        run: |
+          set -euo pipefail
+          tarball=$(ls /tmp/preflight/agentoctopus-sandbox-vm-native-*.tgz | head -1)
+          listing=$(tar -tzf "$tarball")
+          for entry in \
+            package/prebuilds/darwin-arm64/sandbox-vm-helper \
+            package/prebuilds/darwin-arm64/libkrun.dylib \
+            package/prebuilds/darwin-arm64/libkrunfw.dylib \
+            package/prebuilds/darwin-arm64/vm-image-builder \
+            package/prebuilds/darwin-arm64/vm-tcb-manifest.json \
+            package/prebuilds/darwin-arm64/gate-manifest.json \
+            package/prebuilds/darwin-arm64/release-manifest.json \
+            package/prebuilds/darwin-arm64/release-manifest.json.sig \
+            package/prebuilds/linux-x64/sandbox-vm-helper \
+            package/prebuilds/linux-x64/libkrun.so \
+            package/prebuilds/linux-x64/libkrunfw.so \
+            package/prebuilds/linux-x64/vm-image-builder \
+            package/prebuilds/linux-x64/vm-tcb-manifest.json \
+            package/prebuilds/linux-x64/gate-manifest.json \
+            package/prebuilds/linux-x64/release-manifest.json \
+            package/prebuilds/linux-x64/release-manifest.json.sig; do
+            echo "$listing" | grep -Fqx "$entry" || { echo "ERROR: native tarball missing $entry — publish would ship an incomplete VM backend." >&2; exit 1; }
+          done
+          echo "$listing" | grep -q 'package/prebuilds/darwin-arm64/rootfs/sha256:' || { echo "ERROR: native tarball missing the darwin-arm64 sealed rootfs" >&2; exit 1; }
+          echo "$listing" | grep -q 'package/prebuilds/linux-x64/rootfs/sha256:' || { echo "ERROR: native tarball missing the linux-x64 sealed rootfs" >&2; exit 1; }
+          echo "Native tarball VM TCB contents verified: $tarball"
       - name: Upload preflight artifact
         uses: actions/upload-artifact@v7
         with:

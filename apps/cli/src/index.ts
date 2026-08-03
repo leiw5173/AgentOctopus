@@ -8,9 +8,10 @@ import fs from 'fs';
 import readline from 'readline';
 
 import { SkillRegistry, getRequiredEnvVars } from '@agentoctopus/registry';
-import { Router, Executor, createChatClient, dbg, type LLMConfig, type CredentialMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult, extractCredentialErrors, getInstallPref, saveInstallPref } from '@agentoctopus/core';
+import { Router, Executor, createChatClient, createDefaultSandboxRunner, buildSecretProviderFromConfig, dbg, type LLMConfig, type CredentialMissingResult, extractCredentialErrors } from '@agentoctopus/core';
 import { startService } from './service.js';
 import { installSkill, fetchSkillMeta } from './clawhub.js';
+import { removeInstallationId } from '@agentoctopus/skills';
 import { runOnboarding, ensureOnboarded } from './onboard.js';
 import { loadConfig, getConfig, getEnvPath, getConfigPath } from '@agentoctopus/core';
 import { runSkillCreateWizard, runSkillTemplate } from './skill-create.js';
@@ -190,7 +191,11 @@ async function bootstrap() {
 
   const router = new Router(chatConfig, embedConfig);
   const chatClient = createChatClient(chatConfig);
-  const executor = new Executor(registry, chatClient);
+  // Converge execution on a runner that provisions credentials ONLY to the
+  // trusted egress proxy (built from trusted config), never into a prompt/env.
+  const secretProvider = buildSecretProviderFromConfig(config);
+  const sandboxRunner = createDefaultSandboxRunner(secretProvider);
+  const executor = new Executor(registry, chatClient, undefined, sandboxRunner);
 
   return { registry, router, executor };
 }
@@ -235,6 +240,25 @@ program
   .description('List all available skills')
   .action(async () => {
     await listSkills();
+  });
+
+program
+  .command('doctor')
+  .description('Check whether skills can execute in the sandbox (runtime profiles, images, installationId)')
+  .action(async () => {
+    const { runDoctor } = await import('./doctor.js');
+    const { ok, report } = await runDoctor();
+    console.log(chalk.bold('\n🐙 Sandbox readiness\n'));
+    for (const c of report) {
+      const mark = c.ok ? chalk.green('✔') : chalk.red('✘');
+      console.log(`${mark} ${c.name} ${chalk.gray('— ' + c.detail)}`);
+    }
+    if (!ok) {
+      console.log(chalk.yellow('\nSee docs/core-concepts/sandbox.md to fix the failing checks.\n'));
+      process.exitCode = 1;
+    } else {
+      console.log(chalk.green('\nSandbox execution ready.\n'));
+    }
   });
 
 program
@@ -342,63 +366,12 @@ program
           continue;
         }
 
-        if ('type' in result && result.type === 'binary_installable') {
-          const biaResult = result as BinaryInstallableResult;
-          const missing = biaResult.missing as string[];
-          const allAlways = missing.every(b => getInstallPref(b) === 'always');
-          const anyNever = missing.some(b => getInstallPref(b) === 'never');
-          spinner.stop();
-
-          if (anyNever) {
-            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
-            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
-            continue;
-          }
-
-          let shouldInstall = allAlways;
-          let rememberPref: 'always' | 'never' | null = null;
-
-          if (!shouldInstall) {
-            console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
-            const choice = await promptSelect('Install missing tools?', [
-              { label: 'Yes, install now', value: 'yes' },
-              { label: 'Yes, and always install automatically', value: 'always' },
-              { label: 'No, try another skill', value: 'no' },
-              { label: 'Never install automatically', value: 'never' },
-            ]);
-            if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
-            else if (choice === 'yes') { shouldInstall = true; }
-            else if (choice === 'never') { rememberPref = 'never'; }
-          }
-
-          if (rememberPref) saveInstallPref(missing, rememberPref);
-
-          if (!shouldInstall) {
-            if (i < candidates.length - 1) console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
-            continue;
-          }
-
-          spinner.start(`Installing ${missing.join(', ')}...`);
-          result = await engine.executor.execute(skill, input, { debug: !!options.debug, autoInstall: true });
-
-          if ('type' in result && result.type === 'binary_install_failed') {
-            const biafResult = result as BinaryInstallFailedResult;
-            spinner.fail(`Failed to install required tools for ${biafResult.skillName}`);
-            console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
-            (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
-            console.error();
-            if (i < candidates.length - 1) console.log(chalk.yellow(`↻ Trying next skill...\n`));
-            continue;
-          }
-
-          spinner.start('Finalizing...');
-        }
-
-        if ('type' in result && result.type === 'binary_missing') {
+        if ('type' in result && result.type === 'unsupported_runtime_requirements') {
           const tools = (result.missing as string[]).map(b => `  • ${b}`).join('\n');
           spinner.fail(`${result.skillName} requires missing tools`);
           console.error(chalk.red(`\nMissing binaries:\n${tools}\n`));
-          console.error(chalk.yellow(`  Install the tool(s) above, then retry.`));
+          console.error(chalk.yellow(`  No trusted runtime profile covers: ${(result.missing as string[]).join(', ')}.`));
+          console.error(chalk.yellow(`  Ask the operator to add one under \`sandbox.runtimeProfiles\` in octopus.json.`));
           if (i < candidates.length - 1) {
             console.log(chalk.yellow(`\n↻ Trying next skill...\n`));
           }
@@ -679,45 +652,12 @@ program
           console.log();
           const primaryKey = result.missing[0]?.key || 'KEY';
           console.log(chalk.cyan(`Run: octopus config set ${primaryKey} <your-value>\n`));
-        } else if ('type' in result && result.type === 'binary_installable') {
-          const biaResult = result as BinaryInstallableResult;
-          const missing = biaResult.missing as string[];
-          const allAlways = missing.every(b => getInstallPref(b) === 'always');
-          const anyNever = missing.some(b => getInstallPref(b) === 'never');
-
-          if (anyNever) {
-            console.error(chalk.red(`\n${biaResult.skillName} requires missing tools (install blocked by preference):\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
-          } else {
-            let shouldInstall = allAlways;
-            let rememberPref: 'always' | 'never' | null = null;
-            if (!shouldInstall) {
-              console.log(chalk.yellow(`\n${biaResult.skillName} requires missing tools:\n${missing.map(b => `  • ${b}`).join('\n')}\n`));
-              const choice = await promptSelect('Install missing tools?', [
-                { label: 'Yes, install now', value: 'yes' },
-                { label: 'Yes, and always install automatically', value: 'always' },
-                { label: 'No', value: 'no' },
-                { label: 'Never install automatically', value: 'never' },
-              ]);
-              if (choice === 'always') { shouldInstall = true; rememberPref = 'always'; }
-              else if (choice === 'yes') { shouldInstall = true; }
-              else if (choice === 'never') { rememberPref = 'never'; }
-            }
-            if (rememberPref) saveInstallPref(missing, rememberPref);
-            if (shouldInstall) {
-              const installSpinner = ora(`Installing ${missing.join(', ')}...`).start();
-              result = await executor.execute(pick.skill, input, { autoInstall: true });
-              installSpinner.stop();
-              if ('type' in result && result.type === 'binary_install_failed') {
-                const biafResult = result as BinaryInstallFailedResult;
-                console.error(chalk.red(`\nInstallation failed. Install manually:\n`));
-                (biafResult.manualInstructions as string[]).forEach(instr => console.error(chalk.yellow(`  ${instr}`)));
-              }
-            }
-          }
-        } else if ('type' in result && result.type === 'binary_missing') {
+        } else if ('type' in result && result.type === 'unsupported_runtime_requirements') {
           const tools = (result.missing as string[]).map((b: string) => `  • ${b}`).join('\n');
           console.log(chalk.red(`\n${pick.skill.manifest.name} requires missing tools:`));
           console.log(tools);
+          console.log(chalk.yellow(`\nNo trusted runtime profile covers: ${(result.missing as string[]).join(', ')}.`));
+          console.log(chalk.yellow(`Ask the operator to add one under \`sandbox.runtimeProfiles\` in octopus.json.`));
         } else {
           const execResult = result as import('@agentoctopus/core').ExecutionResult;
           if (execResult.adapterResult.success) {
@@ -758,6 +698,9 @@ program
       return;
     }
 
+    // Rotate identity: remove the installation id BEFORE deleting the dir so a
+    // later fresh reinstall receives a NEW id (prior grants must not reattach).
+    removeInstallationId(skillDir);
     fs.rmSync(skillDir, { recursive: true });
     console.log(chalk.green(`  Removed skill "${name}" from ${skillDir}`));
     console.log(chalk.yellow('  Restart the server to apply changes.'));
@@ -1232,7 +1175,7 @@ agentCmd
   .description('Create a new agent')
   .option('--name <name>', 'Agent display name')
   .option('--dm-policy <policy>', 'DM policy (pairing or open)', 'pairing')
-  .option('--sandbox <backend>', 'Sandbox backend (docker, ssh, openshell, none)', 'none')
+  .option('--sandbox <backend>', 'Sandbox backend (auto, docker, os, vm, ssh, none)', 'none')
   .option('--model <model>', 'Per-agent LLM model override')
   .action(async (id: string, options: { name?: string; dmPolicy?: string; sandbox?: string; model?: string }) => {
     const onboarded = await ensureOnboarded();

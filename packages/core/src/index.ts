@@ -1,15 +1,41 @@
 export { Router, type RoutingResult } from './router.js';
-export { Executor, extractCredentialErrors, type ExecutionResult, type CredentialMissingResult, type BinaryMissingResult, type BinaryInstallableResult, type BinaryInstallFailedResult } from './executor.js';
+export { Executor, extractCredentialErrors, type ExecutionResult, type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult, type ExecutorOptions } from './executor.js';
+export { type OutputValidator, runOutputValidator } from './output-validator.js';
 export { createChatClient, createEmbedClient, skillToText, type ChatClient, type EmbedClient, type LLMConfig } from './llm-client.js';
 export { Planner, type ExecutionPlan, type PlanStep, type PlanStepResult, type PlanExecutionResult } from './planner.js';
 export { SkillComposer, type CompositionPlan, type CompositionStep, type CompositionResult } from './composer.js';
 export { dbg } from './debug.js';
+export {
+  SandboxRunner,
+  SANDBOX_ERROR,
+  type SandboxErrorCode,
+  type SandboxRunnerDeps,
+  type SandboxInvocation,
+  type SandboxCommandInput,
+  type SandboxRunInput,
+  type SandboxSpawnInput,
+  type SandboxRunOutput,
+  type SandboxSession,
+  type BoundSandboxExecutionPort,
+} from './sandbox-runner.js';
+export {
+  createDefaultSandboxRunner,
+  createDefaultSandboxRunnerAsync,
+  defaultSnapshotStoreDir,
+} from './sandbox-runner-factory.js';
+export {
+  createVmBackend,
+  type CreateVmBackendDeps,
+  type NativeVmModule,
+  type VmBackendUnavailable,
+} from './sandbox-vm-assembly.js';
+export { buildSecretProviderFromConfig } from './secret-provider.js';
+export * from './execution-context.js';
 
 export {
   loadConfig, getConfig, resetConfig,
   getConfigDir, getConfigPath, getEnvPath,
   saveConfigFile, saveEnvFile,
-  getInstallPref, saveInstallPref,
 } from './config-resolver.js';
 export type {
   ResolvedConfig, OctopusConfigV2,

@@ -89,3 +89,6 @@ export type {
 
 // Onboarding
 export { runOnboarding, ensureOnboarded } from '@agentoctopus/cli/dist/onboard.js';
+
+// Sandbox — canonical schemas, types, backends, policy (leaf package)
+export * from '@agentoctopus/sandbox';

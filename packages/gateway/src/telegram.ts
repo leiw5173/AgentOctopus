@@ -3,14 +3,14 @@ const { Telegraf } = telegrafPkg;
 type Context = import('telegraf').Context;
 import { bootstrapEngine, DIRECT_ANSWER_SYSTEM_PROMPT } from './engine.js';
 import { sessionManager } from './session.js';
-import { type CredentialMissingResult, type BinaryMissingResult } from '@agentoctopus/core';
+import { type CredentialMissingResult, type UnsupportedRuntimeRequirementsResult } from '@agentoctopus/core';
 
 function isCredentialMissing(result: unknown): result is CredentialMissingResult {
   return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'credential_missing';
 }
 
-function isBinaryMissing(result: unknown): result is BinaryMissingResult {
-  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'binary_missing';
+function isUnsupportedRuntime(result: unknown): result is UnsupportedRuntimeRequirementsResult {
+  return typeof result === 'object' && result !== null && 'type' in result && (result as { type: string }).type === 'unsupported_runtime_requirements';
 }
 
 export interface TelegramGatewayOptions {
@@ -60,9 +60,9 @@ export async function startTelegramGateway(options: TelegramGatewayOptions): Pro
         return;
       }
 
-      if (isBinaryMissing(result)) {
+      if (isUnsupportedRuntime(result)) {
         const tools = result.missing.map(b => `  - ${b}`).join('\n');
-        await ctx.reply(`I matched a skill but it requires tools that aren't installed:\n${tools}\n\nInstall the tool(s) above, then retry.`);
+        await ctx.reply(`I matched a skill but it requires tools that aren't installed:\n${tools}\n\nNo trusted runtime profile covers: ${result.missing.join(', ')}. Ask the operator to add one under \`sandbox.runtimeProfiles\`.`);
         return;
       }
 

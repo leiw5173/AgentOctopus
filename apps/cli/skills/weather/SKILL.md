@@ -5,9 +5,11 @@ description: >
   Use when the user asks about weather, temperature, rain, forecast,
   or conditions in a place — e.g. "What's the weather in Tokyo?".
 tags: [weather, forecast, temperature, climate]
-version: "1.0.0"
+version: "1.0.1"
 requires:
-  bins: [curl]
+  bins: [node]
+sandbox:
+  hosts: [wttr.in]
 ---
 
 ## Instructions

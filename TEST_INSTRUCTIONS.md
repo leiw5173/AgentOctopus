@@ -1472,3 +1472,222 @@ curl -s -X POST http://localhost:3000/api/ask \
 > **Phase 13 tests:** WebhookChannel (13.3) verified — returns JSON with skillUsed. WebchatChannel timeout during testing, code path exists. Multi-agent, sandbox, planner, DM pairing features not fully integrated.
 
 > **Phase 14 fix:** Install specs were not being extracted from ClawHub skill format (`metadata.openclaw.install`). Fixed in `local-loader.ts` to extract install from raw YAML while keeping Zod validation for requires. Phase 14.1-14.5 verified working.
+
+---
+
+## Phase S — Sandbox Security Matrix
+
+The sandbox security suite lives in `packages/sandbox/tests/security/` (111 tests total). Run scoped:
+
+```bash
+pnpm --filter @agentoctopus/sandbox exec vitest run tests/security
+```
+
+Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lanes run on any host with Docker (and, on Darwin, `sandbox-exec`). The **privileged Linux** lane is CI-owned — it requires a provisioned self-hosted runner with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` and `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`; on a macOS dev host it skips and that skip is NOT coverage.
+
+### Rows
+
+| # | Group | Vitest file | Runner prerequisite | Expected |
+|---|---|---|---|---|
+| S1 | Image contract: no runtime entrypoint/shell/network clients; proxy self-contained; immutable refs | `tests/security/image-contract.test.ts` | hosted Docker | 6 cases pass — `/bin/sh`,`/bin/bash`,`/usr/bin/curl`,`/usr/bin/wget`,`/usr/bin/npm`,`/usr/bin/npx` absent from runtime image; proxy image is a self-contained esbuild bundle; refs are immutable digests. |
+| S2 | Docker host-canary, direct internet, metadata, env, caps, timeout/tree-kill, cgroup | `tests/security/docker-lane.test.ts` | hosted Docker (immutable image must be pulled) | Host canary unreadable+unwritable; `direct-internet` + `metadata` unreachable without proxy; no host/credential env leak; dropped capabilities; timeout reaps the process tree; cgroup settings enforced. (10 cases fail locally when the immutable runtime image cannot be pulled — pre-existing Docker provisioning delta, zero on CI.) |
+| S3 | Docker sidecar / internal-network alias + CA mount | `tests/security/docker-topology.test.ts` | hosted Docker | Runtime container reaches proxy only at `http://egress-proxy:8080` on the internal network; CA bundle mounted read-only at `/etc/skill-ca/ca.pem`. |
+| S4 | Privileged Linux mirrored host/network/env/output/timeout | `tests/security/linux-lane.test.ts` | privileged Linux (`OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`) | CI-owned, zero-skip. Mirrors the Docker host-canary, network-denial, env-hygiene, output-capture, and timeout/tree-kill cases under real Linux namespace isolation. |
+| S5 | Linux named-netns `/32` route, proxy-only port, CA mount, nft, cgroup | `tests/security/linux-topology.test.ts` | privileged Linux (`OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`) | CI-owned. Skill netns has only a `/32` route + proxy port reachable; no NAT/default route; nftables + cgroup-v2 enforcement proven. |
+| S6 | Proxy non-granted HTTP/CONNECT; method/path/port/scheme injection | `tests/security/proxy-lane.test.ts` | hosted Docker | Non-granted HTTP and CONNECT denied; injected method/path/port/scheme cannot bypass the allowlist. |
+| S7 | Redirect same-origin/cross-origin method+credential behavior | `tests/security/proxy-lane.test.ts` | hosted Docker | Same-origin redirect follows method+credential rules; cross-origin redirect strips credentials. |
+| S8 | Response cap / framing and max-connection accounting | `tests/security/proxy-lane.test.ts` | hosted Docker | Response body capped at the configured limit; framing enforced; max-connection accounting refuses over-budget connections. |
+| S9 | Raw-header smuggling matrix | `tests/security/proxy-lane.test.ts` | hosted Docker | CRLF injection, header folding, and smuggling vectors are rejected before reaching the upstream. |
+| S10 | DNS private resolution / rebinding | `tests/security/proxy-lane.test.ts` | hosted Docker | Private/loopback DNS resolution denied; rebinding to an internal address does not grant access. |
+| S11 | TLS MITM with upstream test CA and IP SAN type 7 | `tests/security/proxy-lane.test.ts` | hosted Docker | Upstream TLS uses system trust only; the test-only injected CA MITMs the session; IP SAN type 7 is handled correctly. |
+| S12 | Persistent MCP multi-message, malformed response, close/reaping (Docker + Linux) | `packages/core/tests/mcp-stdio-docker-e2e.test.ts` (+ Linux variant on privileged runner) | hosted Docker (Docker variant); privileged Linux (Linux variant) | Multi-message MCP stdio transport over the real launcher works; malformed responses are handled; close reaps the transport on both Docker and Linux. The Docker variant is hosted-Docker-owned; a future Linux variant must parameterize the real launcher before ownership changes. |
+| S13 | Identity grants, hardlink/special files, byte/path/mode/symlink tamper | `tests/security/identity-lane.test.ts` | hosted Docker | Granted capabilities honored; hardlinks and special files rejected at build time; byte/path/mode/symlink tamper aborts with `SNAPSHOT_MISMATCH`. |
+| S14 | macOS restricted behavioral-or-unavailable / full-rejected branch | `tests/security/macos-restricted-lane.test.ts` | macOS (`sandbox-exec`) | Fail-closed selection on every Darwin host (OS backend never `full`; default `full` rejected without Docker; restricted requires explicit `os`+`restricted` opt-in). When `probeMacSandbox()` is available, real `sandbox-exec` enforcement denies host-canary read/write, public+loopback TCP, and host-secret env forwarding. macOS is never described as full isolation. |
+| S15 | Release preflight / publish security prerequisite validation | `tests/security/publish-gate.test.mjs` | hosted (fixture-driven) | Release Preflight records both immutable image IDs + the API-resolved security-gate conclusion; Release Publish re-verifies the gate against the live GitHub API and fails closed if `master` moved since preflight. Foreign-path/branch/event, missing-security-job, mutable-digest, SHA/attempt/run-id mismatch, and uppercase-SHA fixtures all reject. |
+| S16 | VM L3 integration lane (real libkrun guest) | `tests/security/vm-lane.test.ts` | macOS Apple Silicon (`OCTOPUS_VM_LANE=1`, CI-owned) | `node -e` stdout over vsock; curl via proxy + CA; timeout kills whole VM; output overflow capped + separate from timeout; G1 host-canary unreadable; G2 network unreachable; argv survives encode→decode. Guest `octopus-vm-init`/`octopus-vsock-forwarder` are statically cross-compiled per arch (`aarch64-linux-gnu-gcc` for linux-arm64, host `cc` + `-static` for linux-x64) and stay static (TCB-critical, independent of the node library set), while the sealed rootfs separately bundles the guest node's dynamic loader + `DT_NEEDED` library closure (discovered from the node ELF via `readelf`, copied from CI's per-arch lib dirs `OCTOPUS_ROOTFS_LIBS`/`OCTOPUS_ROOTFS_LIBS_ARM64` — a dynamic node with no libs dir fails the build) so the guest kernel can exec `/usr/bin/node` and the probes reach their DONE markers; workload stdio rides the named "krun-stdio" console port, and the workload exit code reaches the host as an `{"exit":N}` frame on the octopus-control port (libkrun's exit-code ioctl is virtiofs-only on this ext4 root). FAIL-CLOSED: the lane emits a JSON report and `assert-no-skipped-tests.mjs` fails the job if any test skips — a missing TCB fails CI, never silently passes. |
+| S17 | VM L4 adversarial escape matrix | `tests/security/vm-escape-matrix.test.ts` | macOS Apple Silicon (`OCTOPUS_VM_LANE=1`, CI-owned) | Block image write → EROFS; proxy bypass → EPERM/timeout; credential leak surface; argv injection (shell metachars NOT interpreted); bootstrap integrity (vm-init only PID 1); NUL injection rejected at spawn; executable-allowlist bypass ⇒ exit(127) w/o execve; G1 + G2 repeatable. FAIL-CLOSED on any skip (same zero-skip gate as S16). |
+| S18 | VM release trust root + signed release manifest | `tests/vm/release-key.test.ts` (sandbox), `tests/sign-release-manifest.test.ts` (sandbox-vm-native) | hosted (unit) | Compiled-in Ed25519 public key is a valid SPKI and is consulted by `verifyOuterReleaseManifest` (foreign signature / tampered body → `bad-signature`, fail-closed); base64-seed and PKCS8-PEM forms of the CI signing secret derive the identical public key. A PRESENT-but-unverifiable manifest (bad signature, missing committed key, OR a signed body that does not bind to the loaded gate manifest — canonical-digest equality is checked after verification) makes `probe()` return `available:false` + `releaseManifest:'signature-invalid'`; a HALF pair (only one of `.json`/`.sig` present — e.g. a deleted `.sig`) fails closed unconditionally; an ABSENT pair fails closed when the engine is built with `requireReleaseSignature` (production assembly) and degrades softly to `'missing'` only on dev/CI harnesses without the flag. |
+| S19 | VM verified-object binding (exec-path + object binding) | `tests/engine.test.ts` (sandbox-vm-native — "post-probe object binding (R5)", "probe() BLK feature check"), `tests/private-tcb-loader.test.ts` (sandbox-vm-native — real ELF loader, Linux+cc), `tests/sandbox-vm-assembly.test.ts` (core — builder divergence) | hosted (unit) | `probe()` is the ONLY reader/verifier of `gate-manifest.json` (signature-bound) and the TCB manifest (single-read). **Exec-path binding (F1):** before any exec, `probe()` realpath-enforces `opts.helperPath` === the `verifyVmTcb()`-verified helper — a divergent configured path fails closed and the BLK probe never runs. Assembly realpath-enforces `builderBinaryPath` === `artifactsDir/vm-image-builder` (else `unavailable`), and the builder port executes the engine's probe-verified path via a lazy resolver (`getVerifiedImageBuilderPath()`), never an independently configured path. **Object binding (F2):** `probe()` FIRST copies the four verified artifacts into an engine-private 0700 dir (hash-as-copied from a single O_NOFOLLOW fd vs the verified manifest) and recreates the versioned SONAME shims (`libkrun.so.1`, `libkrunfw.so.5`) pointing at the private copies — THEN the BLK probe executes the PRIVATE helper with `LD/DYLD_LIBRARY_PATH=privateDir` (the original path is never executed; a realpath→exec swap cannot smuggle unverified code); any later probe failure discards the private dir. `start()` execs the private helper with the loader path forced to the private dir. **Rootfs fd pin:** `resolveRootfs()` opens O_RDONLY\|O_NOFOLLOW, hashes from that fd, pins it; `start()` inherits it at fd 5, launch spec references `/dev/fd/5`, and the helper's launch mode preserves fd 5-7 across its mass-close (watermark 8 — the pinned rootfs fd plus the krun-stdio port pipe fds 6/7; `--has-blk` mode closes ≥5) with an `fcntl(F_GETFD)` check before `krun_add_disk`. Regression: post-probe swaps of gate/helper/libkrun/image-builder/rootfs are NEUTRALIZED; a pre-resolve rootfs swap fails the from-fd digest; a real ELF binary needing `libkrun.so.1` loads the verified private copy via `LD_LIBRARY_PATH` and fails without the shim; `close()` releases the pinned fd + private dir (called from backend cleanup). |
+
+### Pass / Fail Checklist (Phase S)
+
+| # | Test | Pass |
+|---|---|---|
+| S1 | Image contract — no shell/curl/npm in runtime; proxy self-contained; immutable refs | ✅ (CI) |
+| S2 | Docker lane — canary/internet/metadata/env/caps/timeout/cgroup | ✅ (CI; 10 fail locally without the immutable image) |
+| S3 | Docker topology — sidecar internal network + CA mount | ✅ (CI) |
+| S4 | Privileged Linux mirrored isolation | ✅ (CI-owned, zero-skip) |
+| S5 | Linux named-netns /32 route + nft + cgroup | ✅ (CI-owned, zero-skip) |
+| S6 | Proxy non-granted HTTP/CONNECT + injection | ✅ (CI) |
+| S7 | Redirect same/cross-origin method+credential | ✅ (CI) |
+| S8 | Response cap / framing / max-conn | ✅ (CI) |
+| S9 | Raw-header smuggling | ✅ (CI) |
+| S10 | DNS private / rebinding | ✅ (CI) |
+| S11 | TLS MITM upstream CA + IP SAN type 7 | ✅ (CI) |
+| S12 | Persistent MCP multi-message/malformed/close | ✅ (CI, Docker variant) |
+| S13 | Identity grants / hardlink / special / tamper | ✅ (CI) |
+| S14 | macOS restricted behavioral-or-unavailable / full-rejected | ✅ (Darwin host) |
+| S15 | Release preflight / publish gate | ✅ (fixture-driven) |
+| S16 | VM L3 integration lane (zero-skip, fail-closed) | ✅ (CI, macOS Apple Silicon) |
+| S17 | VM L4 adversarial escape matrix (zero-skip, fail-closed) | ✅ (CI, macOS Apple Silicon) |
+| S18 | VM release trust root / signed manifest verification | ✅ (unit) |
+| S19 | VM verified-object binding (realpath exec-path + private copies / fd-pin) | ✅ (unit) |
+
+## Phase E2E — Hermes Layered Telemetry & Debug Endpoint
+
+Tests for the end-to-end telemetry aggregation system (Tasks 3.1–3.7): `ExecutionContext` threading through Router/Executor/SandboxRunner, layered telemetry events (`routing.completed`, `sandbox.completed`, `adapter.completed`, `request.completed`/`request.failed`), `DebugTelemetryBuffer` aggregation, and the admin-only `GET /agent/debug/last-run` endpoint.
+
+### Automated Checks
+
+```bash
+# Run all telemetry-related unit/integration tests
+pnpm --filter @agentoctopus/core test -- config-types.test.ts
+pnpm --filter @agentoctopus/core test -- router-telemetry.test.ts
+pnpm --filter @agentoctopus/core test -- execution-context.test.ts
+pnpm --filter @agentoctopus/core test -- executor-telemetry.test.ts
+pnpm --filter @agentoctopus/core test -- sandbox-runner-telemetry.test.ts
+pnpm --filter @agentoctopus/gateway test -- debug-telemetry.test.ts
+pnpm --filter @agentoctopus/gateway test -- agent-protocol-debug.test.ts
+```
+
+**Expected:** All tests pass. Key coverage:
+- `config-types.test.ts` — `GatewayConfigSchema.debugEndpoints` Zod validation (enabled/includeQuery/bufferSize defaults, prefault behavior).
+- `router-telemetry.test.ts` — `route()` emits exactly one `routing.completed` per call via a shared sink, covering all return points (reranker, score-fallback, no-match). `intentSource`/`intentExtractionSucceeded` track whether the LLM intent-extraction phrase was actually used as `embedQuery`.
+- `execution-context.test.ts` — `ExecutionContext` type contract (all fields optional, traceId/executionId/apiKeyId/receivedAt).
+- `executor-telemetry.test.ts` — Executor emits only `adapter.completed` (real-adapter path, not early returns); `outputValidated` reflects `runOutputValidator` (Promise.race timeout wrapper).
+- `sandbox-runner-telemetry.test.ts` — `sandbox.completed` emission with `phase:'created'` on spawn-create, `phase:'final'` on run() complete and spawn-close. `withExecContext(execContext)` returns a NEW runner instance (no mutation of the shared singleton).
+- `debug-telemetry.test.ts` — `DebugTelemetryBuffer` aggregates events by traceId into a `RunRecord`; created/final sandbox events merge by executionId into `runs[]`; record stays `pending` until a terminal event AND all `runs[]` are final (empty `runs[]` = vacuously final, so no-route completes immediately); status is one-directional; ring buffer evicts oldest beyond bufferSize. `recordRequestStart(traceId, {apiKeyId, receivedAt, query|queryHash})` binds per-request metadata.
+- `agent-protocol-debug.test.ts` — `/ask` handler extracts correlation key `[trace: oct-e2e-<uuid>]` via regex from the raw query BEFORE routing, strips it (cleanQuery) before Router/Executor/session; computes `apiKeyId` as `user:<userId>` or `key:<sha256(rawKey).slice(0,16)>` (NEVER the raw key); emits EXACTLY ONE terminal event per request via a single `emitTerminal` helper gated by a `terminalEmitted` flag — covering feedback early-return, no-route fallback, credential-missing, unsupported-runtime, success, and exception paths (inner try/finally + outer catch that emits `request.failed` then rethrows). `GET /agent/debug/last-run[?runId=<id>]`: 404 when `debugEndpoints.enabled=false`; 403 for non-admin keys (`req.apiKeyEntry.tier === 'admin'`); `runId` → `getByRunId(runId)`, else `latest()`; no match → 200 `{success:true, run:null}`; hit → 200 `{success:true, run}` with `query` stripped unless `includeQuery` (queryHash may remain).
+
+### 3.8 Manual E2E Smoke — Debug Endpoint
+
+Start the gateway with debug endpoints enabled:
+
+```bash
+# Enable debug endpoints in octopus.json
+cat > ~/.agentoctopus/octopus.json << 'EOF'
+{
+  "version": 2,
+  "gateway": {
+    "debugEndpoints": {
+      "enabled": true,
+      "includeQuery": false,
+      "bufferSize": 10
+    }
+  }
+}
+EOF
+
+# Start the gateway
+node -e "import('@agentoctopus/gateway').then(g => g.startAgentGateway())"
+# Wait for: [Agent Gateway] Listening on port 3002
+```
+
+Generate an admin API key:
+
+```bash
+node -e "import('@agentoctopus/gateway').then(g => { const { key, entry } = g.createApiKey({ email: 'admin@test.com', tier: 'admin' }); console.log('key:', key, 'tier:', entry.tier); })"
+# Copy the key output
+```
+
+Send a traced request:
+
+```bash
+curl -s -X POST http://localhost:3002/agent/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' \
+  -d '{"query": "[trace: oct-e2e-12345678-abcd-1234-abcd-123456789abc] what is the weather in Tokyo?"}' | jq .
+```
+
+**Expected:** Returns weather data. The `[trace: ...]` marker is stripped from the query before routing — the Router/Executor never see it.
+
+Fetch the debug record:
+
+```bash
+# Latest run (no runId)
+curl -s http://localhost:3002/agent/debug/last-run \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+
+# Named run
+curl -s 'http://localhost:3002/agent/debug/last-run?runId=oct-e2e-12345678-abcd-1234-abcd-123456789abc' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+```
+
+**Expected:** Returns `{ success: true, run: { runId: "oct-e2e-...", status: "complete", receivedAt: ..., completedAt: ..., apiKeyId: "user:user_<hex>", queryHash: "<sha256>", routing: { ... }, runs: [{ executionId: "...", status: "final", sandbox: { phase: "final", exitCode: 0, sandboxSuccess: true }, adapter: { adapterSuccess: true, outputValidated: true } }], terminal: { kind: "request.completed", reason: null } } }`. `run.query` is absent (because `includeQuery=false`); `run.queryHash` is present. Note: `apiKeyId` is `user:<userId>` when the API-key entry has a userId (always the case for `createApiKey`), otherwise `key:<sha256-16>` — agent-protocol.md documents both forms.
+
+Test access control:
+
+```bash
+# Disabled endpoint (set enabled:false in octopus.json, restart gateway)
+curl -s http://localhost:3002/agent/debug/last-run \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+# Expected: 404 { success: false, error: "Not found" }
+
+# Non-admin key (create a free-tier key, restart gateway with enabled:true)
+node -e "import('@agentoctopus/gateway').then(g => { const { key } = g.createApiKey({ email: 'free@test.com', tier: 'free' }); console.log(key); })"
+curl -s http://localhost:3002/agent/debug/last-run \
+  -H 'Authorization: Bearer <FREE_KEY>' | jq .
+# Expected: 403 { success: false, error: "Admin access required" }
+
+# No auth
+curl -s http://localhost:3002/agent/debug/last-run | jq .
+# Expected: 401 (auth middleware rejects before reaching the endpoint)
+
+# Unknown runId
+curl -s 'http://localhost:3002/agent/debug/last-run?runId=oct-e2e-nonexistent' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq .
+# Expected: 200 { success: true, run: null }
+```
+
+Test `includeQuery=true`:
+
+```bash
+# Update octopus.json: gateway.debugEndpoints.includeQuery = true
+# Restart gateway, send a traced request, fetch the record
+curl -s 'http://localhost:3002/agent/debug/last-run?runId=oct-e2e-...' \
+  -H 'Authorization: Bearer <ADMIN_KEY>' | jq '.run.query'
+# Expected: "what is the weather in Tokyo?" (the stripped query, no [trace: ...] marker)
+```
+
+Test ring-buffer eviction:
+
+```bash
+# Set bufferSize=2, send 3 traced requests with distinct traceIds
+# Fetch the oldest by runId — expected: 200 { success: true, run: null } (evicted)
+# Fetch latest (no runId) — expected: 200 { success: true, run } (most recent)
+```
+
+### 3.9 Hermes Acceptance Gate — E2E Skill Smoke
+
+Distinct from the raw-curl smoke in §3.8, this drives the full pipeline through the `hermes-e2e-test` skill's `run.mjs` — the same test Hermes itself invokes for acceptance. The skill lives at `~/.claude/skills/hermes-e2e-test/{SKILL.md,run.mjs}` and is machine-only (not shipped in the repository); install it on your own machine before running.
+
+Two independent legs:
+- **Leg 1a (Hermes CLI):** Stage 1 drives `hermes -z "<query>"` under an octopus-wrapper PATH that records every CLI invocation as JSONL, then asserts 4-point forensics (hermes exit 0, wrapper `ask` invocation, real octopus exit 0, no signal).
+- **Leg 1b (telemetry):** `run.mjs` itself POSTs `/agent/ask` directly (for deterministic control, embedding a `[trace: oct-e2e-<uuid>]` correlation marker), then polls `GET /agent/debug/last-run` and asserts stages 2–5 from the aggregated RunRecord.
+
+Prerequisites:
+- Gateway running with `gateway.debugEndpoints: {enabled:true, includeQuery:false, bufferSize:10}` in `~/.agentoctopus/octopus.json`.
+- Two API keys created via `createApiKey` (exported from `@agentoctopus/gateway`): a `free`-tier key for `/ask` and an `admin`-tier key for `/agent/debug/last-run`.
+- `AGENTOCTOPUS_E2E_ASK_KEY` (free key) and `AGENTOCTOPUS_E2E_ADMIN_KEY` (admin key) exported in your shell. The admin key NEVER leaves `run.mjs` — it is never passed to Hermes or any subprocess.
+- Hermes logged in.
+
+```bash
+node ~/.claude/skills/hermes-e2e-test/run.mjs --json
+```
+
+**Expected:** JSON with `"verdict": "PASS"` and five stages all `"pass": true`: `hermes+wrapper`, `routing`, `selection`, `score-semantics`, `sandbox+adapter`. The output shape is `{correlationKey, stages:[{stage,name,pass,detail},...], verdict, run}`. Stage 5 asserts that the final `runs[]` element carries both a sandbox event (`meta.backend === 'docker'`, `meta.isolationLevel === 'full'`, `sandboxSuccess === true`) and an adapter event (`adapterSuccess === true`, `outputValidated === true`). A failing stage sets `"pass": false` with a `detail` field explaining what was expected vs. what was received, and `"verdict": "FAIL"`.
+
+## Pass / Fail Checklist (Phase E2E)
+
+| # | Test | Pass |
+|---|---|---|
+| E2E.1 | `config-types.test.ts` — debugEndpoints Zod validation | ✅ |
+| E2E.2 | `router-telemetry.test.ts` — one routing.completed per call, all return paths | ✅ |
+| E2E.3 | `execution-context.test.ts` — ExecutionContext type contract | ✅ |
+| E2E.4 | `executor-telemetry.test.ts` — adapter.completed only on real-adapter path, outputValidated | ✅ |
+| E2E.5 | `sandbox-runner-telemetry.test.ts` — sandbox.created/final phases, withExecContext no mutation | ✅ |
+| E2E.6 | `debug-telemetry.test.ts` — aggregation by traceId, executionId merge, pending→complete/failed transition, ring buffer | ✅ |
+| E2E.7 | `agent-protocol-debug.test.ts` — correlation-key extraction + trace stripping, exactly-one terminal, debug endpoint 404/403/200 states | ✅ |
+| E2E.8 | Manual E2E smoke — traced request, debug record fetch, access control, includeQuery, ring-buffer eviction | ⏭️ (requires running gateway) |
+| E2E.9 | Hermes acceptance gate — `~/.claude/skills/hermes-e2e-test/run.mjs` 5-stage pipeline smoke: `hermes+wrapper`, `routing`, `selection`, `score-semantics`, `sandbox+adapter` (ask key + admin key, debug endpoints enabled) | ⏭️ (requires running gateway + Hermes logged in + machine-only test skill installed) |
+| E2E.10 | `telemetry-integration.test.ts` — one executionId shared across adapter+sandbox per execute(), merged into a single runs[] entry with both events, transitions to 'complete' on terminal | ✅ |

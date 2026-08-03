@@ -1,0 +1,360 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DockerBackend, buildDockerArgs } from '../src/docker/docker-backend.js';
+import { ContainmentCleanupError } from '../src/backend.js';
+import { buildSnapshot } from '../src/snapshot.js';
+import { resolvePolicy } from '../src/policy.js';
+import { ImmutableImageRefSchema, SandboxConfigSchema } from '../src/schema.js';
+import type { BackendPrepareOptions } from '../src/backend.js';
+import type { SandboxSkillDescriptor } from '../src/types.js';
+
+const hasDocker = (() => { try { execSync('docker info', { stdio: 'pipe' }); return true; } catch { return false; } })();
+const DUMMY_IMAGE = `alpine@sha256:${'a'.repeat(64)}`; // syntax-only unit-test fixture; never executed
+const requestedDaemonImage = process.env.OCTOPUS_TEST_IMAGE;
+const daemonImage = requestedDaemonImage
+  ? ImmutableImageRefSchema.safeParse(requestedDaemonImage)
+  : undefined;
+const runDaemonTests = hasDocker && daemonImage?.success === true;
+
+let tmp: string; let descriptor: SandboxSkillDescriptor;
+const unitConfig = SandboxConfigSchema.parse({
+  docker: { image: DUMMY_IMAGE, memory: '128m', cpus: '0.5', pids: 32, ulimits: { nofile: 128, fsize: '16m' } },
+  proxy: { artifact: DUMMY_IMAGE }, // digest-pinned proxy image; required by prepareTopology()'s `config.proxy` guard
+  defaults: { memory: '512m', timeoutMs: 15000, cpus: '2', outputMaxBytes: 65536 },
+});
+const daemonConfig = SandboxConfigSchema.parse({
+  ...unitConfig,
+  docker: { ...unitConfig.docker, image: daemonImage?.success ? daemonImage.data : DUMMY_IMAGE },
+});
+
+beforeEach(async () => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sbx-'));
+  const src = path.join(tmp, 'src');
+  fs.mkdirSync(src, { recursive: true });
+  fs.writeFileSync(path.join(src, 'hello.txt'), 'hello');
+  // Node probe scripts the daemon tests run directly (no shell in the runtime image).
+  fs.writeFileSync(path.join(src, 'read-hello.js'),
+    "const fs=require('fs');process.stdout.write(fs.readFileSync('/skill/hello.txt','utf8'));");
+  fs.writeFileSync(path.join(src, 'net-probe.js'),
+    "const net=require('net');const s=net.connect(80,'example.com');s.on('error',e=>{process.stdout.write(e.code+':'+e.message);process.exit(0);});s.on('connect',()=>{process.stdout.write('CONNECTED');process.exit(0);});setTimeout(()=>{process.stdout.write('TIMEOUT');process.exit(0);},5000);");
+  fs.writeFileSync(path.join(src, 'sleep.js'),
+    "setInterval(()=>{},60000);");
+  fs.writeFileSync(path.join(src, 'echo-server.js'),
+    "process.stdin.on('data',d=>process.stdout.write(d));process.stdin.on('end',()=>process.exit(0));");
+  const snap = await buildSnapshot({ sourceDir: src, storeDir: path.join(tmp, 'store'), installationId: 'u1', name: 't' });
+  descriptor = { identity: snap.identity, snapshotRoot: snap.snapshotRoot, request: {} };
+});
+
+afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+// Build the canonical prepare() options: resolved policy + execution plumbing.
+function prepareOpts(config = unitConfig): BackendPrepareOptions {
+  return {
+    ...resolvePolicy(descriptor, config),
+    snapshotRoot: descriptor.snapshotRoot,
+    expectedSnapshotDigest: descriptor.identity.digest,
+    proxyAddr: 'http://egress-proxy:8080',
+    caBundlePath: '/host/session-ca.pem',
+    runtimeProfile: { id: 'unit', bins: ['node'], path: '/usr/local/bin', dockerImage: DUMMY_IMAGE },
+    guestSkillRoot: '/skill',
+    guestCaBundlePath: '/etc/skill-ca/ca.pem',
+  };
+}
+
+describe('buildDockerArgs', () => {
+  it('uses bounded Docker caps, numeric fsize bytes, and the exact CA file mount', () => {
+    const prepare: BackendPrepareOptions = {
+      ...prepareOpts(),
+      resources: { memoryBytes: 8 * 1024 ** 3, timeoutMs: 999_999, cpus: 64 },
+      caBundlePath: '/host/session-ca.pem',
+    };
+    const args = buildDockerArgs({
+      config: unitConfig,
+      prepare,
+      spec: { command: ['true'] },
+      networkName: 'octopus-test-net',
+      containerName: 'octopus-test-container',
+    });
+
+    expect(args).toContain('134217728'); // Docker's trusted 128m cap, in bytes
+    expect(args).toContain('0.5');
+    expect(args).toContain('fsize=16777216'); // Docker requires numeric bytes
+    expect(args).toContain('type=bind,source=/host/session-ca.pem,target=/etc/skill-ca/ca.pem,readonly');
+    expect(args).toContain('SSL_CERT_FILE=/etc/skill-ca/ca.pem');
+    expect(args.at(-2)).toBe(DUMMY_IMAGE);
+  });
+
+  it('emits the full hardening argument set with correct adjacent values', () => {
+    const prepare = prepareOpts();
+    const args = buildDockerArgs({
+      config: unitConfig,
+      prepare,
+      spec: { command: ['true'] },
+      networkName: 'octopus-test-net',
+      containerName: 'octopus-test-container',
+    });
+
+    // Capability and privilege restrictions
+    const capDropIdx = args.indexOf('--cap-drop');
+    expect(capDropIdx).toBeGreaterThan(-1);
+    expect(args[capDropIdx + 1]).toBe('ALL');
+
+    const secOptIdx = args.indexOf('--security-opt');
+    expect(secOptIdx).toBeGreaterThan(-1);
+    expect(args[secOptIdx + 1]).toBe('no-new-privileges');
+
+    const userIdx = args.indexOf('--user');
+    expect(userIdx).toBeGreaterThan(-1);
+    expect(args[userIdx + 1]).toBe('65534:65534');
+
+    expect(args).toContain('--read-only');
+
+    const tmpfsIdx = args.indexOf('--tmpfs');
+    expect(tmpfsIdx).toBeGreaterThan(-1);
+    expect(args[tmpfsIdx + 1]).toMatch(/noexec/);
+    expect(args[tmpfsIdx + 1]).toMatch(/nosuid/);
+
+    // Resource limits
+    const pidsIdx = args.indexOf('--pids-limit');
+    expect(pidsIdx).toBeGreaterThan(-1);
+    expect(args[pidsIdx + 1]).toBe('32');
+
+    const ulimitIdx = args.indexOf('--ulimit');
+    expect(ulimitIdx).toBeGreaterThan(-1);
+    expect(args[ulimitIdx + 1]).toBe('nofile=128');
+
+    // Network isolation (invariant-1 wiring)
+    const netIdx = args.indexOf('--network');
+    expect(netIdx).toBeGreaterThan(-1);
+    expect(args[netIdx + 1]).toBe('octopus-test-net');
+
+    // Mount points (--mount form: snapshot/CA source paths may contain a colon,
+    // which -v would reject with "too many colons").
+    const mountArgs = args.filter((a, i) => args[i - 1] === '--mount');
+    expect(mountArgs.some((v) => v.endsWith(',target=/skill,readonly'))).toBe(true);
+    expect(mountArgs).toContain('type=bind,source=/host/session-ca.pem,target=/etc/skill-ca/ca.pem,readonly');
+
+    // Every -e value must contain '=' (no bare passthrough)
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-e') {
+        expect(args[i + 1]).toMatch(/=/);
+      }
+    }
+  });
+
+  it('trusted env wins over spec.env on collision (last-wins ordering)', () => {
+    const prepare = prepareOpts();
+    const args = buildDockerArgs({
+      config: unitConfig,
+      prepare,
+      spec: { command: ['true'], env: { HTTPS_PROXY: 'http://evil' } },
+      networkName: 'octopus-test-net',
+      containerName: 'octopus-test-container',
+    });
+
+    // Collect all -e values starting with HTTPS_PROXY=
+    const httpsProxyValues: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-e' && args[i + 1]?.startsWith('HTTPS_PROXY=')) {
+        httpsProxyValues.push(args[i + 1]);
+      }
+    }
+    // The LAST one must be the trusted value (Docker applies last-wins)
+    expect(httpsProxyValues.length).toBeGreaterThanOrEqual(2);
+    expect(httpsProxyValues.at(-1)).toBe(`HTTPS_PROXY=${prepare.proxyAddr}`);
+  });
+
+  it('injects NODE_OPTIONS bootstrap AFTER spec.env so a skill cannot override it', () => {
+    const prepare = prepareOpts();
+    const args = buildDockerArgs({
+      config: unitConfig,
+      prepare,
+      spec: { command: ['node', '/skill/scripts/invoke.js'], env: { NODE_OPTIONS: '--evil', OCTOPUS_INPUT: '{}' } },
+      networkName: 'octopus-test-net',
+      containerName: 'octopus-test-container',
+    });
+    // findIndex on the VALUE array element (each '-e' flag is followed by its
+    // 'K=V' value) — predicate runs on the value, so check args[i-1]==='-e'.
+    // We scan ALL '-e NODE_OPTIONS=' occurrences and take the LAST one (Docker
+    // last-wins; the trusted injection is appended after the spec.env one).
+    const nodeOptionsIdxs = args
+      .map((a, i) => (args[i - 1] === '-e' && a.startsWith('NODE_OPTIONS=') ? i : -1))
+      .filter(i => i >= 0);
+    const specEnvIdx = args.findIndex((a, i) => args[i - 1] === '-e' && a === 'NODE_OPTIONS=--evil');
+    expect(nodeOptionsIdxs.length).toBeGreaterThan(0);
+    const lastIdx = nodeOptionsIdxs[nodeOptionsIdxs.length - 1];
+    expect(args[lastIdx]).toBe('NODE_OPTIONS=--require /opt/octopus-boot/bootstrap.cjs');
+    // The trusted injection must come after every spec.env -e entry (Docker last-wins on collision).
+    expect(specEnvIdx).toBeGreaterThan(-1);
+    expect(lastIdx).toBeGreaterThan(specEnvIdx);
+  });
+
+  it('rejects a mutable runtime image before any Docker operation', async () => {
+    const invalidConfig = { ...unitConfig, docker: { ...unitConfig.docker, image: 'example/runtime:latest' } } as typeof unitConfig;
+    const be = new DockerBackend({ config: invalidConfig, sessionId: `invalid-${process.pid}` });
+    await expect(be.prepareTopology()).rejects.toThrow(/immutable|sha256/i);
+  });
+});
+
+describe('DockerBackend fail-closed', () => {
+  it('run() rejects when called before prepare()', async () => {
+    const be = new DockerBackend({ config: unitConfig, sessionId: `noprep-${process.pid}` });
+    await expect(be.run({ command: ['true'] })).rejects.toThrow(/prepare/i);
+  });
+
+  it('prepareTopology() rejects a mutable proxy artifact before network creation', async () => {
+    const invalidConfig = { ...unitConfig, proxy: { artifact: 'example/proxy:latest' } } as typeof unitConfig;
+    const be = new DockerBackend({ config: invalidConfig, sessionId: `mutproxy-${process.pid}` });
+    await expect(be.prepareTopology()).rejects.toThrow(/immutable|sha256/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cleanup() containment semantics (T3): runtime-container removal failure is a
+// ContainmentCleanupError; network teardown races stay best-effort soft
+// reasons. cleanup() memoizes the FIRST outcome — repeat calls rethrow the
+// same error or resolve identically.
+// ---------------------------------------------------------------------------
+
+describe('DockerBackend cleanup containment taxonomy (T3)', () => {
+  function makeBackendWithRunDocker(
+    runDocker: (args: string[]) => Promise<unknown>,
+  ): DockerBackend {
+    return new DockerBackend({
+      config: unitConfig,
+      sessionId: `t3-${Math.random().toString(36).slice(2, 8)}`,
+      deps: { runDocker: runDocker as never },
+    });
+  }
+
+  it('runtime container removal failure → ContainmentCleanupError (memoized)', async () => {
+    // The `rm -f <runtimeContainer>` step rejects — that may leave the
+    // runtime container alive → containment teardown failed.
+    const runDocker = vi.fn(async (args: string[]) => {
+      if (args[0] === 'rm' && args[1] === '-f') throw new Error('docker daemon unreachable');
+      return { stdout: '', stderr: '' };
+    });
+    const be = makeBackendWithRunDocker(runDocker);
+
+    const first = await be.cleanup().catch((e) => e);
+    expect(first).toBeInstanceOf(ContainmentCleanupError);
+    expect((first as ContainmentCleanupError).reasons.join(' ')).toMatch(/docker daemon unreachable/);
+
+    // Memoized: second call rethrows the SAME first outcome.
+    const second = await be.cleanup().catch((e) => e);
+    expect(second).toBe(first);
+  });
+
+  it('network teardown failure is best-effort (soft), NOT containment', async () => {
+    // `rm -f` succeeds (container is gone) but network removal fails. That is
+    // host hygiene — the runtime container is destroyed, so the skill cannot
+    // still be running. Resolves without ContainmentCleanupError.
+    const runDocker = vi.fn(async (args: string[]) => {
+      if (args[0] === 'network') throw new Error('network has active endpoints');
+      return { stdout: '', stderr: '' };
+    });
+    const be = makeBackendWithRunDocker(runDocker);
+    await expect(be.cleanup()).resolves.toBeUndefined();
+    // Idempotent resolve on second call too.
+    await expect(be.cleanup()).resolves.toBeUndefined();
+  });
+
+  it('cleanup() is memoized: first resolve, repeat resolve (no extra calls)', async () => {
+    const runDocker = vi.fn(async () => ({ stdout: '', stderr: '' }));
+    const be = makeBackendWithRunDocker(runDocker);
+    await be.cleanup();
+    const callsAfterFirst = runDocker.mock.calls.length;
+    await be.cleanup();
+    await be.cleanup();
+    expect(runDocker.mock.calls.length).toBe(callsAfterFirst);
+  });
+});
+
+describe.skipIf(!runDaemonTests)('DockerBackend topology and persistent process contract', () => {
+  it('creates both networks before prepare and exposes exited instead of wait()', async () => {
+    const be = new DockerBackend({ config: daemonConfig, sessionId: `contract-${process.pid}` });
+    const carrier = await be.prepareTopology();
+    expect(carrier).toMatchObject({
+      kind: 'docker-sidecar',
+      proxyImage: expect.any(String),
+      internalNetwork: expect.stringContaining('-internal'),
+      egressNetwork: expect.stringContaining('-egress'),
+      reachableHost: expect.any(String),
+    });
+    // This drives the real Docker CLI: prepareTopology creates the networks and
+    // spawn() runs `echo-server.js` (written into the fixture) inside a container.
+    await be.prepare(prepareOpts(daemonConfig));
+    const child = await be.spawn({ command: ['node', '/skill/echo-server.js'], stdin: 'pipe' });
+    child.stdin.write('{"n":1}\n{"n":2}\n');
+    child.stdin.end();
+    expect(await child.exited).toMatchObject({ exitCode: 0 });
+    await child.close();
+    await child.close();
+    await be.cleanup();
+  });
+});
+
+// The pure/unit tests that always run (argument builder, network-arg ownership,
+// process-contract shape) live above and do not touch the daemon. The daemon
+// integration cases below additionally prove prepareTopology creates the internal
+// network before proxy launch, creates the egress bridge, and runtime docker run
+// uses only --network <internalNetwork>; cleanup covers both networks.
+describe.skipIf(!runDaemonTests)('DockerBackend daemon integration', () => {
+  // The runtime image ships `node` and no shell/curl/wget/busybox, so every
+  // probe runs as a direct Node argv. The snapshot fixture provides the JS
+  // files; commands never invoke /bin/sh, cat, wget, or sleep.
+
+  it('runs a command in the snapshot and captures stdout', async () => {
+    const be = new DockerBackend({ config: daemonConfig, sessionId: `t${process.pid}` });
+    await be.prepareTopology();
+    await be.prepare(prepareOpts(daemonConfig));
+    try {
+      const res = await be.run({ command: ['node', '/skill/read-hello.js'] });
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout.trim()).toBe('hello');
+      expect(res.meta.isolationLevel).toBe('full');
+    } finally { await be.cleanup(); }
+  });
+
+  it('skill cannot see host env vars', async () => {
+    const be = new DockerBackend({ config: daemonConfig, sessionId: `t${process.pid}` });
+    await be.prepareTopology();
+    await be.prepare(prepareOpts(daemonConfig));
+    try {
+      const res = await be.run({
+        command: ['node', '-e', 'process.stdout.write(JSON.stringify({HOME:process.env.HOME,SECRET:process.env.DOES_NOT_EXIST}))'],
+      });
+      const out = JSON.parse(res.stdout);
+      expect(out.HOME).not.toBe(process.env.HOME ?? '__nohosthome__');
+      expect(out.SECRET).toBeUndefined();
+    } finally { await be.cleanup(); }
+  });
+
+  it('has no internet route (internal network)', async () => {
+    const be = new DockerBackend({ config: daemonConfig, sessionId: `t${process.pid}` });
+    await be.prepareTopology();
+    await be.prepare(prepareOpts(daemonConfig));
+    try {
+      // net-probe.js attempts a TCP connect to example.com:80 and prints the
+      // error code/message (ENOTFOUND/EHOSTUNREACH/ECONNREFUSED), then exits 0.
+      const res = await be.run({ command: ['node', '/skill/net-probe.js'], timeoutMs: 8000 });
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout + res.stderr).toMatch(/ENOTFOUND|EHOSTUNREACH|ECONNREFUSED|getaddrinfo|network is unreachable/i);
+    } finally { await be.cleanup(); }
+  });
+
+  it('times out and destroys the container', async () => {
+    const be = new DockerBackend({ config: daemonConfig, sessionId: `t${process.pid}` });
+    await be.prepareTopology();
+    await be.prepare(prepareOpts(daemonConfig));
+    try {
+      // sleep.js holds the process open with a setInterval; the backend's
+      // timeout kills the container before it resolves.
+      const res = await be.run({ command: ['node', '/skill/sleep.js'], timeoutMs: 2000 });
+      expect(res.timedOut).toBe(true);
+    } finally { await be.cleanup(); }
+  });
+});

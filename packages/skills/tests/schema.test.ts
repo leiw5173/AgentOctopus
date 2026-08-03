@@ -48,4 +48,39 @@ describe("SkillFrontmatterSchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("accepts an untrusted sandbox.request block (requests only)", () => {
+    const result = SkillFrontmatterSchema.safeParse({
+      name: "weather",
+      description: "Weather skill",
+      sandbox: {
+        hosts: ["wttr.in"],
+        credentials: ["WTR_API_KEY"],
+        resources: { memory: "256m", timeoutMs: 20000 },
+      },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.sandbox?.hosts).toEqual(["wttr.in"]);
+      expect(result.data.sandbox?.credentials).toEqual(["WTR_API_KEY"]);
+    }
+  });
+
+  it("rejects trusted/grant keys in the untrusted sandbox manifest block", () => {
+    const base = { name: "x", description: "x" };
+    // Manifest must NOT be able to grant itself anything or override backends.
+    for (const bad of [
+      { sandbox: { grants: [] } },
+      { sandbox: { defaultBackend: "docker" } },
+      { sandbox: { minIsolationLevel: "none" } },
+      { sandbox: { docker: {} } },
+      { sandbox: { proxy: {} } },
+      { sandbox: { runtimeProfiles: {} } },
+      { sandbox: { backend: "docker" } },
+      { sandbox: { image: "alpine" } },
+      { sandbox: { credentials: [{ key: "K", host: "x" }] } },
+    ]) {
+      expect(SkillFrontmatterSchema.safeParse({ ...base, ...bad }).success).toBe(false);
+    }
+  });
 });

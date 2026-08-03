@@ -6,9 +6,11 @@ description: >
   or a domain name (e.g. github.com) to look up. Do NOT use for general questions
   about what ISP, AS, or networking terms mean.
 tags: [ip, geolocation, network, lookup, dns]
-version: "1.0.0"
+version: "1.0.1"
 requires:
-  bins: [curl]
+  bins: [node]
+sandbox:
+  hosts: [ip-api.com]
 ---
 
 ## Instructions

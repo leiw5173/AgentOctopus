@@ -1,0 +1,9 @@
+---
+"@agentoctopus/sandbox": patch
+---
+
+os-helper: raise `--stop-before-exec` SIGSTOP in the PARENT (before phase-1 setup), not the child. Root cause of the privileged-lane pids-ceiling + timeout regression:
+
+The backend's `cgroup.attach(pid)` attaches the SPAWNED pid — the helper parent that `os-backend.ts` gets from `spawn()`. But the helper previously raised SIGSTOP in the CHILD (`phase3_enter_root`), a pid the backend never sees (the child is created inside the helper after `unshare(CLONE_NEWPID)` + `fork()`). In cgroup v2, writing a pid to `cgroup.procs` moves that process but NOT its existing children — only NEW forks inherit the parent's cgroup. Because the child was forked BEFORE the parent was attached, the untrusted node process (and every grandchild it forked) stayed OUTSIDE the session cgroup. So `pids.max=64` never bounded the fork-bomb (the probe spawned >63 children) and `cgroup.kill` never reached the grandchildren (the widespread test timeouts waiting for output/exit/reaping).
+
+Fix: raise SIGSTOP in the PARENT in `main()` before phase 1. The backend attaches the spawned pid (unchanged code — exactly the pid `attach()`'s read-back/retry machinery was built for), verifies membership, then SIGCONTs. The ENTIRE untrusted setup — netns enter, unshare, mounts, chroot, fork, execve — then runs inside the session cgroup, and the PID-namespace-init child inherits the cgroup at `fork()` from its first instruction. This is strictly stronger than the old child-stop design (the child is confined from instruction 0 rather than stopping mid-setup outside the cgroup). The uid change (mapped-root) merely EXPOSED this latent bug by letting the helper reach `execve` for the first time; reverting it would only re-mask the bug. Comments updated in helper.c, cgroup.ts, run-spec.ts, os-backend.ts.

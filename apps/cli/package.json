@@ -22,6 +22,7 @@
     "@agentoctopus/core": "workspace:*",
     "@agentoctopus/gateway": "workspace:*",
     "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/sandbox": "workspace:*",
     "@agentoctopus/skills": "workspace:*",
     "@inquirer/prompts": "^8.5.2",
     "chalk": "^6.0.0",

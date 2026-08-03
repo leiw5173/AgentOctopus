@@ -74,6 +74,13 @@ docs/superpowers/
 # CodeGraph index
 .codegraph/
 
+# Sandbox reproducible runtime artifacts (built by packages/sandbox/scripts/)
+packages/sandbox/runtime/
+# Sandbox bundled egress-proxy artifact (built by bundle-egress-proxy.mjs)
+packages/sandbox/build/
+# Vendored undici used by runtime bootstrap.cjs
+packages/sandbox/images/runtime/undici/
+
 # Python virtual env
 .venv/
 

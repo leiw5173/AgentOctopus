@@ -1,10 +1,8 @@
-import type { LoadedSkill } from '@agentoctopus/registry';
-import type { Adapter, AdapterResult } from './adapter.js';
+import type { Adapter, AdapterInput, AdapterInvocationContext, AdapterResult } from './adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import cp from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { SandboxMcpTransport } from './sandbox-mcp-transport.js';
 
 /** Read the SKILL.md body (below the frontmatter) without adding a gray-matter dependency. */
 function readSkillBody(dirPath: string): string {
@@ -20,8 +18,20 @@ function readSkillBody(dirPath: string): string {
 
 const MCP_CONNECT_TIMEOUT_MS = 15_000;
 
+/**
+ * MCP adapter converged onto the single sandbox execution boundary
+ * (Plan 5 Task 5). The MCP child now runs INSIDE the sandbox over a
+ * persistent duplex `SandboxProcess` via `SandboxMcpTransport`, spawned
+ * through the skill-bound `context.sandbox` port. There is NO host stdio
+ * child, NO host process-kill cleanup, and NO inherited host environment — the
+ * guest receives only the minimal env the sandbox session provisions.
+ */
 export class McpAdapter implements Adapter {
-  async invoke(skill: LoadedSkill, input: Record<string, unknown>): Promise<AdapterResult> {
+  async invoke(input: AdapterInput, context: AdapterInvocationContext): Promise<AdapterResult> {
+    const { skill } = input;
+    const toolInput = input.input;
+    let transport: SandboxMcpTransport | undefined;
+    let client: Client | undefined;
     try {
       // Determine the MCP command to run:
       // 1. manifest.endpoint (explicit)
@@ -39,22 +49,17 @@ export class McpAdapter implements Adapter {
         return { success: false, error: 'No command or endpoint specified for MCP skill' };
       }
 
-      // Clean up stale mcp-remote processes that may have left ports occupied
-      this.cleanupStaleMcpProcesses();
+      // The resolved command is the GUEST command array, executed inside the
+      // sandbox — never on the host.
+      const command = mcpCommand.trim().split(/\s+/);
 
-      // Phase 2 MVP: Stdio transport
-      // Parse command line (very naive split for MVP)
-      const parts = mcpCommand.trim().split(/\s+/);
-      const command = parts[0];
-      const args = parts.slice(1);
-
-      const transport = new StdioClientTransport({
+      transport = new SandboxMcpTransport({
+        port: context.sandbox,
         command,
-        args,
-        env: process.env as Record<string, string>,
+        timeoutMs: context.timeoutMs,
       });
 
-      const client = new Client(
+      client = new Client(
         { name: 'agent-octopus-mcp-client', version: '0.1.0' },
         { capabilities: {} }
       );
@@ -74,16 +79,18 @@ export class McpAdapter implements Adapter {
 
       if (!tool) {
         await client.close();
+        await transport.close();
         return { success: false, error: `No tools found on MCP server for ${skill.manifest.name}` };
       }
 
       // Execute the tool
       const result = await client.callTool({
         name: tool.name,
-        arguments: input,
+        arguments: toolInput,
       });
 
       await client.close();
+      await transport.close();
 
       // Format result
       if (result.isError) {
@@ -102,6 +109,15 @@ export class McpAdapter implements Adapter {
         rawText: textOutput,
       };
     } catch (err: any) {
+      // Ensure the sandbox session/process is cleaned up even when MCP
+      // initialization or the tool call fails — no host process scan.
+      try {
+        await client?.close();
+      } catch { /* ignore */ }
+      try {
+        await transport?.close();
+      } catch { /* ignore */ }
+
       const msg = err.message || String(err);
 
       // Provide helpful guidance for common MCP errors
@@ -112,33 +128,10 @@ export class McpAdapter implements Adapter {
         };
       }
 
-      if (msg.includes('EADDRINUSE')) {
-        return {
-          success: false,
-          error: `MCP OAuth callback port is already in use. A previous MCP session may not have cleaned up.\n\n  Try killing stale mcp-remote processes:\n    pkill -f mcp-remote\n\n  Then retry.`,
-        };
-      }
-
       return {
         success: false,
         error: `MCP Adapter failed: ${msg}`,
       };
-    }
-  }
-
-  /**
-   * Kill stale mcp-remote processes that may be holding ports from
-   * previous invocations that timed out during OAuth.
-   */
-  private cleanupStaleMcpProcesses(): void {
-    try {
-      // Find mcp-remote processes older than 30 seconds
-      cp.execSync('pkill -f --older-than 30s mcp-remote 2>/dev/null || true', {
-        timeout: 2000,
-        stdio: 'pipe',
-      });
-    } catch {
-      // pkill not available or no matching processes — ignore
     }
   }
 }

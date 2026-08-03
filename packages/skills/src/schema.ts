@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SandboxRequestSchema } from "@agentoctopus/sandbox";
 
 // Sub-schemas
 const SkillRequiresSchema = z.object({
@@ -54,12 +55,9 @@ export const SkillFrontmatterSchema = z.object({
   "command-tool": z.string().optional(),
   "command-arg-mode": z.string().optional(),
   adapter: z.enum(["http", "mcp", "subprocess", "openai", "composed"]).optional(),
-  sandbox: z.object({
-    backend: z.enum(["docker", "ssh", "openshell", "none"]).optional(),
-    image: z.string().optional(),
-    memory: z.string().optional(),
-    timeout: z.number().int().optional(),
-  }).optional(),
+  // Untrusted sandbox block — requests only, owned by @agentoctopus/sandbox.
+  // Trusted config/grants live in octopus.json, never here.
+  sandbox: SandboxRequestSchema.optional(),
   compose: z.object({
     steps: z.array(z.object({
       skill: z.string(),

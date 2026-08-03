@@ -13,6 +13,11 @@
 import fs from 'fs';
 import path from 'path';
 import { inflateRawSync, gunzipSync } from 'zlib';
+import {
+  ensureInstallationId,
+  peekInstallationId,
+  restoreInstallationId,
+} from './install-registry.js';
 
 export const DEFAULT_REGISTRY = 'https://clawhub.ai';
 const MAX_RETRIES = 3;
@@ -271,6 +276,10 @@ export async function installSkill(
   // 4. Extract the ZIP
   const zipBuffer = Buffer.from(await res.arrayBuffer());
 
+  // Capture the prior installation id BEFORE wiping the dir so a force
+  // reinstall preserves identity (the grant key half must not rotate).
+  const priorId = peekInstallationId(skillDir);
+
   // Remove existing dir if force
   if (fs.existsSync(skillDir)) {
     fs.rmSync(skillDir, { recursive: true });
@@ -318,6 +327,13 @@ export async function installSkill(
       2,
     ),
   );
+
+  // Restore the prior id across a force reinstall, or create one for a fresh install.
+  if (priorId) {
+    restoreInstallationId(skillDir, priorId);
+  } else {
+    ensureInstallationId(skillDir);
+  }
 
   return skillDir;
 }
@@ -592,9 +608,19 @@ export function installFromIndex(
       fs.writeFileSync(path.join(skillDir, '_meta.json'), entry.metaJson, 'utf8');
     }
 
-    if (wroteAny) return; // patched missing files, done
-    return; // nothing to update
+    // In-place patch: directory was NOT replaced, so identity is untouched;
+    // ensure one exists for installs that predate identity tracking.
+    ensureInstallationId(skillDir);
+    return; // patched missing files (or nothing to update)
   }
+
+  // Validate BEFORE touching the existing directory so a malformed entry
+  // cannot destroy a working install (failed replacement leaves dir + id intact).
+  if (!entry.skillMd) throw new Error(`Skill "${entry.slug}" has no SKILL.md content in the index`);
+
+  // Capture the prior installation id BEFORE wiping the dir so a force
+  // reinstall preserves identity (the grant key half must not rotate).
+  const priorId = peekInstallationId(skillDir);
 
   // Remove stale directory when force is set
   if (fs.existsSync(skillDir)) {
@@ -602,8 +628,7 @@ export function installFromIndex(
   }
 
   fs.mkdirSync(skillDir, { recursive: true });
-  if (!entry.skillMd) throw new Error(`Skill "${entry.slug}" has no SKILL.md content in the index`);
-  
+
   let skillMd = entry.skillMd;
   const frontmatterMatch = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (frontmatterMatch) {
@@ -639,5 +664,12 @@ export function installFromIndex(
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, content, 'utf8');
     }
+  }
+
+  // Restore the prior id across a force reinstall, or create one for a fresh install.
+  if (priorId) {
+    restoreInstallationId(skillDir, priorId);
+  } else {
+    ensureInstallationId(skillDir);
   }
 }

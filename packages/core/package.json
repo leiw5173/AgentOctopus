@@ -19,6 +19,7 @@
   "dependencies": {
     "@agentoctopus/adapters": "workspace:*",
     "@agentoctopus/registry": "workspace:*",
+    "@agentoctopus/sandbox": "workspace:*",
     "@agentoctopus/skills": "workspace:*",
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^17.4.2",
@@ -31,6 +32,9 @@
     "@types/node": "^26.1.1",
     "typescript": "^6.0.3",
     "vitest": "^1.5.0"
+  },
+  "optionalDependencies": {
+    "@agentoctopus/sandbox-vm-native": "workspace:^"
   },
   "publishConfig": {
     "access": "public"

@@ -1,0 +1,36 @@
+{
+  "expectedRunId": "123456",
+  "metadata": {
+    "schemaVersion": 1,
+    "preflightRunId": "123456",
+    "preflightRunAttempt": 1,
+    "securitySha": "0123456789abcdef0123456789abcdef01234567",
+    "securityJobName": "Sandbox Security / security-gate",
+    "securityGateConclusion": "success",
+    "runtimeDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "proxyDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "run": {
+    "id": 123456,
+    "run_attempt": 1,
+    "name": "Release Preflight",
+    "path": ".github/workflows/release-preflight.yml",
+    "event": "workflow_dispatch",
+    "head_branch": "master",
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "jobs": {
+    "total_count": 1,
+    "jobs": [
+      {
+        "name": "Sandbox Security / security-gate",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "0123456789abcdef0123456789abcdef01234567"
+      }
+    ]
+  },
+  "expectedError": "preflight run event must be push"
+}

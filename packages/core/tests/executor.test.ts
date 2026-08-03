@@ -1,30 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Executor, extractCredentialErrors } from '../src/executor.js';
 import { SkillRegistry } from '@agentoctopus/registry';
-import { HttpAdapter, McpAdapter, SubprocessAdapter, DockerAdapter, SshAdapter, OpenShellAdapter } from '@agentoctopus/adapters';
+import { HttpAdapter, McpAdapter, SubprocessAdapter } from '@agentoctopus/adapters';
 
 vi.mock('@agentoctopus/adapters', () => {
   return {
     HttpAdapter: vi.fn(),
     McpAdapter: vi.fn(),
     SubprocessAdapter: vi.fn(),
-    DockerAdapter: vi.fn(),
-    SshAdapter: vi.fn(),
-    OpenShellAdapter: vi.fn(),
   };
 });
 
 vi.mock('../src/utils.js', () => ({
   isBinAvailable: vi.fn().mockReturnValue(true),
 }));
-
-vi.mock('@agentoctopus/skills', async () => {
-  const actual = await vi.importActual('@agentoctopus/skills') as any;
-  return {
-    ...actual,
-    installMissingBins: vi.fn().mockResolvedValue({ success: true, installed: [], failed: [], manualInstructions: [] }),
-  };
-});
 
 describe('Executor', () => {
   let mockRegistry: import('vitest').Mocked<SkillRegistry>;
@@ -411,7 +400,7 @@ describe('Executor.generateCredentialGuide()', () => {
     expect(guide).toContain('octopus config set TAVILY_API_KEY');
   });
 
-  it('returns BinaryInstallableResult when binaries missing and install specs exist', async () => {
+  it('returns UnsupportedRuntimeRequirementsResult when required binaries are missing (no host install)', async () => {
     const { isBinAvailable } = await import('../src/utils.js');
     vi.mocked(isBinAvailable).mockReturnValue(false);
 
@@ -419,7 +408,7 @@ describe('Executor.generateCredentialGuide()', () => {
     const executor = new Executor(registry);
     const mockSkill = {
       manifest: {
-        name: 'test-installable',
+        name: 'test-unsupported',
         adapter: 'subprocess',
         metadata: {
           openclaw: {
@@ -429,25 +418,26 @@ describe('Executor.generateCredentialGuide()', () => {
         },
       },
       entry: {
-        skill: { name: 'test-installable' },
-        metadata: {
-          install: [{ kind: 'brew' as const, formula: 'missing-bin', bins: ['missing-bin'] }],
-        },
+        skill: { name: 'test-unsupported' },
+        metadata: {},
       },
     } as any;
 
     const result = await executor.execute(mockSkill, { query: 'test' });
 
     expect(result).toMatchObject({
-      type: 'binary_installable',
-      skillName: 'test-installable',
+      type: 'unsupported_runtime_requirements',
+      skillName: 'test-unsupported',
       missing: ['missing-bin'],
     });
+    expect((result as any).message).toContain('no single trusted runtime profile covers requested bins: missing-bin');
+    // The adapter must never be reached.
+    expect(registry.recordInvocationMetrics).not.toHaveBeenCalled();
 
     vi.mocked(isBinAvailable).mockReturnValue(true);
   });
 
-  it('returns BinaryMissingResult when binaries missing and no install specs', async () => {
+  it('returns UnsupportedRuntimeRequirementsResult even when the skill declares no install specs', async () => {
     const { isBinAvailable } = await import('../src/utils.js');
     vi.mocked(isBinAvailable).mockReturnValue(false);
 
@@ -472,100 +462,9 @@ describe('Executor.generateCredentialGuide()', () => {
     const result = await executor.execute(mockSkill, { query: 'test' });
 
     expect(result).toMatchObject({
-      type: 'binary_missing',
+      type: 'unsupported_runtime_requirements',
       skillName: 'test-no-install',
       missing: ['missing-bin'],
-    });
-
-    vi.mocked(isBinAvailable).mockReturnValue(true);
-  });
-
-  it('auto-installs and continues when autoInstall=true and install succeeds', async () => {
-    const { isBinAvailable } = await import('../src/utils.js');
-    const { installMissingBins } = await import('@agentoctopus/skills');
-
-    vi.mocked(isBinAvailable)
-      .mockReturnValueOnce(false)  // first check: missing
-      .mockReturnValueOnce(true);   // second check: now available
-
-    vi.mocked(installMissingBins).mockResolvedValue({
-      success: true,
-      installed: ['missing-bin'],
-      failed: [],
-      manualInstructions: [],
-    });
-
-    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
-    const executor = new Executor(registry);
-    const mockSkill = {
-      manifest: {
-        name: 'test-auto-install',
-        adapter: 'subprocess',
-        metadata: {
-          openclaw: {
-            requires: { bins: ['missing-bin'] },
-            install: [{ kind: 'brew' as const, formula: 'missing-bin' }],
-          },
-        },
-      },
-      entry: {
-        skill: { name: 'test-auto-install' },
-        metadata: {
-          install: [{ kind: 'brew' as const, formula: 'missing-bin' }],
-        },
-      },
-    } as any;
-
-    const result = await executor.execute(mockSkill, { query: 'test' }, { autoInstall: true });
-
-    expect(installMissingBins).toHaveBeenCalled();
-    expect(result).toMatchObject({
-      skill: expect.objectContaining({ manifest: expect.objectContaining({ name: 'test-auto-install' }) }),
-    });
-
-    vi.mocked(isBinAvailable).mockReturnValue(true);
-  });
-
-  it('returns BinaryInstallFailedResult when autoInstall=true but install fails', async () => {
-    const { isBinAvailable } = await import('../src/utils.js');
-    const { installMissingBins } = await import('@agentoctopus/skills');
-
-    vi.mocked(isBinAvailable).mockReturnValue(false);
-    vi.mocked(installMissingBins).mockResolvedValue({
-      success: false,
-      installed: [],
-      failed: [{ bin: 'missing-bin', spec: { kind: 'brew' as const, formula: 'missing-bin' }, command: 'brew install missing-bin', success: false, error: 'not found' }],
-      manualInstructions: ['brew install missing-bin'],
-    });
-
-    const registry = { recordInvocationMetrics: vi.fn(), readInstructions: vi.fn().mockReturnValue('') } as any;
-    const executor = new Executor(registry);
-    const mockSkill = {
-      manifest: {
-        name: 'test-install-fail',
-        adapter: 'subprocess',
-        metadata: {
-          openclaw: {
-            requires: { bins: ['missing-bin'] },
-            install: [{ kind: 'brew' as const, formula: 'missing-bin' }],
-          },
-        },
-      },
-      entry: {
-        skill: { name: 'test-install-fail' },
-        metadata: {
-          install: [{ kind: 'brew' as const, formula: 'missing-bin' }],
-        },
-      },
-    } as any;
-
-    const result = await executor.execute(mockSkill, { query: 'test' }, { autoInstall: true });
-
-    expect(result).toMatchObject({
-      type: 'binary_install_failed',
-      skillName: 'test-install-fail',
-      missing: ['missing-bin'],
-      manualInstructions: ['brew install missing-bin'],
     });
 
     vi.mocked(isBinAvailable).mockReturnValue(true);

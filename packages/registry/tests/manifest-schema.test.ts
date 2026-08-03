@@ -56,4 +56,35 @@ describe('SkillManifestSchema', () => {
       credentials: [{ key: 'invalid key with spaces', label: 'label' }],
     })).toThrowError();
   });
+
+  it('accepts an untrusted sandbox.request block (requests only)', () => {
+    const parsed = SkillManifestSchema.parse({
+      name: 'weather',
+      description: 'Weather skill',
+      sandbox: {
+        hosts: ['wttr.in'],
+        credentials: ['WTR_API_KEY'],
+        resources: { memory: '256m', timeoutMs: 20000 },
+      },
+    });
+    expect(parsed.sandbox?.hosts).toEqual(['wttr.in']);
+    expect(parsed.sandbox?.credentials).toEqual(['WTR_API_KEY']);
+  });
+
+  it('rejects trusted/grant keys in the untrusted sandbox manifest block', () => {
+    const base = { name: 'x', description: 'x' };
+    for (const bad of [
+      { sandbox: { grants: [] } },
+      { sandbox: { defaultBackend: 'docker' } },
+      { sandbox: { minIsolationLevel: 'none' } },
+      { sandbox: { docker: {} } },
+      { sandbox: { proxy: {} } },
+      { sandbox: { runtimeProfiles: {} } },
+      { sandbox: { backend: 'docker' } },
+      { sandbox: { image: 'alpine' } },
+      { sandbox: { credentials: [{ key: 'K', host: 'x' }] } },
+    ]) {
+      expect(() => SkillManifestSchema.parse({ ...base, ...bad })).toThrow();
+    }
+  });
 });

@@ -425,6 +425,22 @@ OLLAMA_BASE_URL=http://localhost:11434
 - [x] REST API `binary_installable` response — returns missing binaries and install specs.
 - [x] Chat channel two-phase install — IM bots prompt for confirmation before installing.
 
+### Phase S — Sandbox Security Matrix ✅ Complete (Tasks 1–7 + 5b)
+
+Fail-closed skill execution: every skill runs in a sandbox backend selected at runtime via `selectBackend`. Backends probe their own privileges before ranking; a backend is admitted only when its post-probe `isolationLevel` meets `minIsolationLevel`. Default `auto` + `full` throws `NoFullBackendError` when no full backend is available — never a host fallback.
+
+- [x] **Task 1** — Security harness (`packages/sandbox/tests/security/harness.ts`): `runArgv` (execFile, never shell), real capability probes (`probeDocker`, `probePrivilegedLinux`, `probeMacSandbox`), `HostCanary`, immutable-image ref verification (`requirePinnedImageRef`).
+- [x] **Task 2** — Docker lane + sidecar topology: host-canary, direct-internet/metadata denial, env/caps hygiene, timeout/tree-kill, cgroup; sidecar internal network + read-only CA mount.
+- [x] **Task 3** — Privileged Linux lane (CI-owned, `skipIf`-gated, `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1` zero-skip).
+- [x] **Task 4 / 4b** — Egress proxy adversarial matrix (non-granted HTTP/CONNECT, redirect method+credential, response cap/framing/max-conn, raw-header smuggling, DNS private/rebinding, TLS MITM + IP SAN type 7) + MCP stdio e2e over the Plan 5 port contract.
+- [x] **Task 5 / 5b** — Identity + snapshot integrity (grants, hardlink/special rejection, byte/path/mode/symlink tamper → `SNAPSHOT_MISMATCH`) + macOS restricted + fail-closed lane (`macos-restricted-lane.test.ts`, commit `15d6dc4`).
+- [x] **Task 6** — Reproducible runtime + proxy images (local build, immutable digests, direct-argv runtime, self-contained proxy bundle).
+- [x] **Task 7** — Security CI + release preflight/publish gate (`sandbox-security.yml`, reusable-workflow identity verification, immutable image IDs recorded and re-verified before npm publish).
+- [x] **macOS restricted production backend** — NO-GO by the T5 feasibility gate (dyld shared cache → unfilterable `file-read-data` breakout on macOS 26.x). `spawnDarwinProcess`/`darwin-process.ts` never implemented. VM sandbox backend (separate plan) supersedes for full isolation. macOS is never `full`; restricted is explicit opt-in only.
+- [x] **VM sandbox backend (libkrun)** — Tasks 1–20 complete (`docs/superpowers/plans/2026-07-29-vm-sandbox-backend.md`). `packages/sandbox-vm-native` ships the trusted computing base: `sandbox-vm-helper` (C, pinned 13-step TSI-disabled krun start sequence, R10 mass-close), `octopus-vm-init` (guest PID 1, CBOR launch-spec decode, 3-branch executable resolution), `vm-image-builder` (sealed read-only ext4, single-block-group for skill block images), `VmEngineImpl` (posix_spawn FD plumbing R9/R10). Producer scripts: `build-vm-rootfs.mjs` (mke2fs + double-build SHA-256 reproducibility, linux-arm64 + linux-x64), `vendor-libkrun.mjs` (libkrun v1.19.4 source-build + libkrunfw v5.5.0 prebuilt), `run-vm-gates.mjs` (G1 host-file-unreachable + G2 network-canary-unreachable → gate manifest), `sign-release-manifest.mjs` (Ed25519 detached signature). L3 (7) + L4 (9) escape-matrix tests run on the `vm-lane` CI job in `sandbox-security.yml`; the lane is fail-closed (assert-no-skipped-tests) — a missing TCB fails the job rather than silently skipping. The release chain is wired end to end: `produce-linux-artifacts` builds the full linux-x64 TCB + both guest rootfs arches (pinned+sha256-verified nodejs.org ARM64 node via `OCTOPUS_ROOTFS_NODE_ARM64`; each rootfs emitted as top-level `rootfs.img` and runtime `rootfs/<ref>`); `vm-lane` runs G1/G2 + signs the release manifest BEFORE the L3/L4 tests (macOS lane consumes only the linux-arm64 rootfs — no x64 fallback) and uploads `vm-tcb-darwin-arm64`; `privileged-linux` (the only KVM lane) qualifies + signs the linux-x64 TCB and uploads `vm-tcb-linux-x64-qualified`. Release Preflight's pack job downloads both qualified TCBs, fails closed on any missing file, and asserts the `@agentoctopus/sandbox-vm-native` tarball contains the full signed TCB for both platforms. The Ed25519 release trust-root public key is committed (`packages/sandbox/src/vm/release-key.ts`); the matching private seed lives only in the `OCTOPUS_VM_RELEASE_PRIVATE_KEY` CI secret, and seed-form secrets import via a PKCS8 DER wrap. `probe()` cryptographically binds the signed release manifest to the loaded gate manifest (canonical-digest equality after signature verification — a signed OLD release manifest cannot authorize a swapped gate manifest/TCB/binaries), fails closed on any half-pair (one file deleted ⇒ `signature-invalid`, never unsigned mode), and — under `requireReleaseSignature`, compiled in by production assembly — fails closed even when BOTH files are absent, so file deletion cannot roll an installed release back to dev mode. Release Preflight passes repository secrets to the reusable sandbox-security workflow (`secrets: inherit`, required for `workflow_call` signing) and downloads the qualified per-platform TCB artifacts into per-platform prebuilds dirs (a single-directory artifact upload flattens to its root). Post-probe TOCTOU is closed end to end: `verifyVmTcb` returns the exact manifest it verified (no double-read substitution window), and the verified TCB+gate state is cached per engine at `probe()` and consumed exclusively by `prepare()`/`start()` — the gate file is never re-read, all four TCB artifacts are re-verified at the prepare boundary, and helper/libkrun/libkrunfw/rootfs are re-verified at the launch boundary, so a post-probe swap of gate/helper/libkrun/image-builder/rootfs fails closed (regression-tested). Round 5 replaces boundary re-hashing with true object binding: `probe()` realpath-enforces the configured helper path against the `verifyVmTcb()`-verified helper before any exec (the BLK probe runs the verified realpath), copies the four verified artifacts into an engine-private 0700 dir via copy-while-hash from a single O_NOFOLLOW fd (only those copies are executed/loaded — `start()` execs the private helper with the loader path forced to the private dir), and `resolveRootfs()` pins the rootfs fd (opened O_RDONLY|O_NOFOLLOW, hashed from the fd, inherited into the helper at fd 5 with the launch spec referencing `/dev/fd/5`); `engine.close()` releases both and is invoked by backend cleanup. Assembly realpath-enforces the configured `builderBinaryPath` against `artifactsDir/vm-image-builder` and the builder port executes the engine's probe-verified path via a lazy resolver. A post-probe swap of any TCB file or the rootfs is neutralized (the verified copy/pinned inode is what runs); only a pre-binding swap still fails closed on the from-fd digest check. Round 6 closes the runtime gaps: the private copies (+ versioned SONAME shims, recreated in the private dir at the verified copies) are made BEFORE the BLK capability probe, which executes the private helper with the loader path pointed at the private dir (the original path is never executed — no realpath→exec window), and any post-copy probe failure discards the private dir; the C helper's launch mode preserves the inherited rootfs fd 5 AND the krun-stdio console-port pipe fds 6/7 across its startup mass-close (watermark 8, probe mode still closes ≥5) and fcntl-checks it before krun_add_disk — verified by a real ELF loader test (Linux+cc gated), not just env-string assertions. Round 7 fixes the rootfs build determinism: the staging tree atime/mtime is now pinned POST-ORDER (a directory is utimes'd only after its children, so its own readdir never follows its utimes) and buildOnce re-pins the tree immediately after mke2fs reads it — relatime bumps a directory's atime to wall-clock on readdir, so without a last-touch pin the sealed rootfs drifted across separate runs even when the same-run double-build passed. Round 8 makes the G1/G2 gates bootable end to end: the sealed rootfs now bundles the guest node's ELF interpreter (at its baked-in absolute path) plus its transitive `DT_NEEDED` library closure in `/lib` — discovered from the node binary via `readelf` and copied from the per-guest-arch library dirs CI provides (`OCTOPUS_ROOTFS_LIBS`/`OCTOPUS_ROOTFS_LIBS_ARM64`; fail-closed for a dynamic node with no libs dir), because a loaderless rootfs made the guest kernel's execve of `/usr/bin/node` fail ENOENT so no workload could ever run; and `octopus-vm-init` now FORKS the workload, waitpid()s it, and reports the real exit code over the octopus-control port as `{"exit":N}` (WEXITSTATUS or 128+WTERMSIG) — libkrun's own exit-code propagation is a virtiofs-only ioctl that no-ops on this sealed ext4 root, so the helper process otherwise always exits 0. The engine treats the control-frame exit code as authoritative over the helper's exit status, and the control fd is `FD_CLOEXEC`'d (not closed) across the execve so execve failures report `{"error":"execve failed: <errno>"}` while the workload itself can never write control frames. Workload stdio rides the second named console port ("krun-stdio", host pipe fds 6/7) registered on the octopus-control multiport device and dup2'd onto the workload's fd 0/1/2 by vm-init.
+
+**Sandbox security suite count:** 111 tests (`packages/sandbox/tests/security/`): image-contract 6, docker-lane 8 (expand), docker-topology 2, harness 10, identity-lane 14 (expand), linux-lane 12, linux-topology 6, macos-restricted-lane 4, proxy-lane 30 (expand), publish-gate 14 (expand), vm-lane 7 + vm-escape-matrix 9 (skipIf-gated, CI-owned). 101 pass on a macOS host; 10 Docker-lane cases fail locally only because the immutable runtime image cannot be pulled locally (pre-existing Docker provisioning delta, zero on CI). The 16 VM-lane cases skip locally (no libkrun TCB) and run on the `vm-lane` CI job.
+
 ### Phase 7 — Payment & Billing (Planned)
 
 ---
@@ -437,16 +453,26 @@ OLLAMA_BASE_URL=http://localhost:11434
 # Run all tests across all workspaces
 pnpm test
 
-# Results (all green):
-# packages/skills     — 123 tests ✅  (schema, evolution, search, install)
-# packages/registry   — 47 tests  ✅
-# packages/adapters   — 3 tests   ✅  (incl. mcp-adapter)
-# packages/core       — 65 tests  ✅  (router, executor, planner, integration)
-# apps/cli            — 57 tests  ✅  (commands, evolve, connect, onboard)
-# apps/web            — 6 tests   ✅  (POST /api/ask + /api/feedback)
-# packages/gateway    — 11 tests  ✅  (session, agent-protocol, engine, security)
-# Total: 313+ tests
+# Sandbox security suite (scoped — 111 tests):
+pnpm --filter @agentoctopus/sandbox exec vitest run tests/security
 ```
+
+Per-package declared test counts (workspace, not CI-expanded):
+
+| Package | Test files | Declared `it/test` |
+|---|---|---|
+| `packages/skills` | 20 | 140 |
+| `packages/registry` | 7 | 49 |
+| `packages/adapters` | 8 | 31 |
+| `packages/core` | 23 | 176 |
+| `packages/sandbox` | 51 | 404 (111 in the security suite) |
+| `packages/sandbox-vm-native` | 3 | 21 (16 pass + 5 skip without OCTOPUS_VM_IMAGE_BUILDER) |
+| `packages/gateway` | 1 | 11 |
+| `apps/cli` | 6 | 57 |
+| `apps/web` | 1 | 6 |
+| **Total** | **118** | **883 declared** |
+
+Counts are `it/test` declarations; `it.each` expands to more at runtime (the sandbox security suite expands to 111). The privileged Linux lane is CI-owned (zero-skip on the provisioned runner, skipped on macOS dev hosts).
 
 ### Manual CLI Verification (Phase 1 ✅)
 

@@ -3,7 +3,38 @@ import { SkillRegistry } from '../src/registry.js';
 import fs from 'fs';
 import { glob } from 'glob';
 
-vi.mock('fs');
+// fsMock must be declared at module top level (vi.hoisted) so the vi.mock
+// factory below can reference it.
+const fsMock = vi.hoisted(() => ({
+  readFileSync: vi.fn(),
+  existsSync: vi.fn(),
+  statSync: vi.fn(),
+  mkdirSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  renameSync: vi.fn(),
+  readdirSync: vi.fn(),
+}));
+
+// Mock fs, forwarding images.lock.json reads to the real file: importing
+// @agentoctopus/skills transitively loads @agentoctopus/sandbox → image-lock.ts,
+// whose module-top-level loadLock() reads packages/sandbox/images/images.lock.json.
+// A blanket auto-mock made readFileSync return undefined there and
+// JSON.parse(undefined) crashed the whole suite at collect time. Tests still
+// override readFileSync/existsSync/statSync implementations per-case.
+vi.mock('fs', async (importOriginal) => {
+  const realFs = await importOriginal<typeof fs>();
+  // readFileSync is a plain vi.fn so vi.resetAllMocks() in beforeEach keeps it
+  // mockable; the images.lock.json forwarding is a default implementation that
+  // survives reset (vi.resetAllMocks resets calls/implementations, so install
+  // it via mockImplementation here — vi.mock factory runs once, before tests).
+  fsMock.readFileSync.mockImplementation((path: any, ...args: any[]) =>
+    String(path).includes('images.lock.json')
+      ? realFs.readFileSync(path, ...args)
+      : undefined,
+  );
+  const mock = { ...fsMock };
+  return { default: mock, ...mock };
+});
 vi.mock('glob');
 vi.mock('@agentoctopus/skills', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@agentoctopus/skills')>();

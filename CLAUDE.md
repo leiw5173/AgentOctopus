@@ -83,7 +83,7 @@ When adding a new skill or changing how an existing skill routes:
 ```bash
 pnpm install          # install all workspace dependencies
 pnpm build            # build all packages (order: skills → registry → adapters → core → gateway → apps)
-pnpm test             # run all 313+ tests across all workspaces
+pnpm test             # run all tests across all workspaces (883 declared; 111 in the sandbox security suite)
 pnpm dev              # watch mode for all packages in parallel
 
 # Scoped commands
@@ -141,11 +141,43 @@ User query
                pre-filters with shouldIncludeSkill() from @agentoctopus/skills,
                LLM re-ranks, returns [] if no skill fits (→ direct LLM answer)
   → Executor — applies env overrides via @agentoctopus/skills,
-               picks adapter (inferred from directory contents),
+               delegates ALL skill execution to SandboxRunner:
+                 snapshot build → selectBackend (fail-closed)
+                 → prepareTopology → egress-proxy launch → verifySnapshot
+                 → prepare → run/spawn → cleanup
                on failure: tries next candidate (up to maxRetries, default 3)
                all failed → falls back to direct LLM answer
   → Result   — formatted, returned to caller; feedback updates ratings.json
 ```
+
+### Sandbox execution (critical to understand)
+
+Every skill runs in a sandbox backend selected at runtime via `selectBackend` (`packages/sandbox/src/backend.ts`). Selection is **fail-closed**: each backend probes its own privileges before ranking, and a backend is admitted only when its post-probe `isolationLevel` meets `minIsolationLevel`. Under the default `auto` + `minIsolationLevel:'full'`, when no `full` backend is available the run throws `NoFullBackendError` — never a host fallback. Restricted OS execution is opt-in only, selectable solely with exactly `defaultBackend:'os'` + `minIsolationLevel:'restricted'`; `auto` never picks a restricted backend implicitly.
+
+Key config sections in `octopus.json` → `sandbox`:
+
+| Field | Role |
+|---|---|
+| `sandbox.grants` | Per-execution requested capability set; the backend grants only `requested ∩ enforceable`. |
+| `sandbox.defaultBackend` | `'auto'` (default) \| `'docker'` \| `'os'`. Restricted OS requires `'os'` plus a restricted floor. |
+| `sandbox.minIsolationLevel` | `'full'` (default) \| `'restricted'` \| `'remote-unverified'` \| `'none'`. The fail-closed floor. |
+| `sandbox.docker.image` | Runtime image ref — must be an immutable digest (`repo@sha256:<64hex>` or `sha256:<64hex>`); mutable tags are rejected by the image-contract tests. |
+| `sandbox.proxy.artifact` | Egress-proxy image ref — same immutable-digest rule; the proxy is the skill's sole network egress. |
+
+**Immutable digest validation.** `identity = installationId + digest` (`sha256:` + 64 lowercase hex, validated against `SNAPSHOT_DIGEST_RE`). The runner re-verifies the digest immediately before `backend.prepare()`; any mutation between build and verify aborts with `SNAPSHOT_MISMATCH`. Backends assert the digest FORMAT before any mount; the byte-for-byte re-verify against the snapshot tree is the runner's last filesystem operation before `prepare`.
+
+**Bootstrap egress + runtime uid.** The Docker runtime image runs skills as uid/gid `65534:65534` (untrusted, non-root). `packages/sandbox/scripts/vendor-undici.mjs` vendors a pinned undici tarball (SHA-256 verified against `images.lock.json`) into `images/runtime/undici/` during image build — this is the only network client available to skills, and all egress is forced through the sidecar egress proxy (the proxy image is a self-contained esbuild bundle, no shell/curl/wget in either image). The image build (`scripts/build-security-images.mjs`) invokes `vendor-undici.mjs` before the Docker build context is assembled.
+
+**Three CI runner classes** (security matrix, `packages/sandbox/tests/security/`):
+
+| Runner class | CI label | Claims it owns | Skip behavior |
+|---|---|---|---|
+| Hosted Docker + proxy | `hosted-docker-proxy` (`ubuntu-latest`) | Harness + immutable-image contract, real Docker isolation + sidecar topology, egress proxy adversarial matrix, identity/snapshot integrity, MCP stdio over Docker. | Does NOT claim Linux netns/nftables/cgroup. |
+| Privileged Linux | `privileged-linux` (`[self-hosted,linux,x64,sandbox-privileged]`) | Real Linux OS backend, named-netns proxy topology, nftables, cgroup-v2 enforcement. `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1` makes unavailable capabilities fatal; the Vitest JSON report must contain zero skipped/pending/todo/failed/timed-out tests. Also the lane that qualifies the linux-x64 VM TCB (G1/G2 boot a real guest under KVM) + signs its release manifest and uploads `vm-tcb-linux-x64-qualified` for the release pack job — but this block is gated on a `kvm-probe` step: when `/dev/kvm` is absent (a non-nested-virt runner, e.g. a standard EC2 guest) the qualification skips with a clear message, mirroring the vm-lane HVF skip, so the OS isolation lane still runs/passes while the TCB is qualified on a KVM-capable runner before release (the pack job fails closed without the qualified artifact). | Fork PRs skip (trust boundary); same-repo PRs and `workflow_call` (release) run it. Never claimed from macOS. |
+| macOS restricted | `macos-restricted` (`macos-15`) | The real `sandbox-exec` behavioral branch when enforcement is available, or the explicit unavailable/full-rejected branch otherwise. | Never claims full isolation on Darwin. |
+| VM (libkrun) | `vm-lane` (`macos-15`, `OCTOPUS_VM_LANE=1`, `needs: [produce-linux-artifacts, vm-hvf-probe]`, `if: needs.vm-hvf-probe.outputs.hvf == 'available'`) | Real libkrun guest L3/L4 escape matrix + G1/G2 qualification gates → gate manifest + signed detached release-manifest pair, with the gates + signature run BEFORE the L3/L4 tests (the tests' `probe()` reads those manifests). The guest rootfs is cross-produced on `produce-linux-artifacts` (build-vm-rootfs.mjs is Linux-only): full linux-x64 TCB + BOTH guest arches — the linux-arm64 guest node is a pinned+sha256-verified nodejs.org download (`OCTOPUS_ROOTFS_NODE_ARM64`); each rootfs is emitted as top-level `rootfs.img` (gates) and `rootfs/<ref>` (runtime). The macOS lane consumes ONLY the linux-arm64 rootfs (guest arch = host arch; no x64 fallback), builds its own darwin-arm64 helper + libkrun/libkrunfw in-run, and uploads the qualified+tested `vm-tcb-darwin-arm64` for the release pack job. | **Environment-specific qualification gate, not an unconditional hosted-CI gate.** The companion `vm-hvf-probe` job (macos-15) compiles a ~20-line C program calling `hv_vm_create(NULL)` ad-hoc-signed with only the hypervisor entitlement and outputs `hvf=available\|unavailable`. vm-lane is `skipped` (job-level `if`) ONLY for the recognized nested-virtualization limitation — GitHub-hosted macos-15 runners are Virtualization.framework guests and HVF denies nested `hv_vm_create`. On a physical Apple Silicon runner (hvf=available) the lane runs for real and stays fail-closed end to end: `assert-no-skipped-tests.mjs` fails on ANY skip, a NO-GO G1/G2 fails, and on same-repo events a missing signing secret fails (fork PRs skip signing only, soft `releaseManifest:'missing'`). `security-gate` accepts `vm-lane = success` OR that specific `skipped`, and when skipped prints "VM qualification not executed on this runner"; every other outcome (real VM failure, cancellation, unexpected skip) stays fail-closed. |
+
+**Release prerequisite.** Release Preflight invokes the `sandbox-security.yml` reusable workflow for the exact preflight commit, records both immutable image IDs + the API-resolved security-gate job conclusion, and Release Publish re-verifies that gate against the live GitHub API before any `npm publish` — failing closed if `master` has moved since preflight. The pack job additionally downloads both qualified VM TCB artifacts (`vm-tcb-darwin-arm64` from vm-lane, `vm-tcb-linux-x64-qualified` from privileged-linux), refuses to pack if either platform's helper/libs/manifests/sealed rootfs/release signature is missing, and asserts the `@agentoctopus/sandbox-vm-native` tarball actually contains the full signed TCB for both platforms — no empty-shell native package can be published. Local verification can run fixture/unit tests, Docker lanes, and the macOS lane, but cannot verify the privileged job, the API-returned reusable-workflow job naming, or release dispatch behavior.
 
 ### Package responsibilities
 
@@ -154,9 +186,11 @@ User query
 | `packages/agentoctopus` | `index.ts` | Umbrella re-export of all sub-packages |
 | `packages/skills` | `types.ts`, `schema.ts`, `frontmatter.ts`, `config.ts`, `local-loader.ts`, `workspace.ts`, `snapshot.ts`, `install.ts`, `clawhub-install.ts`, `command-specs.ts`, `env-overrides.ts`, `evolution/` | SKILL.md loading/parsing, eligibility pipeline, install system, env overrides, prompt snapshot building, skill self-improvement system |
 | `packages/registry` | `registry.ts`, `rating.ts`, `rating-dimensions.ts` | Delegates SKILL.md loading to `@agentoctopus/skills`, persists ratings/invocations to `registry/ratings.json` |
-| `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution — uses `@agentoctopus/skills` for eligibility and env overrides |
+| `packages/core` | `router.ts`, `executor.ts`, `llm-client.ts`, `sandbox-runner.ts`, `sandbox-runner-factory.ts`, `sandbox-vm-assembly.ts`, `execution-context.ts`, `output-validator.ts` | Embedding index, cosine similarity, LLM re-rank, skill execution — uses `@agentoctopus/skills` for eligibility and env overrides. `SandboxRunner` is the single orchestration point for all skill execution: snapshot build → `selectBackend` (fail-closed) → `prepareTopology` → egress-proxy launch → `verifySnapshot` → `prepare` → `run`/`spawn` → `cleanup`. Persistent sessions use `SandboxProcess` (subprocess) / `SandboxMcpTransport` (MCP stdio) bound via `SandboxRunner.bind()`. `ExecutionContext` (`execution-context.ts`) threads an optional per-request `{traceId, executionId, apiKeyId, receivedAt}` through Router/Executor/SandboxRunner; `router.route()` emits one `routing.completed` per call (intentSource / intentExtractionSucceeded track whether the LLM intent-extraction phrase was actually used), `Executor` emits only `adapter.completed` (never terminal events) after running `runOutputValidator` (Promise.race timeout wrapper) — `outputValidated` reflects it. `SandboxRunner.withExecContext(ctx)` returns a NEW runner (no singleton mutation) and emits `sandbox.completed` with `phase:'created'` on spawn-create and `phase:'final'` on run() complete / spawn-close. |
 | `packages/adapters` | `http-adapter.ts`, `mcp-adapter.ts`, `subprocess-adapter.ts` | Three execution strategies — HTTP POST, MCP stdio, Node subprocess |
-| `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts`, `control-plane/`, `channels/`, `security/` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API, event bus, Webhook/WebChat channels, DM pairing |
+| `packages/sandbox` | `backend.ts`, `docker/`, `os/`, `vm/`, `proxy/`, `snapshot.ts`, `policy.ts`, `secrets.ts`, `schema.ts` | Leaf isolation package (imports nothing from `@agentoctopus/*` or native). `selectBackend` + `NoFullBackendError`, `DockerBackend`, `OsSandboxBackend`, `VmSandboxBackend`, egress proxy (`egress-proxy.ts`, CA, policy engine, DNS, headers, secret channel), immutable snapshot + digest identity, requested∩granted policy. Native VM helpers live in `packages/sandbox-vm-native` (dynamic-imported only from `core`). |
+| `packages/sandbox-vm-native` | `vm-helper.c`, `vm-init.c`, `vm-image-builder.c`, `engine.ts`, `image-builder.ts`, `executables-qualified.ts`, `scripts/build-vm-helper.mjs`, `scripts/build-vm-rootfs.mjs`, `scripts/vendor-libkrun.mjs`, `scripts/run-vm-gates.mjs`, `scripts/sign-release-manifest.mjs` | Native VM backend: libkrun helper (Task 11), guest bootstrap PID 1 (Task 12), sealed ext4 image-builder (Task 13), `VmEngineImpl` + `posix_spawn` FD plumbing R9/R10 (Task 14). Producer scripts build the TCB — rootfs via `mke2fs` (not the C writer), libkrun from pinned source + libkrunfw v5.5.0 prebuilt — and run G1/G2 qualification gates + Ed25519-sign the release manifest. Dynamic-imported by `core`'s `createVmBackend`; never imported by the leaf `sandbox` package. |
+| `packages/gateway` | `engine.ts`, `session.ts`, `slack/discord/telegram.ts`, `agent-protocol.ts`, `debug-telemetry.ts`, `control-plane/`, `channels/`, `security/` | Shared engine bootstrap, 30-min session manager, IM bots, OpenClaw-compatible HTTP API, event bus, Webhook/WebChat channels, DM pairing. `agent-protocol.ts` `/ask` extracts an optional `[trace: oct-e2e-<uuid>]` correlation key from the raw query (regex, pre-routing), strips it before Router/Executor/session, and emits exactly one terminal event per traced request via a single `emitTerminal` gated by a `terminalEmitted` flag (covers feedback early-return, no-route fallback, credential-missing, unsupported-runtime, success, and exception paths). `apiKeyId` is `user:<userId>` or `key:<sha256(rawKey).slice(0,16)>` — never the raw key. `debug-telemetry.ts` (`DebugTelemetryBuffer`) aggregates the layered telemetry events into a per-traceId `RunRecord`, merging `sandbox.completed` and `adapter.completed` into `runs[]` by `executionId`; status stays `pending` until a terminal event arrives AND every `runs[]` entry is `final` (empty `runs[]` is vacuously final), and transitions are one-directional. Ring-buffer capacity from `gateway.debugEndpoints.bufferSize`. The admin-only `GET /agent/debug/last-run[?runId=<id>]` endpoint serves records (404 when `debugEndpoints.enabled=false`, 403 for non-admin, 200 with `run` or `run:null` otherwise; `run.query` stripped unless `includeQuery`). |
 | `apps/web` | `src/app/api/ask/route.ts`, `src/app/page.tsx` | Next.js REST API + chat demo UI |
 | `apps/cli` | `src/index.ts`, `src/update.ts`, `src/sync-skills.ts`, `src/clawhub.ts`, `src/evolve.ts`, `src/connect.ts` | Commander CLI (`list`, `ask`, `update`, `sync`, `onboard`, `skill`, `evolve`, `connect`, `agent`) — ClawHub re-exports from `@agentoctopus/skills` |
 
@@ -206,7 +240,7 @@ Key config sections:
 - `embed` — provider, model, apiKey, baseUrl
 - `rerank` — model
 - `deploy` — mode ("local" | "cloud"), root
-- `gateway` — port, corsOrigins, cloudUrl, syncOnStartup
+- `gateway` — port, corsOrigins, cloudUrl, syncOnStartup, `debugEndpoints: {enabled (bool, default false), includeQuery (bool, default false), bufferSize (int, default 10)}`
 - `skills` — allowBundled, entries (per-skill apiKey/env/config), load (extraDirs, watch), limits, installPrefs
 - `evolution` — enabled (opt-in skill self-improvement)
 
@@ -220,11 +254,11 @@ Embedding and re-ranking can use a different provider/endpoint than the main LLM
 
 ### Versioning & Publishing
 
-All 7 packages share a single version managed by [changesets](https://github.com/changesets/changesets) with fixed versioning (`.changeset/config.json`). The umbrella `agentoctopus` package re-exports everything. To release:
+All 8 packages share a single version managed by [changesets](https://github.com/changesets/changesets) with fixed versioning (`.changeset/config.json`). The umbrella `agentoctopus` package re-exports everything. To release:
 
 1. **PR must include a changeset** — run `pnpm changeset` to create a `.changeset/*.md` file describing the change. CI enforces this via `changeset-check.yml` (skipped for docs/CI-only changes, dependabot PRs, or `skip-changeset` label).
-2. **Merge PR to master** — triggers `release-preflight.yml` automatically: validates version is not already on npm, runs full lint+build+test, packs all 7 tarballs, uploads as preflight artifact.
-3. **Manual dispatch** — maintainer triggers `release-publish.yml` via Actions UI, providing the preflight run ID. Downloads the artifact, verifies provenance, publishes in dependency order (skills → registry → adapters → core → gateway → cli → agentoctopus) with 3x retry, creates GitHub Release from changelog.
+2. **Merge PR to master** — triggers `release-preflight.yml` automatically: validates version is not already on npm, runs full lint+build+test, packs all 8 tarballs, uploads as preflight artifact.
+3. **Manual dispatch** — maintainer triggers `release-publish.yml` via Actions UI, providing the preflight run ID. Downloads the artifact, verifies provenance, publishes in dependency order (sandbox → sandbox-vm-native → skills → registry → adapters → core → gateway → cli → agentoctopus) with 3x retry, creates GitHub Release from changelog.
 4. **npm dist-tags** — choose `latest` or `beta` when dispatching. Use `beta` for pre-releases.
 
-The `agentoctopus` umbrella package tarball uses `agentoctopus-[0-9]*.tgz` glob to avoid matching scoped packages (e.g., `agentoctopus-skills-X.Y.Z.tgz`).
+The `agentoctopus` umbrella package tarball uses `agentoctopus-[0-9]*.tgz` glob to avoid matching scoped packages (e.g., `agentoctopus-skills-X.Y.Z.tgz`, `agentoctopus-sandbox-vm-native-X.Y.Z.tgz`).

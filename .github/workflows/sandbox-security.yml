@@ -1,0 +1,1121 @@
+name: Sandbox Security
+
+on:
+  pull_request:
+  push:
+    # master only. PR branches (e.g. feat/sandbox) are covered by the
+    # pull_request trigger above. Listing a PR branch here makes every push
+    # fire BOTH events → two concurrent runs whose check runs collide in the PR
+    # rollup: the duplicate that gets cancelled (to free the single self-hosted
+    # runner) leaves CANCELLED/FAILURE check runs that mark the PR UNSTABLE even
+    # when the pull_request run is fully green. The concurrency group keys on
+    # github.ref, which differs between the push (refs/heads/<branch>) and
+    # pull_request (refs/pull/<n>/merge) events, so it does NOT dedupe them.
+    # Release invokes this workflow via workflow_call below, not the push trigger.
+    branches: [master]
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      runtime_digest:
+        description: Immutable local runtime image ID tested by the hosted lane
+        value: ${{ jobs.hosted-docker-proxy.outputs.runtime_digest }}
+      proxy_digest:
+        description: Immutable local proxy image ID tested by the hosted lane
+        value: ${{ jobs.hosted-docker-proxy.outputs.proxy_digest }}
+
+permissions:
+  contents: read
+
+# cancel-in-progress: true — a stuck `privileged-linux` job (no self-hosted
+# runner registered) would otherwise queue-block every subsequent push in this
+# ref group. New runs cancel the stale one instead of piling up behind it.
+# Matches the convention used by ci.yml / changeset-check.yml.
+concurrency:
+  group: sandbox-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hosted-docker-proxy:
+    name: hosted-docker-proxy
+    runs-on: ubuntu-latest
+    outputs:
+      runtime_digest: ${{ steps.images.outputs.runtime_digest }}
+      proxy_digest: ${{ steps.images.outputs.proxy_digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+      - name: Build package and immutable local test images
+        id: images
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build core AND its workspace deps (skills, registry, adapters, sandbox,
+          # sandbox-vm-native): the MCP stdio e2e step runs vitest in packages/core,
+          # which transitively imports @agentoctopus/skills (main: ./dist/index.js).
+          # Building only sandbox leaves skills/registry/adapters unbuilt, so Vite
+          # fails to resolve @agentoctopus/skills' entry on CI. The dependency
+          # suffix (`...`) builds core plus everything it depends on, in topo order.
+          pnpm --filter "@agentoctopus/core..." build
+          env_file="$(mktemp)"
+          pnpm --silent --filter @agentoctopus/sandbox security:images -- --print-env > "$env_file"
+
+          runtime_digest=''
+          proxy_digest=''
+          while IFS='=' read -r name value; do
+            case "$name" in
+              OCTOPUS_TEST_RUNTIME_IMAGE) runtime_digest="$value" ;;
+              OCTOPUS_TEST_PROXY_IMAGE) proxy_digest="$value" ;;
+              '') ;;
+              *) echo "ERROR: unexpected security image output name: $name" >&2; exit 1 ;;
+            esac
+          done < "$env_file"
+          rm -f "$env_file"
+
+          digest_re='^sha256:[0-9a-f]{64}$'
+          [[ "$runtime_digest" =~ $digest_re ]] || { echo 'ERROR: runtime image ID is not immutable' >&2; exit 1; }
+          [[ "$proxy_digest" =~ $digest_re ]] || { echo 'ERROR: proxy image ID is not immutable' >&2; exit 1; }
+
+          printf 'OCTOPUS_TEST_RUNTIME_IMAGE=%s\n' "$runtime_digest" >> "$GITHUB_ENV"
+          printf 'OCTOPUS_TEST_PROXY_IMAGE=%s\n' "$proxy_digest" >> "$GITHUB_ENV"
+          printf 'runtime_digest=%s\n' "$runtime_digest" >> "$GITHUB_OUTPUT"
+          printf 'proxy_digest=%s\n' "$proxy_digest" >> "$GITHUB_OUTPUT"
+      - name: Run hosted sandbox Docker, proxy, and identity lanes
+        run: |
+          pnpm --filter @agentoctopus/sandbox exec vitest run \
+            tests/security/harness.test.ts \
+            tests/security/image-contract.test.ts \
+            tests/security/docker-lane.test.ts \
+            tests/security/docker-topology.test.ts \
+            tests/security/proxy-lane.test.ts \
+            tests/security/identity-lane.test.ts \
+            --reporter=verbose
+      - name: Run MCP stdio over the production Docker sandbox path
+        run: pnpm --filter @agentoctopus/core exec vitest run tests/mcp-stdio-docker-e2e.test.ts --reporter=verbose
+
+  produce-linux-artifacts:
+    name: produce-linux-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+      - name: Provision toolchain for reviewed Linux OS artifacts
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd tar gcc libc6-dev
+      - name: Build package and capture the immutable runtime image ID
+        id: images
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --filter @agentoctopus/sandbox build
+          # build-runtime-rootfs.mjs fail-closed-exits unless OCTOPUS_RUNTIME_IMAGE
+          # is an immutable digest. The hosted lane builds the same :test images
+          # via security:images and captures their local image IDs; reuse that
+          # here so the producer exports the exact reviewed runtime image.
+          env_file="$(mktemp)"
+          pnpm --silent --filter @agentoctopus/sandbox security:images -- --print-env > "$env_file"
+
+          runtime_digest=''
+          while IFS='=' read -r name value; do
+            case "$name" in
+              OCTOPUS_TEST_RUNTIME_IMAGE) runtime_digest="$value" ;;
+              # security:images also emits OCTOPUS_TEST_PROXY_IMAGE; the producer
+              # exports only the runtime rootfs, so ignore the proxy line rather
+              # than fail on an expected output name.
+              OCTOPUS_TEST_PROXY_IMAGE) ;;
+              '') ;;
+              *) echo "ERROR: unexpected security image output name: $name" >&2; exit 1 ;;
+            esac
+          done < "$env_file"
+          rm -f "$env_file"
+
+          digest_re='^sha256:[0-9a-f]{64}$'
+          [[ "$runtime_digest" =~ $digest_re ]] || { echo 'ERROR: runtime image ID is not immutable' >&2; exit 1; }
+
+          # Export for build-runtime-rootfs.mjs (consumed as OCTOPUS_RUNTIME_IMAGE).
+          echo "OCTOPUS_RUNTIME_IMAGE=$runtime_digest" >> "$GITHUB_ENV"
+      - name: Build the reviewed Linux runtime rootfs and OS helper
+        run: |
+          set -euo pipefail
+          node packages/sandbox/scripts/build-runtime-rootfs.mjs
+          node packages/sandbox/scripts/build-os-helper.mjs
+      - name: Verify the canonical artifact set is complete
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
+            test -f "packages/sandbox/runtime/$file" || { echo "ERROR: missing artifact packages/sandbox/runtime/$file" >&2; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-os-runtime-artifacts
+          path: |
+            packages/sandbox/runtime/linux-node22.rootfs.tar.zst
+            packages/sandbox/runtime/linux-node22.manifest.json
+            packages/sandbox/runtime/os-helper
+            packages/sandbox/runtime/os-helper.manifest.json
+          if-no-files-found: error
+          retention-days: 7
+      # F2c/F3: cross-produce the VM TCB on the Linux lane. build-vm-rootfs.mjs
+      # is Linux-only (mke2fs + a Linux guest node binary), but the macOS
+      # vm-lane runs a Linux guest under libkrun/HVF and needs the linux-ARM64
+      # rootfs (guest arch = host arch). security:build-vm (vendor-libkrun +
+      # build-vm-helper + build-vm-rootfs) produces the full linux-x64 TCB
+      # (helper + libs + image builder + vm-tcb-manifest.json) plus BOTH guest
+      # rootfs arches; the ARM64 guest node is the pinned download below. The
+      # darwin-arm64 host-side helper + libkrun/libkrunfw are built in the
+      # macOS vm-lane itself. This matches the release shipping model:
+      # linux-produced rootfs, darwin runtime.
+      - name: Install e2fsprogs + aarch64 cross toolchain for VM rootfs build
+        run: |
+          # e2fsprogs: mke2fs for the ext4 rootfs. gcc-aarch64-linux-gnu: the
+          # cross compiler build-vm-rootfs.mjs uses to build the arm64 guest
+          # vm-init/vsock-forwarder (the x64 host cc would emit x86-64 binaries
+          # that the ARM guest cannot exec). libc6-dev-arm64-cross provides the
+          # aarch64 libc needed for -static linking AND (via its libc6-arm64-cross
+          # dependency) the arm64 runtime shared objects — ld-linux-aarch64.so.1,
+          # libc/libm/... — under /usr/aarch64-linux-gnu/lib. libstdc++6-arm64-cross
+          # adds libstdc++.so.6 (the official node build NEEDs it; libc6-dev alone
+          # does not provide it). libgcc_s.so.1 arrives with the gcc cross package.
+          # These runtime libs are COPIED into the sealed guest rootfs (the guest
+          # node is dynamically linked — without its interpreter + NEEDED closure
+          # the guest kernel cannot exec it), pinned here by the lane's apt
+          # provisioning like the rest of the toolchain.
+          sudo apt-get install -y --no-install-recommends e2fsprogs gcc-aarch64-linux-gnu libc6-dev-arm64-cross libstdc++6-arm64-cross
+          # build-vm-rootfs.mjs reads the per-guest-arch library dirs from these:
+          # x64 = the host multiarch dir; arm64 = the cross-toolchain dir above.
+          echo "OCTOPUS_ROOTFS_LIBS=/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
+          echo "OCTOPUS_ROOTFS_LIBS_ARM64=/usr/aarch64-linux-gnu/lib" >> "$GITHUB_ENV"
+      - name: Fetch pinned ARM64 Linux guest node (for the linux-arm64 rootfs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # build-vm-rootfs.mjs COPIES this binary into the guest rootfs (it is
+          # never executed on the host), so its ELF arch must match the guest
+          # arch. Pin URL + SHA256 from the nodejs.org dist, verify, extract —
+          # same download-verify pattern as vendor-libkrun.mjs. Version tracks
+          # CI's Node 22 (setup-node-env default).
+          url='https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz'
+          sha='fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8'
+          curl -fsSL --retry 3 -o /tmp/node-arm64.tar.xz "$url"
+          echo "$sha  /tmp/node-arm64.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/node-arm64
+          tar -xJf /tmp/node-arm64.tar.xz -C /tmp/node-arm64 --strip-components=1
+          test -x /tmp/node-arm64/bin/node
+          echo "OCTOPUS_ROOTFS_NODE_ARM64=/tmp/node-arm64/bin/node" >> "$GITHUB_ENV"
+      - name: Provision libclang for the libkrun source build
+        # vendor-libkrun.mjs builds libkrun.so from pinned source via `make`
+        # (which drives cargo). libkrun's kvm-bindings crate runs bindgen, whose
+        # clang-sys build script must locate libclang: it runs
+        # `llvm-config --libdir` or falls back to searching the multiarch
+        # libdir. ubuntu-latest ships rustc/cargo/make/gcc but NOT libclang, so
+        # the build died with `failed to run custom build command for clang-sys`
+        # (`couldn't execute llvm-config`). Install the bindgen prereqs: clang +
+        # libclang-dev (the .so) + llvm-dev (llvm-config so clang-sys locates it
+        # deterministically). This is lane provisioning, kept out of the
+        # portable script (which also runs on the macOS vm-lane + locally).
+        run: sudo apt-get install -y --no-install-recommends clang libclang-dev llvm-dev
+      - name: Build the full linux-x64 VM TCB + both-arch guest rootfs
+        run: |
+          pnpm --filter @agentoctopus/sandbox-vm-native build
+          pnpm --filter @agentoctopus/sandbox-vm-native security:build-vm
+      - name: Verify VM TCB artifacts present (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=packages/sandbox-vm-native/prebuilds
+          # Full linux-x64 host TCB (consumed by the privileged-linux qualifier
+          # and by the release pack job).
+          for f in sandbox-vm-helper libkrun.so libkrunfw.so vm-image-builder vm-tcb-manifest.json; do
+            test -f "$base/linux-x64/$f" || { echo "ERROR: missing $base/linux-x64/$f" >&2; exit 1; }
+          done
+          # Both guest arches: the top-level img + manifest (run-vm-gates.mjs
+          # qualification) AND the runtime rootfs/<ref> placement consumed by
+          # engine.resolveRootfs at launch.
+          for arch in linux-arm64 linux-x64; do
+            test -f "$base/$arch/rootfs.img" || { echo "ERROR: missing $base/$arch/rootfs.img — OCTOPUS_ROOTFS_NODE_ARM64 provisioning broken" >&2; exit 1; }
+            test -f "$base/$arch/rootfs.manifest.json" || { echo "ERROR: missing $base/$arch/rootfs.manifest.json" >&2; exit 1; }
+            ref=$(node -p "JSON.parse(require('fs').readFileSync('$base/$arch/rootfs.manifest.json','utf8')).ref")
+            test -f "$base/$arch/rootfs/$ref" || { echo "ERROR: missing runtime placement $base/$arch/rootfs/$ref" >&2; exit 1; }
+            echo "VM rootfs present for $arch (ref $ref)"
+          done
+      # Split the TCB into TWO per-arch artifacts so each consumer downloads
+      # only what it uses: privileged-linux qualifies linux-x64 (and re-uploads
+      # only linux-x64), while vm-lane consumes only the linux-arm64 rootfs.
+      # Bundling both arches into one ~191MB tar forced the resource-constrained
+      # self-hosted privileged runner to pull ~100MB of arm64 rootfs it never
+      # touches, and that large transfer stalled past the artifact service's
+      # 5x retry budget and failed the lane (a ~38MB artifact on the same runner
+      # downloads fine — the failure is size-correlated). Each tar still wraps
+      # the colon-bearing rootfs/sha256:<hex> path so the uploaded file stays
+      # colon-free (upload-artifact rejects colons); download sites untar to
+      # restore the exact on-disk layout.
+      - name: Tar the per-arch VM TCB for colon-safe upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -cf vm-tcb-linux-x64.tar \
+            -C packages/sandbox-vm-native/prebuilds linux-x64
+          tar -cf vm-rootfs-linux-arm64.tar \
+            -C packages/sandbox-vm-native/prebuilds linux-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm-tcb-linux-x64
+          path: vm-tcb-linux-x64.tar
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm-rootfs-linux-arm64
+          path: vm-rootfs-linux-arm64.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  privileged-linux:
+    name: privileged-linux
+    # Trust boundary: self-hosted privileged runners must never execute code
+    # from fork pull requests. Same-repo PRs, pushes, dispatches, and release
+    # workflow_call runs (event_name is not pull_request) all execute the lane;
+    # fork PRs get the hosted and macOS lanes only.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [produce-linux-artifacts]
+    runs-on: [self-hosted, linux, x64, sandbox-privileged]
+    env:
+      OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
+      OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
+      # Rootfs staging must live on a filesystem that is BOTH large enough for
+      # ~9 concurrent 100MB+ node rootfs extracts AND user-mountable (the OS
+      # backend's helper bind-mounts the extracted runtime root onto itself
+      # from inside an unprivileged user namespace — a mount that EPERMs unless
+      # the source superblock is user-mountable, FS_USERNS_MOUNT).
+      #
+      # ROOT CAUSE of the self-bind EPERM, isolated by A/B probes: AppArmor is
+      # ENABLED (183 profiles) and the runner's profile authorizes an
+      # unprivileged-userns bind-mount ONLY under /tmp/** and /var/tmp/** — while
+      # EVERYTHING under /home/ubuntu/actions-runner/_work/** EPERMs, regardless
+      # of filesystem type (the controlling variable is the PATH PREFIX, not the
+      # FS). The runtime rootfs must therefore live on an authorized path.
+      #
+      # WHY DISK (/var/tmp), NOT A RAM tmpfs: the runner has only 930MB RAM and
+      # /tmp is a 455MB tmpfs. A RAM-backed tmpfs cannot hold the rootfs extract
+      # (tmpfs pages consume RAM) — a 3g tmpfs there ENOSPC'd the extract (1245
+      # "No space left" errors) and starved the kernel of RAM, which is what
+      # actually made the helper's mount()/cgroup work fail. The root ext4 has
+      # several GB free, and /var/tmp is BOTH on that disk AND AppArmor-authorized
+      # (probed: BIND OK, ext4). So TMPDIR points at /var/tmp/oct-tmp — a plain
+      # disk-backed directory, no mount — giving the helper a bindable path with
+      # real capacity. We do NOT overmount the shared /var/tmp itself.
+      #
+      # TMPDIR is deliberately NOT set here: job-level `env:` is passed to steps
+      # VERBATIM (no shell expansion), and `${{ runner.temp }}` is NOT an allowed
+      # context in job-level `env:` (docs.github.com/.../contexts: only github/
+      # needs/strategy/matrix/vars/secrets/inputs) — using it here fails workflow
+      # evaluation with 0 jobs. Instead the pre-checkout rescue step exports the
+      # fixed path TMPDIR=/var/tmp/oct-tmp via $GITHUB_ENV, so every later step
+      # sees the correctly-resolved path.
+      # probePrivilegedLinux() (harness) reads its canonical manifests from
+      # probePrivilegedLinux() (harness) reads its canonical manifests from
+      # this root; the lane fixture wires OCTOPUS_SANDBOX_OS_* from it. This
+      # MUST be absolute: the test process runs `pnpm --filter @agentoctopus/
+      # sandbox exec vitest`, whose child CWD is packages/sandbox (NOT the repo
+      # root), so a relative root would resolve to packages/sandbox/packages/
+      # sandbox/runtime and the probe would report the artifacts "not found"
+      # even though the download+enforce steps (which run from the repo root)
+      # placed them correctly. security-probe-linux.mjs masks this by resolving
+      # PKG_ROOT/runtime from its own location — it never uses this env var.
+      OCTOPUS_OS_PROBE_MANIFEST_ROOT: ${{ github.workspace }}/packages/sandbox/runtime
+    steps:
+      # Pre-checkout rescue: a leaked tmpfs mount INSIDE the workspace (staged
+      # at ${{ github.workspace }}/.tmp by an older revision) persists across
+      # runs on the self-hosted runner and makes actions/checkout@v7 fail with
+      # "EBUSY: resource busy or locked, rmdir '.../AgentOctopus/.tmp'" before
+      # ANY lane step runs. No later step can clear it because checkout dies
+      # first. Unmount any such stale tmpfs here — best-effort (|| true) so a
+      # clean runner is unaffected and a missing mount is not an error. This is
+      # the ONLY thing that can run before checkout.
+      - name: Rescue stale in-workspace tmpfs before checkout
+        shell: bash
+        run: |
+          # Deliberately NOT `set -e`/pipefail-sensitive: this rescue must NEVER
+          # fail the job — a clean runner or a missing mount is not an error.
+          # The GHA runner forces `-e -o pipefail` on bash steps, so guard every
+          # command with `|| true` and end with an explicit `exit 0`.
+          #
+          # Export TMPDIR for ALL later steps via $GITHUB_ENV (see the job-env
+          # comment above: job-level `env:` can't expand $RUNNER_TMP, and the
+          # runner.temp context isn't allowed there). The path is a FIXED
+          # disk-backed /var/tmp dir: /var/tmp is on the root ext4 (several GB
+          # free) AND AppArmor-authorized for the helper's unprivileged-userns
+          # self-bind (see the env comment) — unlike the 930MB-RAM-starving
+          # tmpfs this replaced. Fall back to /var/tmp itself if unset.
+          echo "TMPDIR=/var/tmp/oct-tmp" >> "$GITHUB_ENV"
+          # Create it now: pnpm/action-setup (which runs before the staging
+          # step) calls realpathSync(TMPDIR) and ENOENTs if the dir is absent.
+          mkdir -p "$TMPDIR" 2>/dev/null || true
+          ws="${{ github.workspace }}"
+          tmp="$ws/.tmp"
+          # A PRIOR run leaked a tmpfs mounted at the in-workspace .tmp. The
+          # lane's post-run cleanup runs from TMPDIR and never touches .tmp, so
+          # the mount persists on the self-hosted runner
+          # and checkout dies "EBUSY: resource busy or locked, rmdir '.tmp'"
+          # before ANY lane step runs. fuser shows the holder as
+          # "root kernel mount" — no userspace process to kill; the ONLY fix is
+          # to umount the stale mountpoint.
+          #
+          # WHY --target, NOT --submounts: the workspace root is NOT itself a
+          # mountpoint, so `findmnt --submounts "$ws"` enumerates NOTHING and
+          # misses the .tmp mount entirely (observed: the prior rescue printed
+          # "(none)" while .tmp stayed mounted). Querying `findmnt --target
+          # "$tmp"` resolves the mount covering .tmp directly. We umount the
+          # stale .tmp mountpoint and every mount beneath it, deepest-first.
+          echo "=== stale mounts under $tmp (pre-rescue) ==="
+          findmnt -rn --target "$tmp" -o TARGET,SOURCE,FSTYPE 2>/dev/null || echo "  (none)"
+          # Collect the .tmp mountpoint + any submounts, deepest-first, then umount.
+          { findmnt -rn --submounts "$tmp" -o TARGET 2>/dev/null; findmnt -rn --target "$tmp" -o TARGET 2>/dev/null; } \
+            | sort -ru | while read -r t; do
+                [ -z "$t" ] && continue
+                case "$t" in "$tmp"|"$tmp"/*)
+                  echo "umounting stale mount: $t"
+                  umount -l "$t" 2>/dev/null || umount "$t" 2>/dev/null || true
+                  ;;
+                esac
+              done || true
+          # After a lazy umount the directory is removable; rm it so checkout's
+          # rmdir (or the fresh mount) sees a clean path.
+          rm -rf "$tmp" 2>/dev/null || true
+          echo "rescue done; .tmp present? $(test -e "$tmp" && echo yes || echo no); still-mounted? $(findmnt -rn --target "$tmp" -o FSTYPE 2>/dev/null || echo no)"
+
+          # --- FIX (root cause): kill leaked egress-proxy node processes -----
+          # ROOT CAUSE of the recurring fork EAGAIN / exit-134 SIGABRT: each
+          # privileged session launches a netns-mode egress proxy
+          # (`node .../egress-proxy-server.mjs --namespace-path /run/netns/octn-*`).
+          # A session interrupted mid-run never runs the proxy's SIGTERM teardown,
+          # so the process is reparented to PID 1 and LEAKS on this persistent
+          # runner. The discriminator run counted 53 of them, each committing
+          # tens of MB of V8 VSZ → Committed_AS ~6.0GB on a 930MB box. Under that
+          # memory saturation the next job's Node/V8 cannot commit heap and
+          # ABORTS (exit 134), and small nested forks EAGAIN. (PIDs 780/ulimit
+          # 2092 and overcommit_memory=1 both already ruled out.) The in-repo
+          # security-cleanup-linux.mjs now kills these too, but that script only
+          # exists AFTER checkout — this rescue is the ONLY step guaranteed to
+          # run before the memory-critical checkout, so kill the leak inline here.
+          # Match the proxy by its bundle entrypoint (never a bare `node`, which
+          # is the runner agent itself). Kill via the proxies' cgroup.kill first
+          # (atomic whole-group kill — the proxies live in oct-proxy-* cgroups),
+          # then bounded-retry SIGKILL on any /proc survivor until none remain
+          # (a single SIGTERM+SIGKILL pass left 31 alive in a prior run — zombies
+          # and slow-terminating V8 processes need a retry loop).
+          echo "=== leaked egress-proxy processes (pre-kill) ==="
+          cgroot0="${OCTOPUS_TEST_CGROUP_PARENT:-/sys/fs/cgroup}"
+          for d in "$cgroot0"/oct-proxy-*; do
+            [ -d "$d" ] || continue
+            [ -w "$d/cgroup.kill" ] && echo 1 > "$d/cgroup.kill" 2>/dev/null || true
+          done
+          list_proxies() { grep -l 'egress-proxy-server\.mjs' /proc/[0-9]*/cmdline 2>/dev/null | cut -d/ -f3 | grep -vx "$$" || true; }
+          for round in 1 2 3 4; do
+            proxy_pids=$(list_proxies)
+            [ -z "$proxy_pids" ] && break
+            echo "round $round: $(echo "$proxy_pids" | wc -l) proxies -> $(echo "$proxy_pids" | tr '\n' ' ')"
+            for p in $proxy_pids; do
+              [ "$round" -lt 3 ] && kill -TERM "$p" 2>/dev/null || kill -KILL "$p" 2>/dev/null || true
+            done
+            sleep 1
+          done
+          proxy_left=$(list_proxies | wc -l)
+          echo "killed leaked proxies; remaining: $proxy_left"
+          # Now that leaked proxies no longer pin their netns, drop the stale
+          # octn-* namespaces + oct-proxy cgroups they held (mirrors cleanup).
+          for n in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^octns?-' || true); do
+            ip netns delete "$n" 2>/dev/null || true
+          done
+          cgroot="${OCTOPUS_TEST_CGROUP_PARENT:-/sys/fs/cgroup}"
+          for d in "$cgroot"/oct-proxy-* "$cgroot"/oct-*; do
+            [ -d "$d" ] || continue
+            [ -w "$d/cgroup.kill" ] && echo 1 > "$d/cgroup.kill" 2>/dev/null || true
+            rmdir "$d" 2>/dev/null || true
+          done
+          echo "post-kill Committed_AS: $(awk '/Committed_AS/{print $2" "$3}' /proc/meminfo 2>/dev/null)"
+
+          # --- fork/EAGAIN diagnostics — hypothesis DISCRIMINATOR --------------
+          # Two EAGAIN hypotheses survive; they are mutually exclusive and the
+          # captured counters tell them apart. git config/version (single small
+          # fork) SUCCEED while git-submodule's nested `sh` forks EAGAIN, and
+          # overcommit_memory=1 (so global commit-accounting can't refuse fork).
+          #
+          #   H-A  MEMORY: Committed_AS 5.9GB on a 930MB box. tar/sh fork+exec
+          #        triggers on-demand paging; the OOM killer fires DURING
+          #        checkout's heavy phase, killing the Runner.Worker (the
+          #        "(pid) Aborted" + exit 134). Discriminator: MemAvailable
+          #        collapses toward 0 AND swap fills AND dmesg/OOM shows kills.
+          #
+          #   H-B  THREADS/TASKS: RLIMIT_NPROC, cgroup pids, and systemd
+          #        TasksMax ALL count TASKS = processes+threads, not processes.
+          #        53 node procs × dozens of threads each = thousands of tasks.
+          #        The runner's OWN service unit (NOT the agentoctopus-ci leaf,
+          #        which the probe showed 0/max) can hit TasksMax. Discriminator:
+          #        thread count ≈ ulimit -u (2092) or a parent/service cgroup
+          #        pids.current ≈ pids.max AND MemAvailable stays healthy.
+          #
+          # Capture BOTH sides so one run discriminates.
+          echo "=== process budget (pre-checkout) ==="
+          echo "ulimit -u (max user processes): $(ulimit -u 2>/dev/null || echo '?')"
+          echo "ulimit -n (max open files):     $(ulimit -n 2>/dev/null || echo '?')"
+          echo "kernel pid_max:                 $(cat /proc/sys/kernel/pid_max 2>/dev/null || echo '?')"
+          echo "kernel threads-max:             $(cat /proc/sys/kernel/threads-max 2>/dev/null || echo '?')"
+          echo "running processes (this user):  $(ps -u "$(id -un)" 2>/dev/null | tail -n +2 | wc -l || echo '?')"
+          echo "total processes (all users):    $(ps -e 2>/dev/null | tail -n +2 | wc -l || echo '?')"
+          # THREADS — the H-B currency. ps -eLf lists every task (LWP).
+          echo "total THREADS/tasks (all):      $(ps -eLf 2>/dev/null | tail -n +2 | wc -l || echo '?')"
+          echo "threads for this user:          $(ps -u "$(id -un)" -Lf 2>/dev/null | tail -n +2 | wc -l || echo '?')"
+          echo "--- per-thread-cgroup pids (H-B) — leaf AND every ancestor ---"
+          # The leaf agentoctopus-ci was 0/max; the runner service lives under
+          # system.slice or the ROOT cgroup. Walk every pids cgroup and print
+          # current/max so a saturated PARENT is visible.
+          for cg in $(find /sys/fs/cgroup -name pids.current 2>/dev/null); do
+            d=$(dirname "$cg")
+            cur=$(cat "$cg" 2>/dev/null); mx=$(cat "$d/pids.max" 2>/dev/null)
+            # Only print cgroups that have a finite (non-max) limit OR nonzero
+            # current — an unlimited idle cgroup is noise.
+            if [ "$mx" != "max" ] || { [ "$cur" != "0" ] && [ -n "$cur" ]; }; then
+              echo "  pids $d  current=$cur max=$mx"
+            fi
+          done
+          echo "--- systemd runner unit TasksMax/TasksCurrent (H-B) ---"
+          systemctl list-units --type=service --state=running --no-legend 2>/dev/null \
+            | grep -iE 'runner|actions' || echo "  (no runner service matched)"
+          for u in $(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | grep -iE 'runner|actions' | awk '{print $1}'); do
+            echo "  $u: $(systemctl show "$u" -p TasksCurrent,TasksMax,TasksAccounting 2>/dev/null | tr '\n' ' ')"
+          done
+          echo "=== memory / overcommit state (H-A) ==="
+          grep -E 'MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree|Committed_AS|CommitLimit' /proc/meminfo 2>/dev/null || echo "  (meminfo unavailable)"
+          echo "vm.overcommit_memory: $(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo '?')  (0=heuristic 1=always 2=strict)"
+          # Root cgroup memory (H-A): if the ROOT memory cgroup is full, EVERY
+          # allocation page-fault stalls and the OOM killer hunts — the exit 134.
+          echo "--- memory cgroups: ROOT + leaf (H-A) ---"
+          for c in /sys/fs/cgroup /sys/fs/cgroup/agentoctopus-ci /sys/fs/cgroup/system.slice; do
+            if [ -r "$c/memory.current" ]; then
+              echo "  $c memory.current/max: $(cat "$c/memory.current" 2>/dev/null)/$(cat "$c/memory.max" 2>/dev/null)"
+            fi
+          done
+          echo "--- recent OOM-kill evidence (dmesg, best-effort) ---"
+          dmesg 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' | tail -8 || echo "  (dmesg unreadable or no OOM lines)"
+          echo "--- top-12 processes by RSS (KB) ---"
+          ps -eo pid,ppid,rss,nlwp,comm,args --sort=-rss 2>/dev/null | head -13 || true
+          echo "--- top-12 processes by THREAD count (nlwp) ---"
+          ps -eo pid,ppid,nlwp,rss,comm,args --sort=-nlwp 2>/dev/null | head -13 || true
+          echo "--- top process-command counts (all users) ---"
+          ps -eo comm= 2>/dev/null | sort | uniq -c | sort -rn | head -15 || echo "  (ps unavailable)"
+
+          # --- overcommit guard (protective; NOT the EAGAIN root cause) -------
+          # Keep vm.overcommit_memory=1 set: with a 930MB box at Committed_AS
+          # ~5.9GB, the heuristic mode (0) is one more avoidable fork-refusal
+          # path, so pin "always overcommit". NOTE: a prior run PROVED this is
+          # NOT the EAGAIN root cause — overcommit_memory was already 1 and
+          # git-submodule STILL died "Cannot fork". So this is hygiene, not the
+          # fix. The real discriminator between the surviving memory (H-A) and
+          # thread/task-limit (H-B) hypotheses is captured by the counters
+          # above; this sysctl is left in place because it is cheap, idempotent,
+          # and removes a confounder. Root-gated + best-effort; never fails.
+          if [ "$(id -u 2>/dev/null)" = "0" ]; then
+            cur_oc=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo '?')
+            if [ "$cur_oc" != "1" ]; then
+              if sysctl -w vm.overcommit_memory=1 >/dev/null 2>&1; then
+                echo "set vm.overcommit_memory: $cur_oc -> 1 (hygiene; NOT the fork-EAGAIN root cause)"
+              else
+                echo "WARN: could not set vm.overcommit_memory=1 (sysctl denied)"
+              fi
+            else
+              echo "vm.overcommit_memory already 1"
+            fi
+          else
+            echo "not root (uid=$(id -u 2>/dev/null)); cannot adjust vm.overcommit_memory"
+          fi
+          exit 0
+      - uses: actions/checkout@v7
+      - name: Stage TMPDIR (disk-backed) + assert userns-bind precondition
+        shell: bash
+        run: |
+          set -euo pipefail
+          # TMPDIR is a DISK-backed directory (see the env comment above). The
+          # runner has only 930MB RAM, so a RAM-backed tmpfs cannot hold the
+          # runtime rootfs extract (it ENOSPC'd and starved RAM); the root ext4
+          # has several GB free. /var/tmp is on that disk AND AppArmor-authorizes
+          # the helper's unprivileged-userns self-bind (probed: BIND OK, ext4).
+          # Just create the directory — no mount.
+          mkdir -p "${TMPDIR}"
+          echo "TMPDIR -> ${TMPDIR} ($(findmnt -rn --target "${TMPDIR}" -o FSTYPE 2>/dev/null || echo '?'))"
+          df -h "${TMPDIR}"
+          # Fail-closed precondition check: the OS-backend helper pivots into a
+          # NEW user+mount namespace and self-binds the extracted runtime root.
+          # That bind only succeeds on an AppArmor-authorized path. Assert it
+          # here so a future TMPDIR relocation (e.g. back under the _work tree,
+          # which AppArmor rejects) fails LOUDLY at staging with a clear message
+          # instead of a dozen ESRCH test failures.
+          bindprobe="${TMPDIR}/.oct-bind-assert"
+          mkdir -p "$bindprobe"
+          if unshare -Umr sh -c "mount --bind '$bindprobe' '$bindprobe'" 2>/tmp/oct-binderr; then
+            echo "STAGE OK: unprivileged-userns self-bind succeeds at ${TMPDIR}"
+            umount "$bindprobe" 2>/dev/null || true
+          else
+            echo "ERROR: unprivileged-userns self-bind FAILS at ${TMPDIR} -> $(cat /tmp/oct-binderr)" >&2
+            echo "ERROR: the OS-backend helper cannot self-bind its rootfs here; TMPDIR must be on an AppArmor-authorized disk path (e.g. /var/tmp). See the privileged-linux env comment." >&2
+            rmdir "$bindprobe" 2>/dev/null || true
+            exit 1
+          fi
+          rmdir "$bindprobe" 2>/dev/null || true
+      - name: Verify privileged Linux lane files are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for file in tests/security/linux-lane-setup.ts tests/security/linux-lane.test.ts tests/security/linux-topology.test.ts; do
+            if [ ! -f "packages/sandbox/$file" ]; then
+              missing+=("packages/sandbox/$file")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ERROR: privileged Linux security lane missing files: ${missing[*]}" >&2
+            exit 1
+          fi
+      - uses: ./.github/actions/setup-node-env
+      - name: Clean stale privileged state before the lane
+        run: |
+          set -euo pipefail
+          pnpm --filter @agentoctopus/sandbox security:cleanup-linux
+          # The OS backend stages its rootfs under os.tmpdir() (the runner's /tmp
+          # is a small RAM-backed tmpfs). A session that fails mid-run aborts
+          # before cleanup() and leaks its oct-os-backend-*/octopus-llane-* dir;
+          # a few of those fill the tmpfs and the next lane's rootfs extract dies
+          # with ENOSPC. Sweep ONLY verified-idle leftovers: skip any dir that has
+          # a live open file handle (lsof +D) so we never delete an in-flight
+          # session's working state, and match the exact oct- prefixes the
+          # sandbox creates — never a broad /tmp glob.
+          shopt -s nullglob
+          for d in "${TMPDIR}"/oct-os-backend-* "${TMPDIR}"/octopus-llane-*; do
+            [ -d "$d" ] || continue
+            if lsof +D "$d" >/dev/null 2>&1; then
+              echo "skip in-use $d"
+            else
+              rm -rf -- "$d" && echo "swept stale $d"
+            fi
+          done
+      - name: Restore provisioned verified Linux runtime artifacts (runner-managed, preferred)
+        id: restore-runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR:-}" ]; then
+            echo 'managed=false' >> "$GITHUB_OUTPUT"
+            echo 'OCTOPUS_CI_RUNTIME_ARTIFACT_DIR is not set; falling back to the same-run producer artifact.'
+            exit 0
+          fi
+          install -d -m 0755 packages/sandbox/runtime
+          for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
+            test -f "$OCTOPUS_CI_RUNTIME_ARTIFACT_DIR/$file"
+            install -m 0644 "$OCTOPUS_CI_RUNTIME_ARTIFACT_DIR/$file" "packages/sandbox/runtime/$file"
+          done
+          chmod 0755 packages/sandbox/runtime/os-helper
+          echo 'managed=true' >> "$GITHUB_OUTPUT"
+      - name: Download reviewed Linux runtime artifacts from the same-run producer (fallback)
+        if: steps.restore-runner.outputs.managed != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-os-runtime-artifacts
+          path: packages/sandbox/runtime
+      - name: Enforce canonical Linux runtime artifacts are present (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 0755 packages/sandbox/runtime/os-helper
+          for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
+            if [ ! -f "packages/sandbox/runtime/$file" ]; then
+              echo "ERROR: canonical artifact packages/sandbox/runtime/$file is absent after restore — provisioning is broken (C4)" >&2
+              exit 1
+            fi
+          done
+      - name: Build package and Linux proxy artifact
+        run: |
+          pnpm --filter @agentoctopus/sandbox build
+          node packages/sandbox/scripts/bundle-egress-proxy.mjs
+      # The privileged lane's PREFERRED artifact path restores a runner-managed
+      # copy of os-helper from $OCTOPUS_CI_RUNTIME_ARTIFACT_DIR — a CACHED binary
+      # provisioned out-of-band that can lag the current commit. When helper.c
+      # changes (e.g. a mount-flag fix), the lane otherwise tests the STALE
+      # binary and the fix never takes effect (observed: three helper.c commits
+      # had no effect because the cached helper still carried the old mounts).
+      # Rebuild os-helper from the checked-out commit's src/os/helper.c (runs
+      # after `pnpm build` because the script self-checks via the compiled
+      # verifyHelperArtifact), verify the digest changed, and refresh the
+      # runner-managed cache so later runs also pick up the fix.
+      - name: Rebuild os-helper from the current commit (fix stale runner cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          before=$(sha256sum packages/sandbox/runtime/os-helper | cut -d' ' -f1)
+          node packages/sandbox/scripts/build-os-helper.mjs
+          after=$(sha256sum packages/sandbox/runtime/os-helper | cut -d' ' -f1)
+          echo "os-helper sha256 before=$before after=$after"
+          if [ "$before" = "$after" ]; then
+            echo "NOTE: os-helper unchanged (runner cache already current)."
+          else
+            echo "os-helper REBUILT from current commit — runner cache was stale."
+          fi
+          if [ -n "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR:-}" ] && [ -d "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}" ]; then
+            install -m 0755 packages/sandbox/runtime/os-helper "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}/os-helper"
+            install -m 0644 packages/sandbox/runtime/os-helper.manifest.json "${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}/os-helper.manifest.json"
+            echo "refreshed runner-managed cache at ${OCTOPUS_CI_RUNTIME_ARTIFACT_DIR}"
+          fi
+      - name: Require real privileged Linux capability
+        run: pnpm --filter @agentoctopus/sandbox security:probe-linux -- --require
+      - name: Run privileged Linux lanes with zero skips
+        run: |
+          # default reporter -> stdout (CI log), json -> file (assert-no-skipped).
+          # --outputFile.json scopes the file to the json reporter only, so the
+          # default reporter's failures/assertions still reach the workflow log;
+          # json-only would swallow every assertion into a runner-local file and
+          # leave each failure a black box.
+          #
+          # --config vitest.security-lane.config.ts adds `retry: 2` for THIS lane
+          # only (its `include` also selects exactly these two files). On the
+          # ~930MB self-hosted runner a sandbox's os-helper fork/exec occasionally
+          # stalls past a per-op timeout under memory/IO pressure — an empty or
+          # exit-137 probe, which is a HARNESS timeout, never a violated property
+          # (netns isolation / read-only CA / proxy-only egress are deterministic
+          # given the code). retry re-rolls the environmental timing dice; a
+          # genuine violation fails the assertion on EVERY attempt and still trips
+          # the assert-no-skipped-tests gate below (empirically validated: real
+          # failures stay "failed" after exhausting retries and are not masked).
+          pnpm --filter @agentoctopus/sandbox exec vitest run \
+            --config vitest.security-lane.config.ts \
+            tests/security/linux-lane.test.ts \
+            tests/security/linux-topology.test.ts \
+            --reporter=json --reporter=default \
+            --outputFile.json=/tmp/linux-security.json
+          node packages/sandbox/scripts/assert-no-skipped-tests.mjs /tmp/linux-security.json
+      # F3: qualify + sign the linux-x64 VM TCB. run-vm-gates' G1/G2 boot a real
+      # libkrun guest, which needs /dev/kvm. The base TCB (helper + libs + image
+      # builder + tcb-manifest + linux-x64 rootfs) comes from produce-linux-artifacts,
+      # which uploads the linux-x64 TCB as its own artifact (the linux-arm64 rootfs
+      # is a separate artifact consumed only by the macOS vm-lane — this lane
+      # qualifies + re-uploads linux-x64 alone, so it never downloads the arm64
+      # rootfs). This job is fork-guarded, so the signing secret is always
+      # available when these steps run.
+      #
+      # ENVIRONMENT-SPECIFIC QUALIFICATION GATE (mirrors the vm-lane HVF probe):
+      # on a runner that is itself a non-nested-virt guest (e.g. a standard EC2
+      # instance), /dev/kvm does not exist and libkrun aborts "Error creating the
+      # Kvm object: Error(2)" — an environment limitation, not a code defect,
+      # exactly like vm-lane on GitHub's macos-15 (a Vz guest with no nested HVF).
+      # Probe for /dev/kvm and, when absent, SKIP this whole block with a clear
+      # message instead of failing the OS lane that already passed above. This is
+      # fail-closed by construction: when /dev/kvm IS present the qualification
+      # runs and any G1/G2 failure fails the job; and the release pack job still
+      # refuses to publish without the qualified linux-x64 artifact, so the TCB
+      # must be qualified on a KVM-capable runner before release — the same
+      # deferred-qualification model as vm-lane's G1/G2 on physical Apple Silicon.
+      - name: Probe KVM availability (VM qualification gate)
+        id: kvm-probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "kvm=available" >> "$GITHUB_OUTPUT"
+            echo "/dev/kvm present + rw — VM qualification (G1/G2) will run, fail-closed."
+          else
+            echo "kvm=unavailable" >> "$GITHUB_OUTPUT"
+            echo "NOTE: /dev/kvm unavailable on this runner — VM qualification (G1/G2) NOT executed."
+            echo "      Recognized environment limitation (non-nested-virt guest), mirroring the"
+            echo "      vm-lane HVF skip. The linux-x64 VM TCB must be qualified on a KVM-capable"
+            echo "      runner before release (the release pack job fails closed without it)."
+            ls -l /dev/kvm 2>/dev/null || echo "      (/dev/kvm does not exist)"
+          fi
+      - name: Build sandbox-vm-native package
+        if: steps.kvm-probe.outputs.kvm == 'available'
+        run: pnpm --filter @agentoctopus/sandbox-vm-native build
+      - name: Download linux-x64 VM TCB from the producer
+        if: steps.kvm-probe.outputs.kvm == 'available'
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-tcb-linux-x64
+          path: /tmp/vm-tcb-linux-x64-dl
+      - name: Untar linux-x64 VM TCB into prebuilds
+        if: steps.kvm-probe.outputs.kvm == 'available'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf /tmp/vm-tcb-linux-x64-dl/vm-tcb-linux-x64.tar \
+            -C packages/sandbox-vm-native/prebuilds
+      - name: Qualify linux-x64 VM TCB (G1/G2 under KVM, fail closed)
+        if: steps.kvm-probe.outputs.kvm == 'available'
+        run: pnpm --filter @agentoctopus/sandbox-vm-native security:probe-vm
+      - name: Sign linux-x64 release manifest (fail closed)
+        if: steps.kvm-probe.outputs.kvm == 'available'
+        run: |
+          set -euo pipefail
+          if [ -z "${OCTOPUS_VM_RELEASE_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: OCTOPUS_VM_RELEASE_PRIVATE_KEY is not set — cannot sign the linux-x64 release manifest." >&2
+            exit 1
+          fi
+          pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/sign-release-manifest.mjs
+        env:
+          OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
+      # Same colon-safe transport as the producer: linux-x64/rootfs/sha256:<hex>
+      # would otherwise fail the upload.
+      - name: Tar the qualified linux-x64 VM TCB for colon-safe upload
+        if: steps.kvm-probe.outputs.kvm == 'available'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -cf vm-tcb-linux-x64-qualified.tar \
+            -C packages/sandbox-vm-native/prebuilds linux-x64
+      - name: Upload qualified linux-x64 VM TCB
+        if: steps.kvm-probe.outputs.kvm == 'available'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-tcb-linux-x64-qualified
+          path: vm-tcb-linux-x64-qualified.tar
+          if-no-files-found: error
+          retention-days: 7
+      - name: Clean stale privileged state after the lane
+        if: always()
+        shell: bash
+        run: |
+          pnpm --filter @agentoctopus/sandbox security:cleanup-linux
+          if command -v docker >/dev/null 2>&1; then
+            while IFS= read -r container; do
+              case "$container" in
+                octopus-sbx-runtime-*|octopus-sbx-proxy-*|octopus-proxy-*) docker rm -f "$container" || true ;;
+              esac
+            done < <(docker ps -a --format '{{.Names}}' 2>/dev/null || true)
+            while IFS= read -r network; do
+              case "$network" in
+                octopus-sbx-*) docker network rm "$network" || true ;;
+              esac
+            done < <(docker network ls --format '{{.Name}}' 2>/dev/null || true)
+          fi
+          # Sweep verified-idle leaked tmpdirs (see the pre-lane step): a session
+          # that failed mid-run leaks its oct-* rootfs and would bloat the next
+          # lane. Skip any dir with a live open handle. Then drop TMPDIR itself.
+          shopt -s nullglob
+          for d in "${TMPDIR}"/oct-os-backend-* "${TMPDIR}"/octopus-llane-*; do
+            [ -d "$d" ] || continue
+            lsof +D "$d" >/dev/null 2>&1 || rm -rf -- "$d" || true
+          done
+          rm -rf packages/sandbox/runtime packages/sandbox/build
+          # TMPDIR is a plain disk-backed directory under /var/tmp (see the
+          # staging step): sweep its leaked rootfs contents, then remove the dir
+          # so the runner is left clean. No mount to unmount (that was the old
+          # RAM-backed tmpfs design).
+          rm -rf "${TMPDIR}" || true
+
+  macos-restricted:
+    name: macos-restricted
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require macOS restricted lane file
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f packages/sandbox/tests/security/macos-restricted-lane.test.ts ]; then
+            echo "ERROR: macOS restricted security lane not yet landed — missing: packages/sandbox/tests/security/macos-restricted-lane.test.ts" >&2
+            echo "The lane is authored against a fixed filename but blocked on the supplemental macOS restricted backend (Task #18). This mandatory gate fails loudly until the lane lands and passes." >&2
+            exit 1
+          fi
+      - uses: ./.github/actions/setup-node-env
+      - name: Build sandbox package
+        run: pnpm --filter @agentoctopus/sandbox build
+      - name: Run macOS restricted or fail-closed unavailable branch
+        run: pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/macos-restricted-lane.test.ts --reporter=verbose
+
+  # Probe whether this macOS runner can actually create a Hypervisor VM.
+  # GitHub-hosted macos-15 runners run INSIDE an Apple Virtualization.framework
+  # guest, and HVF does NOT grant nested hv_vm_create to guests — so the G1/G2
+  # qualification gates (which boot a real libkrun guest) can never pass there.
+  # Rather than fail-closed on a known environmental limitation, this job probes
+  # HVF once and exposes `hvf=available|unavailable`; vm-lane is then SKIPPED
+  # (job-level if → result 'skipped') only for that recognized nested-virt
+  # limitation, and security-gate accepts 'skipped' from vm-lane alone. Real VM
+  # failures / cancellations / unexpected skips stay fail-closed (vm-lane still
+  # runs and fails normally when HVF IS available, e.g. a physical Apple Silicon
+  # self-hosted runner). The probe compiles a 20-line C program that calls
+  # hv_vm_create(NULL) directly: 0 = HVF available, anything else = nested block.
+  #
+  # Runner: a physical Apple Silicon self-hosted runner (labels
+  # [self-hosted, macOS, arm64, physical]) — bare metal, where the probe
+  # returns hvf=available and vm-lane runs for real. GitHub's runs-on array is
+  # AND-matched and has no priority/fallback semantics, so the hosted macos-15
+  # label is NOT listed here: including it would require a runner carrying both
+  # self-hosted AND macos-15, which never matches and leaves the job queued
+  # forever. A repo that wants hosted fallback should point these labels at a
+  # hosted pool instead; without any matching runner the job stays queued (and
+  # security-gate treats a missing vm-lane result fail-closed).
+  vm-hvf-probe:
+    name: vm-hvf-probe
+    runs-on: [self-hosted, macOS, arm64, physical]
+    outputs:
+      hvf: ${{ steps.probe.outputs.hvf }}
+    steps:
+      - name: Probe Hypervisor.framework availability
+        id: probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/hvf_probe.c <<'EOF'
+          #include <Hypervisor/hv_vm.h>
+          #include <Hypervisor/hv_error.h>
+          #include <stdio.h>
+          int main(void) {
+            hv_return_t r = hv_vm_create(NULL);
+            printf("hv_vm_create -> 0x%x\n", (unsigned)r);
+            if (r == HV_SUCCESS) { hv_vm_destroy(); }
+            return r == HV_SUCCESS ? 0 : 1;
+          }
+          EOF
+          # Ad-hoc sign with ONLY the hypervisor entitlement (self-claimable;
+          # sufficient on physical hardware, denied inside a nested Vz guest).
+          cc -O2 -o /tmp/hvf_probe /tmp/hvf_probe.c -framework Hypervisor
+          cat > /tmp/hvf_ent.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>
+          EOF
+          codesign -s - --entitlements /tmp/hvf_ent.plist --force /tmp/hvf_probe || true
+          if /tmp/hvf_probe; then
+            echo "HVF available on this runner — vm-lane will run for real."
+            echo "hvf=available" >> "$GITHUB_OUTPUT"
+          else
+            echo "HVF UNAVAILABLE (nested-virt guest) — vm-lane will be skipped."
+            echo "::notice::VM qualification not executed on this runner: Hypervisor.framework is unavailable (GitHub-hosted macos-15 is a nested Virtualization.framework guest; HVF denies nested hv_vm_create). Run G1/G2 on a physical Apple Silicon runner."
+            echo "hvf=unavailable" >> "$GITHUB_OUTPUT"
+          fi
+
+  vm-lane:
+    name: vm-lane
+    runs-on: [self-hosted, macOS, arm64, physical]
+    needs: [produce-linux-artifacts, vm-hvf-probe]
+    # SKIPPED (result 'skipped') only for the recognized nested-virtualization
+    # limitation surfaced by vm-hvf-probe. On a physical Apple Silicon runner
+    # (hvf=available) the lane runs for real and remains fail-closed end to end.
+    if: needs.vm-hvf-probe.outputs.hvf == 'available'
+    env:
+      OCTOPUS_VM_LANE: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Require VM lane files
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in \
+            packages/sandbox/tests/security/vm-lane-setup.ts \
+            packages/sandbox/tests/security/vm-lane.test.ts \
+            packages/sandbox/tests/security/vm-escape-matrix.test.ts \
+            packages/sandbox-vm-native/scripts/run-vm-gates.mjs \
+            packages/sandbox-vm-native/scripts/sign-release-manifest.mjs; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: VM lane file missing: $f" >&2
+              exit 1
+            fi
+          done
+      - uses: ./.github/actions/setup-node-env
+      - name: Build sandbox + sandbox-vm-native packages
+        run: |
+          pnpm --filter @agentoctopus/sandbox build
+          pnpm --filter @agentoctopus/sandbox-vm-native build
+      # F2c/F3: download the Linux-produced guest rootfs. build-vm-rootfs.mjs is
+      # Linux-only (mke2fs + a Linux guest node), so produce-linux-artifacts
+      # builds the both-arch guest rootfs and uploads the linux-arm64 rootfs as
+      # its own artifact (vm-rootfs-linux-arm64), which this lane consumes
+      # (guest arch = host arch under libkrun/HVF). The mac-side helper +
+      # libkrun/libkrunfw are built locally next (those scripts work on macOS).
+      - name: Download the linux-arm64 guest rootfs from the Linux producer
+        uses: actions/download-artifact@v4
+        with:
+          name: vm-rootfs-linux-arm64
+          path: /tmp/vm-rootfs-linux-arm64-dl
+      - name: Untar the linux-arm64 rootfs into prebuilds
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf /tmp/vm-rootfs-linux-arm64-dl/vm-rootfs-linux-arm64.tar \
+            -C packages/sandbox-vm-native/prebuilds
+      - name: Place the linux-arm64 rootfs under the darwin-arm64 prebuilds dir
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The guest arch equals the host arch under libkrun/HVF: this
+          # darwin-arm64 lane boots a linux-ARM64 guest. Consume ONLY the
+          # linux-arm64 rootfs — an x64 guest image cannot run in the ARM VM
+          # (the guest node binary is copied into the rootfs, never executed
+          # at build time, so its ELF arch must match the guest). Fail closed
+          # if the producer did not provide it (no x64 fallback).
+          src=packages/sandbox-vm-native/prebuilds/linux-arm64
+          dst=packages/sandbox-vm-native/prebuilds/darwin-arm64
+          test -f "$src/rootfs.img" || { echo "ERROR: linux-arm64 rootfs missing from vm-rootfs-linux-arm64 — produce-linux-artifacts must set OCTOPUS_ROOTFS_NODE_ARM64" >&2; exit 1; }
+          mkdir -p "$dst/rootfs"
+          cp "$src/rootfs.img" "$dst/rootfs.img"                 # run-vm-gates.mjs qualification image
+          cp "$src/rootfs.manifest.json" "$dst/rootfs.manifest.json"
+          cp -R "$src/rootfs/." "$dst/rootfs/"                   # rootfs/<ref> for engine.resolveRootfs
+          ref=$(node -p "JSON.parse(require('fs').readFileSync('$dst/rootfs.manifest.json','utf8')).ref")
+          test -f "$dst/rootfs/$ref" || { echo "ERROR: runtime rootfs placement $dst/rootfs/$ref missing" >&2; exit 1; }
+          # Consumed by vm-lane-setup.ts as runtimeProfile.vmRuntime.rootfs —
+          # without it the tests would default to an all-zero digest that
+          # qualifies nothing and resolves no file.
+          echo "OCTOPUS_VM_ROOTFS_REF=$ref" >> "$GITHUB_ENV"
+          echo "Placed linux-arm64 rootfs for the darwin-arm64 lane (ref $ref)"
+      # libkrun's macOS build needs two keg-only Homebrew libs Xcode lacks:
+      # (1) lld — krun-init-blob's build script compiles init.c with
+      #     `-fuse-ld=lld`, which clang resolves to the `ld64.lld` executable on
+      #     PATH; and (2) llvm — krun-input's build script (clang-sys/bindgen)
+      #     links `@rpath/libclang.dylib`, which Xcode does not ship
+      #     dyld-visible. Homebrew installs are keg-only (binaries stay under
+      #     $(brew --prefix)/opt/{lld,llvm}), so link lld onto PATH and export
+      #     LIBCLANG_PATH for vendor-libkrun.mjs resolveLibclangEnv(); both
+      #     steps fail closed if the tool still cannot be resolved.
+      - name: Provision lld for the libkrun init-blob build
+        run: |
+          set -euo pipefail
+          # lld → the init-blob linker; llvm → libclang.dylib for libkrun's
+          # krun-input build script (clang-sys/bindgen). Both are keg-only.
+          brew install lld llvm
+          LLD_BIN="$(brew --prefix)/opt/lld/bin"
+          # Link onto $(brew --prefix)/bin, NOT /usr/local/bin: on a physical
+          # self-hosted Apple Silicon runner /usr/local/bin is root:wheel and
+          # the unprivileged runner user cannot write it, while the Homebrew
+          # bin dir is user-writable and already on PATH. (Hosted macos-15
+          # happens to allow /usr/local/bin writes, which is why this only
+          # surfaced on physical hardware.)
+          LINK_BIN="$(brew --prefix)/bin"
+          mkdir -p "$LINK_BIN"
+          for tool in ld64.lld ld.lld lld-link wasm-ld; do
+            [ -e "$LLD_BIN/$tool" ] && ln -sf "$LLD_BIN/$tool" "$LINK_BIN/$tool"
+          done
+          echo "$LINK_BIN" >> "$GITHUB_PATH"
+          command -v ld64.lld >/dev/null || { echo "ERROR: ld64.lld not on PATH after lld provision" >&2; exit 1; }
+          clang -fuse-ld=lld -Wl,--version >/dev/null 2>&1 || clang -fuse-ld=lld -Wl,-v 2>&1 | grep -qi lld || { echo "ERROR: clang -fuse-ld=lld still cannot resolve an lld linker" >&2; exit 1; }
+          echo "lld provisioned: $(command -v ld64.lld)"
+          # vendor-libkrun.mjs resolveLibclangEnv() reads this (and prepends it to
+          # DYLD_FALLBACK_LIBRARY_PATH) so the krun-input build script can link and
+          # dlopen @rpath/libclang.dylib. Fail closed if the dylib is absent.
+          LLVM_LIB="$(brew --prefix)/opt/llvm/lib"
+          test -f "$LLVM_LIB/libclang.dylib" || { echo "ERROR: libclang.dylib missing at $LLVM_LIB" >&2; exit 1; }
+          echo "LIBCLANG_PATH=$LLVM_LIB" >> "$GITHUB_ENV"
+          echo "libclang provisioned: $LLVM_LIB/libclang.dylib"
+      - name: Build mac-side VM helper + vendor libkrun/libkrunfw
+        run: |
+          # libkrun is a Rust crate built via `make` driving cargo. Hosted
+          # macos-15 ships a Rust toolchain on PATH; a physical self-hosted
+          # runner may not. If rustup installed cargo under ~/.cargo/bin (the
+          # runner user's home), put it on PATH for this step and the ones
+          # below. No-op where cargo is already resolvable.
+          if [ -x "$HOME/.cargo/bin/cargo" ]; then
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          command -v cargo >/dev/null || { echo "ERROR: cargo not on PATH — install a Rust toolchain (rustup) on this runner" >&2; exit 1; }
+          pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/vendor-libkrun.mjs
+          pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/build-vm-helper.mjs
+      # ORDERING (F1): the G1/G2 gates + release-manifest signature MUST run
+      # BEFORE the L3/L4 tests. The tests' engine.probe() reads
+      # prebuilds/darwin-arm64/gate-manifest.json (+ release-manifest pair);
+      # producing them only AFTER the tests made every test skip, and the
+      # zero-skip gate then failed the lane. Now the manifests exist before
+      # the tests run, and the lane is FAIL-CLOSED end to end: a NO-GO (rc=2)
+      # or any skipped test fails the job, so security-gate can never pass on
+      # a lane that executed zero L3/L4 tests.
+      - name: Run G1/G2 gates (fail closed on NO-GO)
+        run: pnpm --filter @agentoctopus/sandbox-vm-native security:probe-vm
+      # Sign the outer release manifest. Fork PRs cannot access repository
+      # secrets, so signing is skipped there — the lane still runs the L3/L4
+      # tests against the unsigned TCB (probe() soft-degrades to
+      # releaseManifest:'missing'). On same-repo events (and every master push
+      # that drives Release Preflight) signing is REQUIRED and fails closed if
+      # the secret is absent.
+      - name: Sign release manifest (same-repo events, fail closed)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          set -euo pipefail
+          if [ -z "${OCTOPUS_VM_RELEASE_PRIVATE_KEY:-}" ]; then
+            echo "ERROR: OCTOPUS_VM_RELEASE_PRIVATE_KEY is not set — cannot sign the release manifest on a same-repo event." >&2
+            exit 1
+          fi
+          pnpm --filter @agentoctopus/sandbox-vm-native exec node scripts/sign-release-manifest.mjs
+        env:
+          OCTOPUS_VM_RELEASE_PRIVATE_KEY: ${{ secrets.OCTOPUS_VM_RELEASE_PRIVATE_KEY }}
+      - name: Run VM L3 + L4 (fail-closed on any skip)
+        run: |
+          # default reporter -> stdout (CI log), json -> file (assert-no-skipped).
+          # Same rationale as the privileged-linux lane above: keep the failing
+          # assertions visible in the workflow log instead of a runner-local file.
+          pnpm --filter @agentoctopus/sandbox exec vitest run \
+            tests/security/vm-lane.test.ts \
+            tests/security/vm-escape-matrix.test.ts \
+            --reporter=json --reporter=default \
+            --outputFile.json=/tmp/vm-security.json
+          node packages/sandbox/scripts/assert-no-skipped-tests.mjs /tmp/vm-security.json
+      # F3: upload the qualified + tested darwin-arm64 TCB (helper, libs, image
+      # builder, TCB/gate/release manifests, sealed rootfs). Release Preflight's
+      # pack job merges this with the linux-x64 qualified TCB into the published
+      # native tarball — and fails closed if either platform is incomplete.
+      # Same colon-safe transport as the producer and privileged-linux lanes:
+      # the sealed rootfs lives at rootfs/sha256:<hex>, and upload-artifact@v4
+      # rejects colon-bearing paths (NTFS-incompatible). Tar the platform dir so
+      # the colon stays inside the tar; the pack job untars to restore
+      # prebuilds/darwin-arm64/... (platform prefix preserved).
+      - name: Tar the qualified darwin-arm64 VM TCB for colon-safe upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -cf vm-tcb-darwin-arm64.tar \
+            -C packages/sandbox-vm-native/prebuilds darwin-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm-tcb-darwin-arm64
+          path: vm-tcb-darwin-arm64.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  security-gate:
+    name: security-gate
+    if: always()
+    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted, vm-lane]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every security lane
+        env:
+          HOSTED_RESULT: ${{ needs.hosted-docker-proxy.result }}
+          PRODUCER_RESULT: ${{ needs.produce-linux-artifacts.result }}
+          LINUX_RESULT: ${{ needs.privileged-linux.result }}
+          MACOS_RESULT: ${{ needs.macos-restricted.result }}
+          VM_RESULT: ${{ needs.vm-lane.result }}
+        run: |
+          test "$HOSTED_RESULT" = success
+          # The producer may be skipped only when the privileged lane itself
+          # is skipped (fork PRs); otherwise it must succeed — the privileged
+          # lane's fallback restore consumes its artifact.
+          if [ "$LINUX_RESULT" != skipped ]; then
+            test "$PRODUCER_RESULT" = success
+          fi
+          # privileged-linux is skipped only for fork pull requests (trust
+          # boundary gate); push/workflow_dispatch/workflow_call runs must
+          # execute and succeed.
+          if [ "$LINUX_RESULT" != success ] && [ "$LINUX_RESULT" != skipped ]; then
+            echo "ERROR: privileged-linux must succeed or be skipped on fork PRs (got: $LINUX_RESULT)" >&2
+            exit 1
+          fi
+          test "$MACOS_RESULT" = success
+          # vm-lane is an environment-specific QUALIFICATION gate, not an
+          # unconditional hosted-CI gate. It is 'skipped' ONLY for the recognized
+          # nested-virtualization limitation (vm-hvf-probe found HVF unavailable
+          # on a GitHub-hosted macos-15 guest). Accept success (real G1/G2 ran,
+          # e.g. a physical Apple Silicon runner) or that specific skip; keep
+          # every other outcome — real VM failure, cancellation, or an
+          # UNEXPECTED skip — fail-closed. When skipped, say so plainly.
+          if [ "$VM_RESULT" = "skipped" ]; then
+            echo "NOTE: VM qualification not executed on this runner (Hypervisor.framework unavailable — nested-virt hosted macOS). G1/G2 must run on a physical Apple Silicon runner before release."
+          elif [ "$VM_RESULT" != "success" ]; then
+            echo "ERROR: vm-lane must succeed or be skipped only for the nested-virt limitation (got: $VM_RESULT)" >&2
+            exit 1
+          fi
+
