@@ -13,17 +13,23 @@ mount. macOS cannot mount ext4, and no darwin stat mechanism existed (the
 design assumed this stat-walk would only ever run on the privileged-Linux
 lane).
 
-Add a self-contained ext4 READER: a `stat` mode on the `vm-image-builder` C
-tool that parses the mke2fs-produced rootfs directly (no mount, no external
-binary), reading via the SAME pinned O_NOFOLLOW fd `resolveRootfs()` already
-verified. It implements superblock/group-descriptor/inode parse, an
-extent-tree walk, and a linear directory walk — sufficient for the small,
-shallow guest tree (no htree is ever instantiated). It fails closed (non-zero
-exit → throw) on anything unexpected: an indirect-block inode, a hash-indexed
-directory, a bad extent magic, or a malformed/truncated image. Symlinks are
-detected from `i_mode` WITHOUT being followed (mirrors the loopback
-`statInMount` lstat-primary rule). A new `createExt4StatRootfsFile()` TS seam
-shells out to it; `engine.assertExecutablesQualified` selects it on darwin
-(Linux keeps the loopback mount unchanged). Covered by a byte-exact synthetic
-ext4 fixture (mke2fs is unavailable on the dev box) exercising the full
-verdict matrix + the three fail-closed rejections.
+Add a self-contained ext4 READER: a `stat`/`statfd` mode on the
+`vm-image-builder` C tool that parses the mke2fs-produced rootfs directly (no
+mount, no external binary). It implements superblock/group-descriptor/inode
+parse, an extent-tree walk, and a linear directory walk — sufficient for the
+small, shallow guest tree (no htree is ever instantiated). It fails closed
+(non-zero exit → throw) on anything unexpected: an indirect-block inode, a
+hash-indexed directory, a bad extent magic, or a malformed/truncated image.
+Symlinks are detected from `i_mode` WITHOUT being followed (mirrors the
+loopback `statInMount` lstat-primary rule).
+
+The engine pins the verified rootfs inode to an open fd in the parent; the
+darwin seam reads via that fd by INHERITANCE (`statfd <fd>`), because a child
+cannot open the parent's `/dev/fd/<N>` path (it resolves against the child's
+own fd table → "Bad file descriptor"). The TS `createExt4StatRootfsFile()` seam
+dup2's the pinned fd into the child's stdio slot 3 via spawn's `{ fd }` option
+and invokes `statfd 3` — `execFile` does NOT inherit extra fds, so spawn is
+used and manages stdout/stderr/exit/timeout itself. `engine.assertExecutablesQualified`
+selects the ext4 reader on darwin (Linux keeps the loopback mount unchanged).
+Covered by a byte-exact synthetic ext4 fixture (mke2fs is unavailable on the
+dev box) exercising the full verdict matrix + the three fail-closed rejections.

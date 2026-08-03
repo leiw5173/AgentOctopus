@@ -1024,7 +1024,33 @@ static int rd_stat_guest(int fd, const rd_sb *sb, const char *guest_path,
 /* ---- main ---------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
-    if (argc < 2) die("usage: vm-image-builder snapshot|single-file|stat ...");
+    if (argc < 2) die("usage: vm-image-builder snapshot|single-file|stat|statfd ...");
+
+    if (strcmp(argv[1], "statfd") == 0) {
+        /* Inherited-fd variant: the parent passes the PINNED rootfs fd INTO the
+         * child's stdio table (execFile stdio slot N) and hands us the fd NUMBER
+         * here. The fd is already open to the verified inode — no path lookup,
+         * no /dev/fd/N self-reference (which only works for the parent's own
+         * fds). Fail-closed on a non-regular / non-readable fd. */
+        if (argc != 4) die("usage: statfd <rootfsFd> <guestPath>");
+        char *end = NULL;
+        long lfd = strtol(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0' || lfd < 0 || lfd > 4096) {
+            die("statfd: bad fd number %s", argv[2]);
+        }
+        int fd = (int)lfd;
+        const char *guestPath = argv[3];
+        struct stat fst;
+        if (fstat(fd, &fst) < 0) die("statfd: fstat rootfs fd %d", fd);
+        if (!S_ISREG(fst.st_mode)) die("statfd: rootfs fd %d not a regular file", fd);
+        rd_sb sb;
+        rd_read_superblock(fd, &sb);
+        int is_reg = 0, is_exec = 0, is_symlink = 0;
+        int found = rd_stat_guest(fd, &sb, guestPath, &is_reg, &is_exec, &is_symlink);
+        if (!found) { fprintf(stdout, "null\n"); return 0; }
+        fprintf(stdout, "{\"isReg\":%d,\"isExec\":%d,\"isSymlink\":%d}\n", is_reg, is_exec, is_symlink);
+        return 0;
+    }
 
     if (strcmp(argv[1], "stat") == 0) {
         if (argc != 4) die("usage: stat <rootfs.img> <guestPath>");
@@ -1259,6 +1285,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    die("unknown mode: %s (expected snapshot|single-file|stat)", argv[1]);
+    die("unknown mode: %s (expected snapshot|single-file|stat|statfd)", argv[1]);
     return 1;
 }
