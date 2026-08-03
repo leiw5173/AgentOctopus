@@ -51,6 +51,7 @@ import type {
 } from '@agentoctopus/sandbox';
 import { assertExecutablesQualified } from './executables-qualified.js';
 import { createLoopbackStatRootfsFile } from './rootfs-loopback-mount.js';
+import { createExt4StatRootfsFile } from './rootfs-ext4-stat.js';
 import { buildHelperLaunchSpec } from './helper-launch-spec.js';
 
 // Deep imports into @agentoctopus/sandbox/dist — that package has NO `exports`
@@ -738,24 +739,48 @@ export class VmEngineImpl implements VmEnginePort {
         'assertExecutablesQualified: no resolved rootfs path — resolveRootfs must be called first',
       );
     }
-    // Real stat seam (HI-2): mount the rootfs image read-only per call and stat
-    // the guest path. Mount from the PINNED FD via /proc/self/fd/N when the fd
-    // is pinned (Linux — the only platform where the loopback mount runs), so
-    // the mounted image is the verified inode rather than a possibly-swapped
-    // path. The loopback mount needs CAP_SYS_ADMIN, available on the
-    // privileged-Linux CI lane where the VM backend's prepare() runs. The
-    // factory is fail-closed: on non-Linux it throws rather than silently
-    // returning null (a mount failure must never degrade to "all executables
-    // qualified"). The VM lane on macOS cannot loopback-mount ext4, so the
-    // production path that exercises this runs only where CAP_SYS_ADMIN is
-    // available; the previous stub (always-null) is gone.
-    const mountSource =
-      this.resolvedRootfsHandle !== undefined && process.platform === 'linux'
-        ? `/proc/self/fd/${this.resolvedRootfsHandle.fd}`
-        : rootfsPath;
+    // Real stat seam (HI-2). Both variants stat guest executables inside the
+    // VERIFIED rootfs image — the object resolveRootfs() pinned by fd after a
+    // byte-digest re-check. Platform-selected, both fail-closed:
+    //
+    //   - Linux: loopback-mount the image read-only per call and stat the guest
+    //     path (needs CAP_SYS_ADMIN, available on the privileged-Linux CI lane).
+    //     Mounts from the PINNED FD via /proc/self/fd/N so the mounted image is
+    //     the verified inode, not a possibly-swapped path.
+    //
+    //   - Darwin: macOS cannot loopback-mount ext4, so parse the image DIRECTLY
+    //     via the `vm-image-builder stat` C mode (createExt4StatRootfsFile) —
+    //     superblock/inode/extent/dir walk, no mount. The tool opens the PINNED
+    //     FD via /dev/fd/N, so the parsed bytes are the verified inode. The
+    //     executed binary is the probe-verified private copy
+    //     (getVerifiedImageBuilderPath), resolved AFTER probe() succeeded.
+    //
+    // Any other platform throws rather than silently degrading to "all
+    // executables qualified".
+    let rootfsSource: string;
+    let statRootfsFile: ReturnType<typeof createLoopbackStatRootfsFile>;
+    if (process.platform === 'linux') {
+      rootfsSource =
+        this.resolvedRootfsHandle !== undefined
+          ? `/proc/self/fd/${this.resolvedRootfsHandle.fd}`
+          : rootfsPath;
+      statRootfsFile = createLoopbackStatRootfsFile();
+    } else if (process.platform === 'darwin') {
+      if (this.resolvedRootfsHandle === undefined) {
+        throw new Error(
+          'assertExecutablesQualified: darwin ext4 stat requires the pinned rootfs fd — resolveRootfs must pin it first',
+        );
+      }
+      rootfsSource = `/dev/fd/${this.resolvedRootfsHandle.fd}`;
+      statRootfsFile = createExt4StatRootfsFile(() => this.getVerifiedImageBuilderPath());
+    } else {
+      throw new Error(
+        `assertExecutablesQualified: no rootfs stat seam on platform ${process.platform} (fail-closed)`,
+      );
+    }
     await assertExecutablesQualified(ref, executables, bins, {
-      rootfsPath: mountSource,
-      statRootfsFile: createLoopbackStatRootfsFile(),
+      rootfsPath: rootfsSource,
+      statRootfsFile,
     });
   }
 
