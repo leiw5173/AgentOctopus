@@ -37,6 +37,7 @@ beforeAll(async () => {
   try {
     const { VmSandboxBackend } = await import('../../src/vm/vm-backend.js');
     const built = await buildLaneVmEngine();
+    console.error('[vm-lane DIAG] buildLaneVmEngine built =', built ? 'OK' : 'NULL');
     if (!built) { vmAvailable = false; return; }
     const be = new VmSandboxBackend({
       config: { defaultBackend: 'vm', minIsolationLevel: 'full', defaults: { outputMaxBytes: 1024 * 1024 } } as any,
@@ -44,9 +45,7 @@ beforeAll(async () => {
       imageBuilder: built.imageBuilder,
     });
     vmAvailable = await be.probe();
-    if (!vmAvailable) {
-      try { console.error('[vm-lane DIAG] engine.probe() =>', JSON.stringify(await built.engine.probe())); } catch (e) { console.error('[vm-lane DIAG] engine.probe() threw:', e); }
-    }
+    try { console.error('[vm-lane DIAG] engine.probe() =>', JSON.stringify(await built.engine.probe())); } catch (e) { console.error('[vm-lane DIAG] engine.probe() threw:', e); }
   } catch (e) { console.error('[vm-lane DIAG] beforeAll threw:', e); vmAvailable = false; }
 });
 
