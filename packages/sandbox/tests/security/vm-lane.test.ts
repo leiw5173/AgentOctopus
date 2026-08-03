@@ -145,7 +145,7 @@ describe('VM L3 integration lane (real libkrun guest, skipIf-gated)', () => {
 
   it('G2 (repeatable): guest cannot reach the network (host canary + 1.1.1.1)', async (ctx) => {
     if (!needVm(ctx)) return;
-    const result = await runProbe('direct-internet', {});
+    const result = await runProbe('direct-internet', { timeoutMs: 10_000 });
     // ok=true would mean a raw TCP connect to the internet succeeded — a breakout.
     expect(result.json.ok).toBe(false);
   }, RUN_TIMEOUT);

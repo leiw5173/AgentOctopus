@@ -69,7 +69,7 @@ describe('VM L4 adversarial escape matrix (skipIf-gated)', () => {
     // With NO granted hosts, the proxy allowlist is empty; a direct connect
     // must fail (the guest has no network path — G2 invariant, but here we
     // assert the proxy-bypass attempt specifically).
-    const result = await runProbe('direct-internet', {});
+    const result = await runProbe('direct-internet', { timeoutMs: 10_000 });
     expect(result.json.ok).toBe(false);
   }, RUN_TIMEOUT);
 
