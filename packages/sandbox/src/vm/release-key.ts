@@ -21,7 +21,7 @@
 // A present-but-unverifiable signature is not a capability probe. When no
 // release manifest is present (dev box, unsigned build), probe() stays soft
 // with releaseManifest:'missing'.
-export const RELEASE_PUBLIC_KEY_BASE64 = 'MCowBQYDK2VwAyEANIE8saDjtcuCQREvDGDYgVCSoivzzfUHBdcKiQs9uQw=';
+export const RELEASE_PUBLIC_KEY_BASE64 = 'MCowBQYDK2VwAyEAAtkDsssxFCnx8ViSDgE/Omo3aXVtp5i8OB2dC+Q3vF4=';
 
 // EXPLICIT TEST SEAM ONLY. Tests and pre-release CI may inject a throwaway
 // Ed25519 public key via OCTOPUS_VM_RELEASE_KEY_TEST. This is NOT the
