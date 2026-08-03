@@ -726,6 +726,31 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     await inst.close();
   });
 
+  // REGRESSION: a rejection that lands in the SAME chunk as the ready frame
+  // ({"ready":true}{"error":...}{"exit":127} written back-to-back by vm-init)
+  // must still surface exitCode 127. The exit-frame capture must be attached
+  // BEFORE waitForReady detaches its own onData on the ready frame — a capture
+  // attached after the handshake would never see the exit frame in that chunk
+  // and would fall back to the helper's always-0 exit code, misreporting a
+  // rejected exec as success.
+  it('captures the {"exit"} frame even when it arrives in the SAME chunk as ready', async () => {
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) =>
+        // vm-init writes ready + rejection back-to-back, no newline, one chunk.
+        makeFakeChild(['{"ready":true}{"error":"unresolvable executable"}{"exit":127}'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    await inst.kill();
+    const r = await inst.exited;
+    expect(r.exitCode).toBe(127);
+    await inst.close();
+  });
+
   it('passes the helper exit code through when no {"exit"} frame arrives', async () => {
     // Older guests (or a kill before the workload finishes) never write an
     // exit frame; the helper status must then pass through unchanged.

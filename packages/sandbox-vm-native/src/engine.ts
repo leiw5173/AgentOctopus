@@ -957,6 +957,24 @@ export class VmEngineImpl implements VmEnginePort {
       rawAny.controlRead = createReadStream('', { fd: g2hRead, autoClose: false });
     }
 
+    // --- Capture the guest-reported workload exit code from the control
+    // stream BEFORE the ready handshake. vm-init writes {"exit":N} after
+    // reaping the workload child (or on a rejection: {"error":…}{"exit":127}),
+    // and a fast rejection can land {"ready":true}{"error":…}{"exit":127} in a
+    // SINGLE chunk. waitForReady detaches ITS onData on the ready frame, so a
+    // capture attached after the handshake would miss the exit frame that
+    // arrived in the same chunk — falling back to the helper's always-0 exit
+    // and misreporting a rejected exec as success. Our handler coexists with
+    // waitForReady's (both receive every chunk) and stays attached post-ready.
+    let guestExit: number | undefined;
+    let controlBuf = '';
+    const onControlData = (chunk: Buffer) => {
+      controlBuf += chunk.toString('utf8');
+      const m = controlBuf.match(/\{"exit":(-?\d{1,5})\}/);
+      if (m) guestExit = Number(m[1]);
+    };
+    raw.controlRead.on('data', onControlData);
+
     // --- Ready handshake: wait for {"ready":true} on g2hRead, or {"error":...},
     // or helper exit before ready, or readyTimeoutMs. EOF on g2hRead before
     // ready is treated as a start failure (the helper closed its write end
@@ -995,25 +1013,6 @@ export class VmEngineImpl implements VmEnginePort {
     raw.stdout.pipe(stdout);
     raw.stderr.pipe(stderr);
     stdin.pipe(raw.stdin);
-    // Capture the guest-reported workload exit code from the control stream.
-    // The guest PID 1 (vm-init) forks the workload, waitpid()s it, and writes
-    // {"exit":N} here before exiting. This frame is AUTHORITATIVE over the
-    // helper process exit code: libkrun propagates a guest exit code via a
-    // virtiofs-only ioctl (init.krun's set_exit_code is a no-op unless the
-    // root is virtiofs), and our sealed root is ext4 — so krun_start_enter
-    // (and therefore the helper subprocess) always exits 0 regardless of the
-    // workload's real status. Post-ready control frames ride the same channel
-    // as the ready handshake; they are vm-init's alone (the control fd is
-    // FD_CLOEXEC across the workload execve, so the workload itself can never
-    // write a frame here). Frames are not newline-delimited and concatenate
-    // on the stream, so match the frame shape rather than line-splitting.
-    let guestExit: number | undefined;
-    let controlBuf = '';
-    raw.controlRead.on('data', (chunk: Buffer) => {
-      controlBuf += chunk.toString('utf8');
-      const m = controlBuf.match(/\{"exit":(-?\d{1,5})\}/);
-      if (m) guestExit = Number(m[1]);
-    });
 
     // The exit frame is written just before the guest halts; its pipe bytes
     // reach this stream before the helper's EOF, but the helper's exit event
