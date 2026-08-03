@@ -129,26 +129,44 @@ if (action === 'pid-info') {
 }
 
 if (action === 'http-fetch') {
-  // Egress-proxy reachability: fetch http://<host>/ THROUGH the sidecar proxy
-  // using the session CA. buildGuestEnv forces HTTP(S)_PROXY at the vsock
-  // bridge and SSL_CERT_FILE/NODE_EXTRA_CA_CERTS at the CA, so a global fetch
-  // traverses the proxy exactly as a sandboxed skill's HTTP client would.
+  // Egress-proxy reachability: fetch http://<host>/ THROUGH the sidecar proxy.
+  // buildGuestEnv forces HTTP_PROXY at the guest's loopback<->vsock forwarder,
+  // so process.env.HTTP_PROXY names the proxy. The guest node is Node 22, whose
+  // built-in fetch (undici) does NOT honor HTTP_PROXY by default (env-proxy
+  // support arrived in Node 24 with NODE_USE_ENV_PROXY), so a bare fetch would
+  // go DIRECT — and the guest has no network path (G2 invariant). Instead,
+  // mirror the topology lane's http-probe.js pattern: connect a raw TCP socket
+  // to the proxy and issue an ABSOLUTE-FORM request for http://<host>/.
   // Usage: node /skill/probe.js http-fetch <host>   (host = argv[3])
   const host = process.argv[3];
-  if (!host) { emit({ ok: false, error: 'no-host' }); process.exit(0); }
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 8000);
+  const proxyAddr = process.env.HTTP_PROXY || process.env.http_proxy;
+  if (!host || !proxyAddr) { emit({ ok: false, error: 'missing host or proxy env' }); process.exit(0); }
+  const proxy = new URL(proxyAddr);
+  const target = new URL('http://' + host + '/');
   let ok = false; let status = 0; let err = 'none';
-  try {
-    const res = await fetch('http://' + host + '/', { signal: ctl.signal });
-    status = res.status;
-    await res.arrayBuffer(); // drain
-    ok = res.status >= 200 && res.status < 400;
-  } catch (e) {
-    err = String((e && (e.code ?? e.cause?.code ?? e.message)) ?? e);
-  } finally {
-    clearTimeout(timer);
-  }
+  await new Promise((resolvePromise) => {
+    const sock = connect({ host: proxy.hostname, port: Number(proxy.port) }, () => {
+      const req =
+        'GET ' + target.toString() + ' HTTP/1.1\\r\\n' +
+        'Host: ' + target.host + '\\r\\n' +
+        'Connection: close\\r\\n\\r\\n';
+      sock.write(req);
+    });
+    let buf = '';
+    let done = false;
+    const settle = () => { if (!done) { done = true; ok = status >= 200 && status < 400; resolvePromise(); } };
+    sock.setTimeout(8000, () => { err = 'timeout'; sock.destroy(); });
+    sock.on('data', (c) => {
+      buf += c.toString('utf8');
+      if (status === 0 && buf.includes('\\r\\n')) {
+        const m = /^HTTP\\/\\d(?:\\.\\d)? (\\d{3})/.exec(buf);
+        if (m) status = Number(m[1]);
+      }
+    });
+    sock.on('end', settle);
+    sock.on('error', (e) => { err = e.code ?? e.message; settle(); });
+    sock.on('close', settle);
+  });
   emit({ ok, status, err });
   process.exit(0);
 }
