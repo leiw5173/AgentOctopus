@@ -98,11 +98,13 @@ describe('VM L4 adversarial escape matrix (skipIf-gated)', () => {
   it('bootstrap integrity — vm-init is the ONLY PID 1 (workload cannot pre-empt)', async (ctx) => {
     if (!needVm(ctx)) return;
     // The probe reports its own PID. Inside the guest, vm-init is PID 1 and
-    // execve's the workload; the workload's PID must be > 1 (it is a child
-    // of the bootstrap, not PID 1 itself).
-    const result = await runProbe('metadata', {});
-    // ok=true means the workload ran under vm-init (not as PID 1 itself).
+    // fork()s the workload; the workload's PID must be > 1 (it is a child of
+    // the bootstrap, not PID 1 itself). The `pid-info` action emits
+    // { ok: process.pid > 1, pid } — ok=true means the workload ran under
+    // vm-init (not as PID 1 itself).
+    const result = await runProbe('pid-info', {});
     expect(result.json.ok).toBe(true);
+    expect(result.json.pid).toBeGreaterThan(1);
   }, RUN_TIMEOUT);
 
   it('NUL injection — raw NUL in argv rejected at spawn before encoding', async (ctx) => {

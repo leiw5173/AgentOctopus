@@ -30,6 +30,11 @@
  *   net-probe         — { ok: boolean }  (argv-driven: `probe.js net-probe <host> <port>`;
  *                         the OS-lane TCP probe that works with env stripped)
  *   metadata          — { ok: boolean }  (true only if the cloud IMDS endpoint was reachable)
+ *   pid-info          — { ok: boolean, pid }  (the workload's own PID; ok=true
+ *                         only when pid>1, i.e. it runs under vm-init as a child
+ *                         of the bootstrap rather than as PID 1 itself)
+ *   http-fetch        — { ok, status, err }  (fetch http://<host>/ through the
+ *                         egress proxy using the session CA; ok=true on 2xx/3xx)
  *   env-names         — { names: string[] }  (env var NAMES only, never values)
  *   ca-ro-probe       — { ok: boolean, mode, writeErr }  (read /etc/skill-ca/ca.pem,
  *                         report stat mode + whether a write succeeded; ok=false when
@@ -110,6 +115,41 @@ if (action === 'metadata') {
   // everything except the proxy.
   const ok = await tcpOk('169.254.169.254', 80, 4000);
   emit({ ok });
+  process.exit(0);
+}
+
+if (action === 'pid-info') {
+  // Bootstrap integrity: report the workload's own PID. Inside the VM, vm-init
+  // is PID 1 and fork()s the workload, so the workload's PID must be > 1 (a
+  // child of the bootstrap, never PID 1 itself). ok=true  ⇒ running under
+  // vm-init as intended; ok=false ⇒ the workload pre-empted PID 1 (a bootstrap
+  // integrity violation).
+  emit({ ok: process.pid > 1, pid: process.pid });
+  process.exit(0);
+}
+
+if (action === 'http-fetch') {
+  // Egress-proxy reachability: fetch http://<host>/ THROUGH the sidecar proxy
+  // using the session CA. buildGuestEnv forces HTTP(S)_PROXY at the vsock
+  // bridge and SSL_CERT_FILE/NODE_EXTRA_CA_CERTS at the CA, so a global fetch
+  // traverses the proxy exactly as a sandboxed skill's HTTP client would.
+  // Usage: node /skill/probe.js http-fetch <host>   (host = argv[3])
+  const host = process.argv[3];
+  if (!host) { emit({ ok: false, error: 'no-host' }); process.exit(0); }
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  let ok = false; let status = 0; let err = 'none';
+  try {
+    const res = await fetch('http://' + host + '/', { signal: ctl.signal });
+    status = res.status;
+    await res.arrayBuffer(); // drain
+    ok = res.status >= 200 && res.status < 400;
+  } catch (e) {
+    err = String((e && (e.code ?? e.cause?.code ?? e.message)) ?? e);
+  } finally {
+    clearTimeout(timer);
+  }
+  emit({ ok, status, err });
   process.exit(0);
 }
 

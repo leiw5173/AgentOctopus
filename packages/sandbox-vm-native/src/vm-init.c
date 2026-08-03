@@ -148,6 +148,18 @@ static void report_exit(int code) {
     control_write(frame);
 }
 
+/* Settle before _exit so a just-written control frame is not dropped by the
+ * device reset. init.krun reboots the guest the moment it reaps THIS process
+ * (PID 1); a virtio-console tx queued but not yet copied into the host's pipe
+ * by libkrun's process_tx would be lost on that reset. The workload path
+ * already sleeps 50ms before exiting (see step 10); the die paths must do the
+ * same, or a post-ready rejection (e.g. the executable-allowlist miss) loses
+ * its {"exit":127} frame and the host engine falls back to the helper's
+ * always-0 exit code — misreporting a rejected exec as success. */
+static void settle_before_exit(void) {
+    usleep(50 * 1000);
+}
+
 static void die(const char *reason) {
     char frame[MAX_STR_LEN];
     int n = snprintf(frame, sizeof(frame), "{\"error\":\"%s\"}", reason);
@@ -157,6 +169,7 @@ static void die(const char *reason) {
     (void)n;
     control_write(frame);
     report_exit(127);
+    settle_before_exit();
     _exit(127);
 }
 
@@ -168,6 +181,7 @@ static void die_errno(const char *prefix) {
     snprintf(frame, sizeof(frame), "{\"error\":\"%s: %s\"}", prefix, strerror(errno));
     control_write(frame);
     report_exit(127);
+    settle_before_exit();
     _exit(127);
 }
 

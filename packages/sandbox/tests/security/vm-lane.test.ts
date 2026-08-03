@@ -82,20 +82,18 @@ describe('VM L3 integration lane (real libkrun guest, skipIf-gated)', () => {
 
   it('curl via the egress proxy + CA reaches an allowed upstream', async (ctx) => {
     if (!needVm(ctx)) return;
-    // Grant a host + let the proxy allow it. The probe's HTTP action fetches
-    // via the proxy using the session CA bundle.
-    const sandbox = await setupVmSandbox({ grantedHosts: ['example.com'] });
-    try {
-      const result = await sandbox.backend.run({
-        command: ['node', '/skill/probe.js', 'http-fetch', 'example.com'],
-        env: {},
-        timeoutMs: 10_000,
-      });
-      // The probe emits { ok: true } when the fetch succeeded via the proxy.
-      expect(result.json.ok).toBe(true);
-    } finally {
-      await sandbox.cleanup();
-    }
+    // Grant a host + let the proxy allow it. The probe's http-fetch action
+    // fetches http://example.com/ THROUGH the proxy using the session CA and
+    // emits { ok: true } on a 2xx/3xx. Use runProbe (not backend.run directly)
+    // so the probe's JSON line is parsed into result.json — backend.run returns
+    // raw {stdout,…} with no .json, which is why reading result.json.ok on it
+    // threw "Cannot read properties of undefined".
+    const result = await runProbe('http-fetch', {
+      command: ['node', '/skill/probe.js', 'http-fetch', 'example.com'],
+      sandbox: { grantedHosts: ['example.com'] },
+      timeoutMs: 10_000,
+    });
+    expect(result.json.ok).toBe(true);
   }, RUN_TIMEOUT);
 
   it('timeout kills the whole VM, not just the leaf child', async (ctx) => {
