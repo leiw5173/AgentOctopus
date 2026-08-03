@@ -406,6 +406,12 @@ typedef struct {
     int content_fd;          /* kept open for the data-block emit pass */
     uint64_t data_block_off;
     uint32_t data_blocks;
+    /* Physical block number (byte offset / BLOCK_SIZE) of EACH data block, in
+     * file order. ext4 legacy direct-block addressing needs every one of the
+     * first ≤12 pointers in i_block[]; they are NOT assumed contiguous because
+     * directory and file data blocks are interleaved in the emit loop, so the
+     * per-block physical number is recorded here as it is allocated. */
+    uint32_t block_map[12];
     uint32_t n_subdirs;      /* for directory link count */
 } entry_t;
 
@@ -703,18 +709,22 @@ static void write_file_data(img_t *im, entry_t *e, uint32_t *out_block_off, uint
     uint32_t nblocks = (uint32_t)((e->size + BLOCK_SIZE - 1) / BLOCK_SIZE);
     if (nblocks == 0) nblocks = 1;            /* at least one block for empty file */
     if (nblocks > 12) die("file too large for direct blocks (>12 blocks): %s", e->relpath);
-    uint64_t first = alloc_block(im);
     uint8_t buf[BLOCK_SIZE];
     uint64_t remaining = e->size;
-    uint64_t cur = first;
-    while (1) {
+    uint64_t first = 0;
+    for (uint32_t blk = 0; blk < nblocks; blk++) {
+        /* Allocate (and record) each data block separately: directory and file
+         * data blocks are interleaved in the emit loop, so a file's blocks are
+         * NOT guaranteed contiguous. block_map[blk] is the physical block number
+         * (byte offset / BLOCK_SIZE) the inode's i_block[blk] must point at. */
+        uint64_t cur = alloc_block(im);
+        e->block_map[blk] = (uint32_t)(cur / BLOCK_SIZE);
+        if (blk == 0) first = cur;
         size_t want = remaining < BLOCK_SIZE ? (size_t)remaining : BLOCK_SIZE;
         memset(buf, 0, sizeof(buf));
         if (want > 0) xread_all(e->content_fd, buf, want);
         xwrite_at(im, cur, buf, BLOCK_SIZE);
-        cur += BLOCK_SIZE;
-        if (remaining == 0) break;
-        remaining -= want;
+        if (remaining > 0) remaining -= want;
     }
     if (lseek(e->content_fd, 0, SEEK_SET) == (off_t)-1) die("lseek file back for next pass");
     *out_block_off = (uint32_t)first;
@@ -1171,7 +1181,12 @@ int main(int argc, char **argv) {
         file_ino.i_mode = 0100444;
         file_ino.i_size_lo = (uint32_t)fsize;
         file_ino.i_links_count = 1;
-        file_ino.i_block[0] = (uint32_t)(fdata / BLOCK_SIZE);
+        /* Legacy direct-block addressing: fill every allocated block's pointer
+         * (contiguous here — the data run above allocates fnblocks back-to-back
+         * with no interleaved directory block), else a file >1 block reads its
+         * tail as NUL holes. */
+        for (uint32_t k = 0; k < fnblocks && k < 12; k++)
+            file_ino.i_block[k] = (uint32_t)(fdata / BLOCK_SIZE) + k;
         file_ino.i_blocks_lo = (uint32_t)(fnblocks * (BLOCK_SIZE / 512));
         write_inode(&im, FIRST_USR_INO, &file_ino);
 
@@ -1238,11 +1253,17 @@ int main(int argc, char **argv) {
 
         for (uint32_t i = 0; i < g_nentries; i++) {
             entry_t *e = &g_entries[i];
-            if (e->file_type == 2)
+            if (e->file_type == 2) {
                 write_directory_block(&im, e->inode, e->relpath,
                                       (uint32_t*)&e->data_block_off, &e->data_blocks);
-            else
+                /* A directory is exactly one data block; record it so the inode
+                 * loop's i_block[] fill (from block_map) points i_block[0] at
+                 * the real directory block instead of leaving it 0 (a hole →
+                 * the guest read block 0 / NUL padding as an empty /skill). */
+                e->block_map[0] = (uint32_t)(e->data_block_off / BLOCK_SIZE);
+            } else {
                 write_file_data(&im, e, (uint32_t*)&e->data_block_off, &e->data_blocks);
+            }
         }
 
         uint32_t total_blocks = (uint32_t)(im.cursor / BLOCK_SIZE);
@@ -1261,7 +1282,15 @@ int main(int argc, char **argv) {
                 ino.i_size_lo = (uint32_t)e->size;
                 ino.i_links_count = 1;
             }
-            ino.i_block[0] = (uint32_t)(e->data_block_off / BLOCK_SIZE);
+            /* Legacy direct-block addressing (i_flags=0): the kernel reads
+             * i_block[0..data_blocks-1] as the per-block physical numbers and
+             * treats a zero i_block[k] as a HOLE. Fill every allocated block's
+             * pointer from block_map (they need not be contiguous). Previously
+             * only i_block[0] was set, so any file larger than one 1024-byte
+             * block read its tail as NUL holes — the guest saw a truncated,
+             * zero-padded file (probe.js SyntaxError past block 1). */
+            for (uint32_t k = 0; k < e->data_blocks && k < 12; k++)
+                ino.i_block[k] = e->block_map[k];
             ino.i_blocks_lo = (uint32_t)(e->data_blocks * (BLOCK_SIZE / 512));
             write_inode(&im, e->inode, &ino);
             if (e->inode > highest_inode) highest_inode = e->inode;

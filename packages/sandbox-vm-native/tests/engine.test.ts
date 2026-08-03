@@ -611,6 +611,53 @@ describe('VmEngineImpl.start FD plumbing (R9/R10, L1 fake-spawn seam)', () => {
     await expect(engine.start(baseConfig(harness.rootfsArtifact) as any)).rejects.toThrow(/timed out|timeout/i);
   });
 
+  it('parses newline-less CONCATENATED control frames ({"ready":true}{"exit":0})', async () => {
+    // REGRESSION (darwin vm-lane "helper closed control channel before ready"):
+    // vm-init writes control frames back-to-back on the octopus-control port
+    // with NO newline separator — the real wire format is a single chunk
+    // `{"ready":true}{"exit":0}`. A newline-splitting waitForReady never fires
+    // on such a buffer and mis-reports a healthy boot as "closed control
+    // channel before ready (EOF)". The reader must extract each complete
+    // top-level JSON object by brace matching and resolve ready immediately.
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      // One write, NO trailing newline, two frames concatenated.
+      spawn: (_h, _a, _e, _f, _s, _p, crs) => makeFakeChild(['{"ready":true}{"exit":0}'], crs),
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    expect(inst.stdin).toBeDefined();
+    await inst.close();
+    await engine.close();
+  });
+
+  it('parses a ready frame split across two chunks', async () => {
+    // The frame may also arrive fragmented mid-object; the reader must buffer
+    // the partial object until the rest arrives (no premature EOF misreport).
+    const controlReadStream = new PassThrough();
+    const binding: FakeBinding = {
+      pipe: () => [10, 11],
+      dupFdCloexec: distinctDups(),
+      spawn: (_h, _a, _e, _f, _s, _p, crs) => {
+        const child = makeFakeChild([], crs);
+        queueMicrotask(() => {
+          crs.write('{"ready":tr');   // partial — must NOT throw EOF/parse
+          crs.write('ue}');           // completes the frame
+        });
+        return child;
+      },
+    };
+    const deps = makeDeps(binding, controlReadStream);
+    const { engine, harness } = await makeStartEngine(deps);
+    const inst = await engine.start(baseConfig(harness.rootfsArtifact) as any);
+    expect(inst.stdin).toBeDefined();
+    await inst.close();
+    await engine.close();
+  });
+
   it('bridges helper exit code into VmInstance.exited', async () => {
     const controlReadStream = new PassThrough();
     let killFn: (() => Promise<void>) | undefined;

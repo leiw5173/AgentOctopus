@@ -961,7 +961,22 @@ export class VmEngineImpl implements VmEnginePort {
     // or helper exit before ready, or readyTimeoutMs. EOF on g2hRead before
     // ready is treated as a start failure (the helper closed its write end
     // without signaling ready). ---
+    //
+    // Buffer the helper's EARLY stderr so a start failure (especially "closed
+    // control channel before ready (EOF)", where the helper died before writing
+    // any frame) carries the helper's own diagnostics — dyld/load errors, krun
+    // setup failures, etc. — instead of a bare EOF. Bounded; detached on ready
+    // so post-ready stderr flows only to the workload stream.
+    let earlyStderr = '';
+    const onEarlyStderr = (chunk: Buffer) => {
+      if (earlyStderr.length < 4096) {
+        earlyStderr += chunk.toString('utf8');
+        if (earlyStderr.length > 4096) earlyStderr = earlyStderr.slice(0, 4096);
+      }
+    };
+    raw.stderr.on('data', onEarlyStderr);
     const ready = await this.waitForReady(raw, config.readyTimeoutMs);
+    raw.stderr.off('data', onEarlyStderr);
     if (!ready.ok) {
       // Best-effort cleanup of the half-started helper before propagating.
       try {
@@ -969,7 +984,8 @@ export class VmEngineImpl implements VmEnginePort {
       } catch {
         /* swallow — the start-failure error is the signal we care about */
       }
-      throw new Error(ready.reason);
+      const diag = earlyStderr.trim();
+      throw new Error(diag ? `${ready.reason} | helper stderr: ${diag}` : ready.reason);
     }
 
     // --- Bridge helper stdio (fd1/fd2) + control into a VmInstance. ---
@@ -1116,17 +1132,84 @@ export class VmEngineImpl implements VmEnginePort {
         }
       };
 
-      const onData = (chunk: Buffer) => {
-        buf += chunk.toString('utf8');
-        let nl: number;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          onFrame(line);
+      // Control frames are NOT newline-delimited: vm-init writes {"ready":true}
+      // / {"error":...} / {"exit":N} back-to-back on the octopus-control port
+      // (e.g. `{"ready":true}{"exit":0}` arrives as one chunk). Splitting on
+      // '\n' never fires, so a newline-splitting reader would sit on the ready
+      // frame until EOF and then mis-report a healthy boot as "closed control
+      // channel before ready". Extract each complete top-level JSON object by
+      // brace matching instead: take the first balanced {...} as one frame and
+      // repeat on the remainder. Leading non-JSON garbage (libkrun stderr bleed)
+      // up to the next '{' is counted against the malformed-frame bound (HI-4),
+      // so a flooding garbage channel still fails closed. A truncated trailing
+      // object stays buffered for the next chunk (or the EOF flush).
+      const drainFrames = (flushPartial: boolean) => {
+        for (;;) {
+          const start = buf.indexOf('{');
+          if (start < 0) {
+            // No JSON object anywhere in the buffer: it's stderr-bleed garbage.
+            // Count each newline-terminated line as its own malformed strike
+            // (mirrors the per-line HI-4 contract), then keep any partial tail.
+            let nl: number;
+            while ((nl = buf.indexOf('\n')) >= 0) {
+              const line = buf.slice(0, nl);
+              buf = buf.slice(nl + 1);
+              if (line.trim()) { onFrame(line); if (settled) return; }
+            }
+            if (flushPartial && buf.trim()) { const rest = buf; buf = ''; onFrame(rest); }
+            return;
+          }
+          // Garbage preceding the next JSON object: strike per terminated line.
+          if (start > 0) {
+            const garbage = buf.slice(0, start);
+            const nl = garbage.indexOf('\n');
+            if (nl >= 0) {
+              // A full garbage line is present → strike it, drop it, keep draining.
+              const line = garbage.slice(0, nl);
+              buf = buf.slice(nl + 1);
+              if (line.trim()) onFrame(line);
+              if (settled) return;
+              continue;
+            }
+            // Garbage but no newline yet: the object starts right after → count
+            // the (single) garbage prefix as one strike and parse the frame.
+            buf = buf.slice(start);
+            if (garbage.trim()) onFrame(garbage);
+            if (settled) return;
+          }
+          let depth = 0;
+          let end = -1;
+          let inStr = false;
+          let esc = false;
+          for (let i = 0; i < buf.length; i++) {
+            const c = buf[i];
+            if (esc) { esc = false; continue; }
+            if (c === '\\') { esc = true; continue; }
+            if (c === '"') { inStr = !inStr; continue; }
+            if (inStr) continue;
+            if (c === '{') depth++;
+            else if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
+          }
+          if (end < 0) {
+            // Incomplete trailing object: a partial frame split across chunks.
+            // Buffer it and wait for the rest (or the EOF flush, which treats
+            // the leftover as one final possibly-malformed frame).
+            if (flushPartial && buf.trim()) { const rest = buf; buf = ''; onFrame(rest); }
+            return;
+          }
+          const frame = buf.slice(0, end + 1);
+          buf = buf.slice(end + 1);
+          onFrame(frame);
+          if (settled) return;
         }
       };
+
+      const onData = (chunk: Buffer) => {
+        buf += chunk.toString('utf8');
+        drainFrames(false);
+      };
       const onEnd = () => {
-        if (buf.trim()) onFrame(buf);
+        drainFrames(true);
         finish({ ok: false, reason: 'helper closed control channel before ready (EOF)' });
       };
       const onError = (err: Error) => {
