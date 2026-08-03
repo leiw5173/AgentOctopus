@@ -21,10 +21,10 @@
  */
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { SandboxConfigSchema, type SandboxConfig } from '../../src/schema.js';
 import { buildSnapshot, verifySnapshot, type BuiltSnapshot } from '../../src/snapshot.js';
@@ -77,27 +77,34 @@ export function vmLaneEnabled(): boolean {
 }
 
 /**
- * Resolve the native package's `prebuilds/<platform>` dir. Mirrors
- * `defaultPrebuildRoot` in core's sandbox-vm-assembly.ts: resolve
- * `@agentoctopus/sandbox-vm-native/package.json` via the require resolver
- * (walks node_modules / workspace symlinks), then append `prebuilds/<plat>`.
- * Falls back to null when the package isn't resolvable or the platform is
- * unsupported — the caller then throws/skips fail-closed.
+ * Resolve the native package's `prebuilds/<platform>` dir. The leaf sandbox
+ * package does NOT depend on @agentoctopus/sandbox-vm-native (only core does)
+ * and pnpm does not hoist it, so a bare createRequire(import.meta.url).resolve
+ * from this test cannot find it (MODULE_NOT_FOUND → the lane skipped all 16
+ * tests). Resolve it as the SIBLING workspace package instead, anchored at
+ * this file's own path (the same fileURLToPath(import.meta.url) pattern
+ * linux-lane-setup.ts uses for the package root). Falls back to null when the
+ * platform is unsupported or the sibling package/prebuilds dir is absent —
+ * the caller then skips fail-closed.
  */
-function resolveLanePrebuildRoot(nativePkgName: string): string | null {
+function resolveLaneNativePkgRoot(): string | null {
+  const pkgRoot = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '..', '..', '..', 'sandbox-vm-native',
+  );
+  return existsSync(join(pkgRoot, 'package.json')) ? pkgRoot : null;
+}
+
+function resolveLanePrebuildRoot(): string | null {
   const platform =
     process.platform === 'darwin' && process.arch === 'arm64' ? 'darwin-arm64' :
     process.platform === 'linux' && process.arch === 'x64' ? 'linux-x64' :
     null;
   if (!platform) return null;
-  try {
-    const require = createRequire(import.meta.url);
-    const pkgJsonPath = require.resolve(`${nativePkgName}/package.json`);
-    const dir = join(pkgJsonPath, '..', 'prebuilds', platform);
-    return existsSync(dir) ? dir : null;
-  } catch {
-    return null;
-  }
+  const pkgRoot = resolveLaneNativePkgRoot();
+  if (!pkgRoot) return null;
+  const dir = join(pkgRoot, 'prebuilds', platform);
+  return existsSync(dir) ? dir : null;
 }
 
 /**
@@ -120,16 +127,21 @@ export async function buildLaneVmEngine(): Promise<{
   imageBuilder: import('@agentoctopus/sandbox').VmImageBuilderPort;
   prebuilds: string;
 } | null> {
+  const pkgRoot = resolveLaneNativePkgRoot();
+  if (!pkgRoot) return null;
   let native: any;
   try {
-    native = await import('@agentoctopus/sandbox-vm-native');
+    // Import the BUILT engine by absolute path. A bare
+    // `import('@agentoctopus/sandbox-vm-native')` is unresolvable from the leaf
+    // sandbox package (no dependency, not hoisted) — see resolveLaneNativePkgRoot.
+    native = await import(pathToFileURL(join(pkgRoot, 'dist', 'index.js')).href);
   } catch {
     return null;
   }
   if (typeof native.VmEngineImpl !== 'function' || typeof native.VmImageBuilderImpl !== 'function' || typeof native.createNativeDeps !== 'function') {
     return null;
   }
-  const prebuilds = resolveLanePrebuildRoot('@agentoctopus/sandbox-vm-native');
+  const prebuilds = resolveLanePrebuildRoot();
   if (!prebuilds) return null;
   const opts = {
     helperPath: join(prebuilds, 'sandbox-vm-helper'),
