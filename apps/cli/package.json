@@ -24,7 +24,7 @@
     "@agentoctopus/registry": "workspace:*",
     "@agentoctopus/skills": "workspace:*",
     "@inquirer/prompts": "^8.5.2",
-    "chalk": "^5.3.0",
+    "chalk": "^6.0.0",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
     "ora": "^9.4.0",
