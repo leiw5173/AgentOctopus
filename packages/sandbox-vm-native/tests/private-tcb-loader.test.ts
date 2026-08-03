@@ -177,3 +177,66 @@ describe('private TCB dir ELF loader (R6-F3)', () => {
     },
   );
 });
+
+// The Linux-only test above proves the .so.N loader behavior end to end. The
+// Darwin regression it could not catch (the vm-lane BLK probe failing
+// `dyld: Library not loaded: libkrun.1.dylib`) was that mirrorSonameLinks only
+// matched `.so.N`, leaving the versioned `.N.dylib` shims unrecreated in the
+// private dir. This platform-agnostic test pins the NAME-mirroring behavior for
+// BOTH shim styles → the private copy's basename, so the gap stays closed
+// everywhere (it runs on macOS and Linux alike).
+describe('mirrorSonameLinks versioned shims (Linux .so.N + Darwin .N.dylib)', () => {
+  it('recreates libkrun.so.1 / libkrunfw.so.5 / libkrun.1.dylib / libkrunfw.5.dylib → private basenames', async () => {
+    const artifactsDir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-shim-artifacts-'));
+    const privateDir = await fsPromises.mkdtemp(path.join(tmpdir(), 'oct-shim-private-'));
+    try {
+      // The artifacts dir as vendor-libkrun.mjs lays it out: unversioned real
+      // files + BOTH shim styles pointing at them (shim targets here are
+      // attacker-irrelevant — mirrorSonameLinks re-points at the private copy).
+      for (const f of ['libkrun.so', 'libkrunfw.so', 'libkrun.dylib', 'libkrunfw.dylib']) {
+        await fsPromises.writeFile(path.join(artifactsDir, f), f, { mode: 0o555 });
+      }
+      await fsPromises.symlink('libkrun.so', path.join(artifactsDir, 'libkrun.so.1'));
+      await fsPromises.symlink('libkrunfw.so', path.join(artifactsDir, 'libkrunfw.so.5'));
+      await fsPromises.symlink('libkrun.dylib', path.join(artifactsDir, 'libkrun.1.dylib'));
+      await fsPromises.symlink('libkrunfw.dylib', path.join(artifactsDir, 'libkrunfw.5.dylib'));
+
+      // The verified PRIVATE copies carry the UNVERSIONED basenames (probe()
+      // realpath()s the artifacts before copying).
+      const privatePaths = {
+        helper: path.join(privateDir, 'sandbox-vm-helper'),
+        libkrun: path.join(privateDir, 'libkrun.so'),
+        libkrunfw: path.join(privateDir, 'libkrunfw.so'),
+        imageBuilder: path.join(privateDir, 'vm-image-builder'),
+      };
+      for (const p of Object.values(privatePaths)) {
+        await fsPromises.writeFile(p, 'PRIVATE', { mode: 0o555 });
+      }
+
+      const engine = new VmEngineImpl(
+        {
+          helperPath: privatePaths.helper,
+          artifactsDir,
+          tcbManifestPath: path.join(artifactsDir, 'vm-tcb-manifest.json'),
+          gateManifestPath: path.join(artifactsDir, 'gate-manifest.json'),
+          rootfsDir: artifactsDir,
+        },
+        { platform: 'linux-x64' } as unknown as VmEngineDeps,
+      );
+      await (engine as any).mirrorSonameLinks(privateDir, privatePaths);
+
+      const readlink = async (name: string) => fsPromises.readlink(path.join(privateDir, name));
+      // Linux shims → the libkrun/libkrunfw private basenames.
+      expect(await readlink('libkrun.so.1')).toBe('libkrun.so');
+      expect(await readlink('libkrunfw.so.5')).toBe('libkrunfw.so');
+      // Darwin shims — the regression this test pins.
+      expect(await readlink('libkrun.1.dylib')).toBe('libkrun.so');
+      expect(await readlink('libkrunfw.5.dylib')).toBe('libkrunfw.so');
+      // The unversioned real files are never re-linked (only versioned shims).
+      await expect(fsPromises.lstat(path.join(privateDir, 'libkrun.so')).then((s) => s.isSymbolicLink())).resolves.toBe(false);
+    } finally {
+      await fsPromises.rm(artifactsDir, { recursive: true, force: true }).catch(() => {});
+      await fsPromises.rm(privateDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+});

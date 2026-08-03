@@ -312,16 +312,19 @@ export class VmEngineImpl implements VmEnginePort {
   }
 
   /**
-   * Recreate the versioned SONAME shims (Linux: `libkrun.so.1 → libkrun.so`,
-   * `libkrunfw.so.5 → libkrunfw.so`, created by vendor-libkrun.mjs in the
-   * artifacts dir) inside the engine-private dir, pointing at the VERIFIED
-   * private copies. The helper's DT_NEEDED entries use the versioned names;
-   * without these links the loader cannot find the libraries in the private
-   * dir — or worse, falls back to an UNVERIFIED same-named system library.
-   * Link targets are always the private copy's basename (never the original
+   * Recreate the versioned SONAME shims inside the engine-private dir, pointing
+   * at the VERIFIED private copies. Linux: `libkrun.so.1 → libkrun.so`,
+   * `libkrunfw.so.5 → libkrunfw.so`. Darwin: `libkrun.1.dylib → libkrun.dylib`,
+   * `libkrunfw.5.dylib → libkrunfw.dylib` (created by vendor-libkrun.mjs in the
+   * artifacts dir). The helper's DT_NEEDED / dyld install names use the
+   * VERSIONED names on BOTH platforms — verifyVmTcb resolves the realpath
+   * (libkrun.dylib), so the private copy carries the unversioned basename and
+   * without these shims the loader cannot find the versioned name in the
+   * private dir (the BLK probe's `dyld: Library not loaded: libkrun.1.dylib`)
+   * — or worse, falls back to an UNVERIFIED same-named system library. Link
+   * targets are always the private copy's basename (never the original
    * symlink's target), so an attacker-crafted link in the artifacts dir only
-   * controls which NAMES we create, not what they resolve to. No-op on
-   * Darwin (unversioned .dylib names don't match the pattern).
+   * controls which NAMES we create, not what they resolve to.
    */
   private async mirrorSonameLinks(
     privateDir: string,
@@ -329,7 +332,9 @@ export class VmEngineImpl implements VmEnginePort {
   ): Promise<void> {
     const entries = await readdir(this.opts.artifactsDir).catch(() => [] as string[]);
     for (const entry of entries) {
-      if (!/^libkrun(fw)?\.so\..+$/.test(entry)) continue;
+      // Linux versioned SONAME (libkrun.so.1) OR Darwin versioned dylib
+      // (libkrun.1.dylib). Skip the unversioned real files themselves.
+      if (!/^libkrun(fw)?(\.so\..+|\.\d+\.dylib)$/.test(entry)) continue;
       const base = entry.startsWith('libkrunfw') ? 'libkrunfw' : 'libkrun';
       await symlink(path.basename(privatePaths[base]), path.join(privateDir, entry));
     }
