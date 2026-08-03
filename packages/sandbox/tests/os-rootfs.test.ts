@@ -26,6 +26,7 @@ import path from 'node:path';
 import {
   assembleRootfs,
   verifyRuntimeArtifact,
+  removeExtractedTree,
   RootfsError,
   type RootfsLayout,
   type RuntimeArtifactManifest,
@@ -388,6 +389,36 @@ describe('verifyRuntimeArtifact — manifest schema', () => {
     const got = await verifyRuntimeArtifact({ artifactPath, manifestPath });
     expect(got.nodePath).toBe(manifest.nodePath);
     expect(got.files.length).toBe(manifest.files.length);
+  });
+
+  // REGRESSION (produce-linux-artifacts self-check EACCES): the throwaway
+  // verify path extracts into a mkdtemp scratch dir and removes it in a
+  // `finally` via removeExtractedTree. The runtime rootfs ships read-only
+  // entries, and Node's rm(recursive, force) does NOT tolerate EACCES:
+  // rmdir/unlink require write+execute on the PARENT directory, so a read-only
+  // DIRECTORY anywhere in the tree aborts the cleanup with
+  // `EACCES … unlink …/undici/LICENSE` (the exact CI signature). The cleanup
+  // now chmods the tree user-writable first. This drives removeExtractedTree
+  // directly against a tree with a read-only dir (0o555) + read-only file
+  // (0o444) and asserts it fully removes it — the pre-fix plain-rm throws
+  // EACCES on this shape (verified). We call the helper directly because the
+  // full verify path rejects a read-only dir in the manifest (extra mode bits
+  // vs the extractor's 0o755), so the EACCES can't be reached end-to-end.
+  it('removes an extracted tree containing a read-only directory and file (no EACCES)', async () => {
+    const root = await tmp('oct-rootfs-verify-');
+    await fs.mkdir(path.join(root, 'opt/octopus-boot/undici'), { recursive: true });
+    await fs.writeFile(path.join(root, 'opt/octopus-boot/undici/LICENSE'), 'read-only-license', { mode: 0o444 });
+    await fs.chmod(path.join(root, 'opt/octopus-boot/undici/LICENSE'), 0o444);
+    await fs.chmod(path.join(root, 'opt/octopus-boot/undici'), 0o555);
+    // Also a nested read-only dir below a writable one.
+    await fs.mkdir(path.join(root, 'usr/lib/readonly'), { recursive: true });
+    await fs.writeFile(path.join(root, 'usr/lib/readonly/lib.so'), 'lib', { mode: 0o555 });
+    await fs.chmod(path.join(root, 'usr/lib/readonly/lib.so'), 0o555);
+    await fs.chmod(path.join(root, 'usr/lib/readonly'), 0o555);
+
+    await removeExtractedTree(root);
+    // Fully gone.
+    await expect(fs.stat(root)).rejects.toThrow();
   });
 
   it('rejects a manifest with duplicate paths', async () => {

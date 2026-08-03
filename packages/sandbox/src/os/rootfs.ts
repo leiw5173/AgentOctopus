@@ -581,6 +581,48 @@ export interface VerifyRuntimeArtifactOptions {
 }
 
 /**
+ * Recursively remove an extracted artifact tree that may contain READ-ONLY
+ * directories and files. The runtime rootfs ships some entries `0o555`/`0o444`;
+ * Node's `rm(..., {recursive:true, force:true})` swallows ENOENT but NOT EACCES,
+ * and `rmdir`/`unlink` require write+execute on the PARENT directory — so a
+ * read-only directory anywhere in the tree makes the cleanup abort with EACCES
+ * (observed as a deterministic `produce-linux-artifacts` self-check failure on
+ * the Linux runner). Best-effort chmod the tree user-writable first, then rm.
+ * Failures in the chmod pass are ignored: the tree may already be partly gone,
+ * and the `rm` is the authoritative removal.
+ *
+ * Exported (underscore-named) for the EACCES regression test — not part of the
+ * public rootfs API.
+ */
+export async function removeExtractedTree(root: string): Promise<void> {
+  const chmodDeep = async (dir: string): Promise<void> => {
+    await chmod(dir, 0o700).catch(() => {});
+    let names: string[] = [];
+    try {
+      names = await readdir(dir);
+    } catch {
+      return; // unreadable / already gone — nothing to recurse into
+    }
+    for (const name of names) {
+      const p = path.join(dir, name);
+      const st = await lstat(p).catch(() => null);
+      if (!st) continue;
+      if (st.isDirectory()) {
+        await chmodDeep(p);
+      } else if (!st.isSymbolicLink()) {
+        // Regular files (and other non-symlink non-dir entries) only need to be
+        // unlinkable — governed by the parent's mode — but chmod anyway so a
+        // future overwrite/rename path is not blocked. Symlinks are skipped:
+        // chmod would follow them (or fail) and their target may not exist.
+        await chmod(p, 0o600).catch(() => {});
+      }
+    }
+  };
+  await chmodDeep(root);
+  await rm(root, { recursive: true, force: true });
+}
+
+/**
  * Verify the manifest and compressed artifact, then extract ONCE into
  * `destDir` (or a throwaway tmp dir when omitted) and run the tree allowlist
  * walk + ELF dependency-closure check against that exact extracted tree.
@@ -621,7 +663,7 @@ export async function verifyRuntimeArtifact(
       await verifyTree(tmpRoot, manifest);
       await verifyElfClosure(tmpRoot, manifest);
     } finally {
-      await rm(tmpRoot, { recursive: true, force: true });
+      await removeExtractedTree(tmpRoot);
     }
   }
 
@@ -665,7 +707,7 @@ export async function assembleRootfs(opts: AssembleRootfsOptions): Promise<Rootf
     for (const t of targets) {
       try { await execFileAsync('umount', ['--', t]); } catch { /* not mounted */ }
     }
-    await rm(root, { recursive: true, force: true });
+    await removeExtractedTree(root);
   };
 
   try {
