@@ -176,6 +176,7 @@ static void sha256_hex(const uint8_t in[32], char out[65]) {
 
 static const char *g_outPath = NULL;
 
+static void die(const char *fmt, ...) __attribute__((noreturn));
 static void die(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     fprintf(stderr, "vm-image-builder: ");
@@ -760,10 +761,292 @@ static void parse_digest(const char *s, char hexout[65]) {
     hexout[64] = '\0';
 }
 
+/* ---- ext4 READER: `stat` mode (darwin VM lane executable qualification) ---
+ *
+ * The darwin vm-lane cannot loopback-mount ext4 (no CAP_SYS_ADMIN / ext4 kext),
+ * so assertExecutablesQualified has no Linux-style stat seam there. This `stat`
+ * mode parses the sealed mke2fs rootfs DIRECTLY (no mount, no external tool)
+ * to answer "is <guestPath> a regular, non-symlink, exec-bit file?".
+ *
+ * SCOPE (load-bearing — see docs/superpowers/plans/2026-08-03-darwin-ext4-stat-reader.md):
+ * the rootfs is mke2fs -b 4096 with extents ON but a SMALL, SHALLOW tree, so
+ * directories are always LINEAR (never hash-indexed). We therefore implement:
+ *   - superblock + group-descriptor + inode parse (values read, not hardcoded)
+ *   - EXTENT-tree walk (every file/dir uses extents; depth 0 here, idx handled)
+ *   - LINEAR directory walk (dirent list)
+ * and FAIL CLOSED (die → non-zero exit) on anything else: an inode without
+ * EXT4_EXTENTS_FL (indirect blocks — never produced here) or a directory with
+ * EXT4_INDEX_FL (htree — never produced here). A wrong/partial stat is never
+ * returned. ENOENT (guest path absent) is the ONLY non-error null.
+ *
+ * The reader is independent of the WRITER's fixed geometry above (BLOCK_SIZE
+ * 1024 / hardcoded offsets are for the writer's OWN emitted images). It reads
+ * the block size + offsets from the superblock at runtime and uses its own
+ * little-endian getters.
+ */
+
+/* ext4 on-disk constants (spec; do not invent). */
+#define RD_EXT4_MAGIC            0xEF53
+#define RD_EXT4_EXT_MAGIC        0xF30A
+#define RD_EXT4_EXTENTS_FL       0x00080000u  /* inode i_flags: extents */
+#define RD_EXT4_INDEX_FL         0x00001000u  /* dir i_flags: htree (unsupported) */
+#define RD_S_IFMT                0170000
+#define RD_S_IFREG               0100000
+#define RD_S_IFDIR               0040000
+#define RD_S_IFLNK               0120000
+#define RD_S_IXUSR               0000100
+#define RD_ROOT_INO              2u
+#define RD_SUPER_OFF             1024u        /* superblock always @ byte 1024 */
+#define RD_MAX_EXTENT_DEPTH      5            /* ext4 caps extent depth at 5 */
+#define RD_MAX_PATH_COMPONENTS   64
+
+static uint16_t rd_u16(const uint8_t *b) { return (uint16_t)(b[0] | ((uint16_t)b[1] << 8)); }
+static uint32_t rd_u32(const uint8_t *b) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+/* pread() wrapper: read exactly len bytes at absolute offset off, die on any
+ * short read / error (fail-closed — a truncated image is a parse failure). */
+static void rd_at(int fd, uint64_t off, void *buf, size_t len) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = pread(fd, p + done, len - done, (off_t)(off + done));
+        if (n < 0) { if (errno == EINTR) continue; die("pread image"); }
+        if (n == 0) die("pread image: unexpected EOF (truncated image?)");
+        done += (size_t)n;
+    }
+}
+
+typedef struct {
+    uint32_t block_size;        /* 1024 << s_log_block_size */
+    uint32_t blocks_count;      /* s_blocks_count_lo (64bit feature is OFF) */
+    uint32_t inodes_per_group;  /* s_inodes_per_group */
+    uint32_t inode_size;        /* s_inode_size (128 or 256) */
+    uint32_t gdt_block;         /* block holding the group descriptor table */
+} rd_sb;
+
+static void rd_read_superblock(int fd, rd_sb *sb) {
+    uint8_t raw[1024];
+    rd_at(fd, RD_SUPER_OFF, raw, sizeof(raw));
+    if (rd_u16(raw + 0x38) != RD_EXT4_MAGIC)
+        die("stat: bad ext4 magic (0x%04x) — not an ext4 image", rd_u16(raw + 0x38));
+    uint32_t log_block = rd_u32(raw + 0x18);
+    if (log_block > 6) die("stat: absurd s_log_block_size %u", log_block);
+    sb->block_size = 1024u << log_block;
+    sb->blocks_count = rd_u32(raw + 0x04);
+    sb->inodes_per_group = rd_u32(raw + 0x28);
+    sb->inode_size = rd_u32(raw + 0x58);
+    if (sb->blocks_count == 0) die("stat: zero s_blocks_count_lo");
+    if (sb->inodes_per_group == 0) die("stat: zero s_inodes_per_group");
+    if (sb->inode_size != 128 && sb->inode_size != 256)
+        die("stat: unexpected s_inode_size %u", sb->inode_size);
+    /* GDT is at block 2 for 1K blocks, block 1 otherwise (4K here). */
+    sb->gdt_block = (log_block == 0) ? 2u : 1u;
+}
+
+/* Return the inode-table block for the group containing inode `ino`. */
+static uint32_t rd_inode_table_block(int fd, const rd_sb *sb, uint32_t ino) {
+    uint32_t group = (ino - 1) / sb->inodes_per_group;
+    uint8_t gd[32]; /* 32-byte descriptor (64bit feature OFF) */
+    rd_at(fd, (uint64_t)sb->gdt_block * sb->block_size + (uint64_t)group * 32, gd, sizeof(gd));
+    uint32_t table = rd_u32(gd + 0x08); /* bg_inode_table_lo */
+    if (table >= sb->blocks_count) die("stat: inode-table block %u out of range", table);
+    return table;
+}
+
+typedef struct {
+    uint16_t mode;              /* i_mode */
+    uint32_t size_lo;           /* i_size_lo */
+    uint32_t flags;             /* i_flags */
+    uint8_t  i_block[60];       /* i_block[15] — extent tree root when extents */
+} rd_inode;
+
+static void rd_read_inode(int fd, const rd_sb *sb, uint32_t ino, rd_inode *out) {
+    if (ino == 0) die("stat: inode 0 is invalid");
+    uint32_t table = rd_inode_table_block(fd, sb, ino);
+    uint32_t idx_in_group = (ino - 1) % sb->inodes_per_group;
+    uint64_t off = (uint64_t)table * sb->block_size + (uint64_t)idx_in_group * sb->inode_size;
+    uint8_t raw[256];
+    rd_at(fd, off, raw, sb->inode_size);
+    out->mode = rd_u16(raw + 0x00);
+    out->size_lo = rd_u32(raw + 0x04);
+    out->flags = rd_u32(raw + 0x20);
+    memcpy(out->i_block, raw + 0x28, 60);
+}
+
+/* Resolve the physical block holding logical block `logical` of an extent-based
+ * inode. `node` points at a 60-byte i_block extent root (for the inode itself)
+ * or a full block read into `blkbuf` (for interior nodes). Recurses through
+ * interior (eh_depth>0) nodes via ext4_extent_idx. Dies (fail-closed) on a
+ * non-extents inode, a bad extent magic, an out-of-range physical block, an
+ * excessive depth, or a logical block with no covering extent. */
+static uint64_t rd_extent_resolve(int fd, const rd_sb *sb,
+                                  const uint8_t *node, uint32_t node_len,
+                                  uint32_t logical, uint32_t depth) {
+    if (depth > RD_MAX_EXTENT_DEPTH) die("stat: extent depth exceeds %u", RD_MAX_EXTENT_DEPTH);
+    if (node_len < 12) die("stat: extent node too small");
+    if (rd_u16(node + 0) != RD_EXT4_EXT_MAGIC)
+        die("stat: bad extent magic 0x%04x (indirect-block file? unsupported)", rd_u16(node + 0));
+    uint16_t entries = rd_u16(node + 2);
+    uint16_t eh_depth = rd_u16(node + 6);
+    /* Each entry is 12 bytes; the node must hold the header + all entries. */
+    if ((uint32_t)12 + (uint32_t)entries * 12 > node_len)
+        die("stat: extent entries (%u) overflow node", entries);
+
+    if (eh_depth == 0) {
+        /* Leaf entries: ext4_extent { ee_block(4) ee_len(2) ee_start_hi(2) ee_start_lo(4) }. */
+        for (uint32_t i = 0; i < entries; i++) {
+            const uint8_t *e = node + 12 + i * 12;
+            uint32_t ee_block = rd_u32(e + 0);
+            uint16_t ee_len = rd_u16(e + 4);
+            uint32_t ee_start = rd_u32(e + 8); /* ee_start_hi assumed 0 (64bit OFF, small image) */
+            if (ee_len == 0) continue;
+            if (logical >= ee_block && logical < ee_block + ee_len) {
+                uint64_t phys = (uint64_t)ee_start + (logical - ee_block);
+                if (phys >= sb->blocks_count)
+                    die("stat: extent physical block %llu out of range", (unsigned long long)phys);
+                return phys;
+            }
+        }
+        die("stat: no extent covers logical block %u", logical);
+    }
+
+    /* Interior entries: ext4_extent_idx { ei_block(4) ei_leaf_lo(4) ei_leaf_hi(2) }. */
+    for (uint32_t i = 0; i < entries; i++) {
+        const uint8_t *e = node + 12 + i * 12;
+        uint32_t ei_block = rd_u32(e + 0);
+        uint32_t ei_leaf = rd_u32(e + 4);
+        /* Choose the LAST index whose ei_block <= logical (extents are sorted). */
+        int is_last = (i + 1 == entries) || (rd_u32(node + 12 + (i + 1) * 12 + 0) > logical);
+        if (logical >= ei_block && is_last) {
+            if (ei_leaf >= sb->blocks_count)
+                die("stat: extent index block %u out of range", ei_leaf);
+            uint8_t *child = malloc(sb->block_size);
+            if (!child) die("stat: out of memory");
+            rd_at(fd, (uint64_t)ei_leaf * sb->block_size, child, sb->block_size);
+            uint64_t r = rd_extent_resolve(fd, sb, child, sb->block_size, logical, depth + 1);
+            free(child);
+            return r;
+        }
+    }
+    die("stat: no extent index covers logical block %u", logical);
+}
+
+/* Read directory data block 0 of `dir_ino` and find the inode of component
+ * `name` (length `name_len`). Returns the child inode, or 0 when absent
+ * (ENOENT). Dies (fail-closed) on a non-directory inode, a hash-indexed dir
+ * (EXT4_INDEX_FL — unsupported/never produced here), a non-extents inode, or
+ * any structural anomaly. Only the directory's FIRST logical block is scanned —
+ * sufficient for this small rootfs (every dir fits one block). */
+static uint32_t rd_dir_lookup(int fd, const rd_sb *sb, uint32_t dir_ino,
+                              const char *name, uint8_t name_len) {
+    rd_inode ino;
+    rd_read_inode(fd, sb, dir_ino, &ino);
+    if ((ino.mode & RD_S_IFMT) != RD_S_IFDIR)
+        die("stat: inode %u is not a directory (mode 0%o)", dir_ino, ino.mode);
+    if (ino.flags & RD_EXT4_INDEX_FL)
+        die("stat: directory inode %u is hash-indexed (htree) — unsupported", dir_ino);
+    if (!(ino.flags & RD_EXT4_EXTENTS_FL))
+        die("stat: directory inode %u lacks extents flag — unsupported", dir_ino);
+
+    uint64_t blk = rd_extent_resolve(fd, sb, ino.i_block, sizeof(ino.i_block), 0, 0);
+    uint8_t *buf = malloc(sb->block_size);
+    if (!buf) die("stat: out of memory");
+    rd_at(fd, blk * sb->block_size, buf, sb->block_size);
+
+    uint32_t found = 0;
+    uint32_t off = 0;
+    while (off + 8 <= sb->block_size) {
+        uint32_t d_ino = rd_u32(buf + off + 0);
+        uint16_t rec_len = rd_u16(buf + off + 4);
+        uint8_t d_name_len = buf[off + 6];
+        if (rec_len < 8 || (rec_len % 4) != 0 || off + rec_len > sb->block_size) {
+            free(buf);
+            die("stat: malformed dirent rec_len %u at off %u", rec_len, off);
+        }
+        if (d_ino != 0 && d_name_len == name_len &&
+            off + 8 + d_name_len <= sb->block_size &&
+            memcmp(buf + off + 8, name, d_name_len) == 0) {
+            found = d_ino;
+            break;
+        }
+        off += rec_len;
+        if (rec_len == 0) break; /* defensive; rec_len<8 already dies above */
+    }
+    free(buf);
+    return found; /* 0 => ENOENT */
+}
+
+/* Resolve `guest_path` (canonical absolute, e.g. "/usr/bin/node") from the
+ * root, then classify the final inode. On a HIT, sets *is_reg / *is_exec /
+ * *is_symlink and returns 1. On ENOENT (any path component absent) returns 0.
+ * Dies (fail-closed) on any structural/parse error, an over-long path, or a
+ * non-canonical input. Mirrors the Linux loopback statInMount semantics:
+ * symlinks are detected from the inode i_mode WITHOUT ever following them. */
+static int rd_stat_guest(int fd, const rd_sb *sb, const char *guest_path,
+                         int *is_reg, int *is_exec, int *is_symlink) {
+    if (guest_path[0] != '/') die("stat: guest path must be absolute: %s", guest_path);
+    /* Split into components (skip leading '/'; reject empty/NUL-tricks). */
+    if (strlen(guest_path) > 4096) die("stat: guest path too long");
+    uint32_t cur = RD_ROOT_INO;
+    const char *p = guest_path;
+    int ncomp = 0;
+    while (*p) {
+        while (*p == '/') p++;           /* collapse slashes */
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        size_t len = (size_t)(p - start);
+        if (len == 0 || len > 255) die("stat: bad path component length %zu", len);
+        if (++ncomp > RD_MAX_PATH_COMPONENTS) die("stat: too many path components");
+        uint32_t next = rd_dir_lookup(fd, sb, cur, start, (uint8_t)len);
+        if (next == 0) return 0;          /* ENOENT */
+        cur = next;
+    }
+    if (ncomp == 0) die("stat: guest path has no components: %s", guest_path);
+
+    rd_inode fin;
+    rd_read_inode(fd, sb, cur, &fin);
+    uint32_t fmt = fin.mode & RD_S_IFMT;
+    if (fmt == RD_S_IFLNK) { *is_reg = 0; *is_exec = 0; *is_symlink = 1; return 1; }
+    if (fmt == RD_S_IFREG) {
+        *is_reg = 1;
+        *is_exec = (fin.mode & RD_S_IXUSR) ? 1 : 0; /* owner-exec, mirrors loopback */
+        *is_symlink = 0;
+        return 1;
+    }
+    /* Directory or any other type: present but not a qualified executable. */
+    *is_reg = 0; *is_exec = 0; *is_symlink = 0;
+    return 1;
+}
+
 /* ---- main ---------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
-    if (argc < 2) die("usage: vm-image-builder snapshot|single-file ...");
+    if (argc < 2) die("usage: vm-image-builder snapshot|single-file|stat ...");
+
+    if (strcmp(argv[1], "stat") == 0) {
+        if (argc != 4) die("usage: stat <rootfs.img> <guestPath>");
+        const char *imgPath = argv[2];
+        const char *guestPath = argv[3];
+        /* O_NOFOLLOW + O_RDONLY: the caller (engine.assertExecutablesQualified)
+         * passes /dev/fd/<pinned fd> so the parsed bytes are the verified
+         * inode. O_NOFOLLOW guards a bare-path caller against a symlink swap. */
+        int fd = open(imgPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) {
+            if (errno == ELOOP) die("stat: reject symlink rootfs (O_NOFOLLOW)");
+            die("stat: open rootfs image %s", imgPath);
+        }
+        rd_sb sb;
+        rd_read_superblock(fd, &sb);
+        int is_reg = 0, is_exec = 0, is_symlink = 0;
+        int found = rd_stat_guest(fd, &sb, guestPath, &is_reg, &is_exec, &is_symlink);
+        close(fd);
+        if (!found) { fprintf(stdout, "null\n"); return 0; }
+        fprintf(stdout, "{\"isReg\":%d,\"isExec\":%d,\"isSymlink\":%d}\n", is_reg, is_exec, is_symlink);
+        return 0;
+    }
 
     if (strcmp(argv[1], "single-file") == 0) {
         if (argc != 6) die("usage: single-file <srcPath> <guestName> <expectedDigest> <outPath>");
@@ -976,6 +1259,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    die("unknown mode: %s (expected snapshot|single-file)", argv[1]);
+    die("unknown mode: %s (expected snapshot|single-file|stat)", argv[1]);
     return 1;
 }
