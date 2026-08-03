@@ -1,10 +1,18 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BOOTSTRAP = join(HERE, '..', '..', 'images', 'runtime', 'bootstrap.cjs');
+// The vendored undici (a gitignored build artifact produced by
+// scripts/vendor-undici.mjs) is the ProxyAgent source bootstrap.cjs loads. The
+// runtime image build vendors it, but a bare `pnpm test` on a fresh checkout
+// (e.g. the Code Audit workflow, which never builds the image) does not — so
+// this suite vendors it on demand (idempotent: skipped when already present).
+const UNDICI_INDEX = join(HERE, '..', '..', 'images', 'runtime', 'undici', 'index.js');
+const VENDOR_SCRIPT = join(HERE, '..', '..', 'scripts', 'vendor-undici.mjs');
 
 // The vendored undici 6.24.1 ProxyAgent implements the undici v6 dispatcher
 // interface (Node 22 runtime image). Other Node majors (e.g. v26 -> undici v8)
@@ -33,6 +41,21 @@ function fetchWithBootstrap(env: NodeJS.ProcessEnv): string {
 }
 
 describe.skipIf(!onImageNode)('bootstrap.cjs proxy routing', () => {
+  // Ensure the vendored undici exists before exercising the proxy-routing path.
+  // On the runtime-image lane it is already present (image build vendors it); on a
+  // bare `pnpm test` (Code Audit workflow / local) it is absent, so vendor it
+  // here. Idempotent: vendor-undici.mjs is skipped entirely when index.js exists.
+  beforeAll(() => {
+    if (existsSync(UNDICI_INDEX)) return;
+    const r = spawnSync(process.execPath, [VENDOR_SCRIPT], { encoding: 'utf8' });
+    if (r.status !== 0) {
+      throw new Error(`vendor-undici.mjs failed (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`);
+    }
+    if (!existsSync(UNDICI_INDEX)) {
+      throw new Error(`vendor-undici.mjs reported success but ${UNDICI_INDEX} is still missing`);
+    }
+  });
+
   it('is a no-op when no proxy env is set (behavior unchanged)', () => {
     const out = fetchWithBootstrap({});
     // No proxy env → bootstrap returns early → fetch does a direct DNS lookup of
