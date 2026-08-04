@@ -96,3 +96,8 @@ competition/
 # Competition / hackathon submission files
 competition/
 .vercel
+
+# local build/runtime artifacts
+.pnpm-store/
+packages/sandbox-vm-native/prebuilds/
+apps/cli/skills/.registry-cache.json

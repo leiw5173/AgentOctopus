@@ -1,9 +1,0 @@
----
-"@agentoctopus/sandbox-vm-native": patch
----
-
-Fix two VM-lane guest-boot blockers in the native VM backend.
-
-- **`engine.ts` `waitForReady` frame parser**: control frames from vm-init are NOT newline-delimited — they are written back-to-back on the octopus-control port (e.g. `{"ready":true}{"exit":0}` arrives as a single chunk). The previous reader split on `'\n'`, never fired on the buffered ready frame, sat until EOF, then mis-reported a healthy boot as "helper closed control channel before ready (EOF)". Replaced with a brace-matching `drainFrames` that extracts each complete top-level JSON object, counts leading/embedded non-JSON garbage against the malformed-frame bound (HI-4, fail-closed), and buffers truncated trailing objects for the next chunk (flushed on EOF). Also captures the helper's early stderr (bounded, 4 KiB) so a start failure carries the helper's own diagnostics instead of a bare EOF.
-
-- **`vm-image-builder.c` ext4 direct-block addressing**: the writer emits legacy direct-block inodes (`i_flags=0`) but set ONLY `i_block[0]`. Any file larger than one 1024-byte block had no direct pointer for blocks 1..N-1, so the guest kernel read them as holes (NUL bytes) and the file appeared truncated + zero-padded (probe.js → guest SyntaxError past block 1). Directory inodes had `i_block[0]=0`, so `/skill` listed empty. The writer now records each allocated block's physical number per file (`block_map[12]`, blocks need not be contiguous since directory and file data blocks are interleaved) and fills every direct pointer; the single-file (CA) path fills its contiguous run likewise. Adds a regression test that builds a real `snapshot` image with a >1-block file and asserts every direct-block pointer is non-zero and the bytes read back intact (verified to fail on the pre-fix binary).

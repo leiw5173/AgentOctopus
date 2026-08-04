@@ -1,6 +1,6 @@
 {
   "name": "@agentoctopus/sandbox-vm-native",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Native VM sandbox backend: libkrun helper, ext4 image-builder, guest bootstrap",
   "type": "module",
   "main": "./dist/index.js",

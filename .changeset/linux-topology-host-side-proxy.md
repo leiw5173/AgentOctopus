@@ -1,9 +1,0 @@
----
-"@agentoctopus/sandbox": patch
----
-
-tests(security): fix linux-topology assertions to match the host-side proxy + shared session cgroup. Four test-side corrections (no sandbox behavior change) for failures newly exposed now that the os-helper reaches `execve` and the topology suite runs for the first time:
-
-- **Proxy listener checks (`/32 route`, `EADDRINUSE`):** the egress proxy binds HOST-SIDE — `setupNetns` assigns `proxyIp` to the host-side veth (`hostIf`, which stays on the host; only `skillIf` enters the skill netns) and `egress-proxy-server` listens on that host address (os-backend: "the proxy binds host-side over the carrier"; the HTTPS test itself notes "the proxy runs on the HOST"). Two tests wrongly ran `ss -ltnH` INSIDE the skill netns, where the host-side listener is not visible, so they always counted 0. Added `hostSsListenCount()` (runs `ss` on the host) and switched both assertions to it. The EADDRINUSE second-bind was already host-side and correct.
-- **CA read-only behavioral probe:** previously called `backend.run()` on the SAME sandbox that holds the persistent `block` probe (needed for the nsenter PID). A one-shot `run()` then failed its post-exit "session cgroup is empty" containment check against that persistent process. The behavioral probe now runs via `runLinuxProbe()` on a fresh sandbox — every sandbox mounts its session CA read-only at the same contract path, so the read-only guarantee is still proven, without the shared-cgroup conflict.
-- **HTTPS-through-proxy:** this test drives its own one-shot `backend.run()` through the proxy and does not need the persistent `block` probe, so `startTopologySandbox` now takes a `spawnBlock` flag (default true, existing tests unchanged) and this test passes `false`, leaving the session cgroup empty for `run()`'s containment check.
