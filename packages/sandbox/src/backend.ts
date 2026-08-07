@@ -193,6 +193,13 @@ export async function selectBackend(config: SandboxConfig, available: SandboxBac
   // excluded even when its probe succeeds.
   const explicitRestrictedOs =
     config.defaultBackend === 'os' && config.minIsolationLevel === 'restricted';
+  // Restricted Windows execution is opt-in only, mirroring the OS contract: a
+  // restricted `kind:'windows'` backend is selectable ONLY when the operator
+  // explicitly requests `defaultBackend:'windows'` AND lowers the floor to
+  // `minIsolationLevel:'restricted'`. Under any other combination a restricted
+  // Windows candidate is excluded even when its probe succeeds.
+  const explicitRestrictedWindows =
+    config.defaultBackend === 'windows' && config.minIsolationLevel === 'restricted';
 
   const candidates: SandboxBackend[] = [];
   for (const b of available) {
@@ -206,6 +213,7 @@ export async function selectBackend(config: SandboxConfig, available: SandboxBac
     if (!ok) continue; // probe failed or threw — excluded
     if (LEVEL_RANK[b.isolationLevel] < required) continue; // still too weak post-probe
     if (b.kind === 'os' && b.isolationLevel === 'restricted' && !explicitRestrictedOs) continue;
+    if (b.kind === 'windows' && b.isolationLevel === 'restricted' && !explicitRestrictedWindows) continue;
     candidates.push(b);
   }
 

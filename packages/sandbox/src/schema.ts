@@ -87,7 +87,7 @@ export const SNAPSHOT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
  */
 export const SandboxConfigSchema = z
   .object({
-    defaultBackend: z.enum(['auto', 'docker', 'os', 'vm', 'subprocess', 'ssh', 'none']).default('auto'),
+    defaultBackend: z.enum(['auto', 'docker', 'os', 'windows', 'vm', 'subprocess', 'ssh', 'none']).default('auto'),
     minIsolationLevel: z.enum(['full', 'restricted', 'remote-unverified', 'none']).default('full'),
     runtimeProfiles: z
       .record(
