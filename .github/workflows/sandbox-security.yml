@@ -280,7 +280,7 @@ jobs:
     # fork PRs get the hosted and macOS lanes only.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     needs: [produce-linux-artifacts]
-    runs-on: [self-hosted, linux, x64, sandbox-privileged]
+    runs-on: [self-hosted, linux, x64, sandbox-privileged-win]
     env:
       OCTOPUS_REQUIRE_PRIVILEGED_LINUX: '1'
       OCTOPUS_TEST_CGROUP_PARENT: /sys/fs/cgroup/agentoctopus-ci
