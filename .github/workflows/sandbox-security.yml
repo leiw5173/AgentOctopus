@@ -868,6 +868,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Vendor the pinned undici tree into images/runtime/undici/ first —
+          # it is gitignored, and build-win-helper.mjs fail-closes on its absence.
+          node packages/sandbox/scripts/vendor-undici.mjs
           node packages/sandbox/scripts/build-win-helper.mjs
           $helper = 'packages/sandbox/prebuilds/windows-x64/octopus-sandbox-helper.exe'
           $svc    = 'packages/sandbox/prebuilds/windows-x64/octopus-sandbox-gate-svc.exe'
