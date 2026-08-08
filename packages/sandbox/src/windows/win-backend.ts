@@ -124,8 +124,10 @@ export interface WinBackendDeps {
 export interface WinSandboxBackendOptions {
   sessionId: string;
   /**
-   * Working directory for the backend's own state (the staged per-session
-   * copy dir). Defaults to a per-session tmpdir path.
+   * Reserved per-session scratch directory for the backend's own state.
+   * Currently unused: the staged per-session copy lives under the runner's
+   * session dir (derived from `opts.guestSkillRoot` in `prepare`), not here.
+   * Defaults to a per-session tmpdir path.
    */
   workDir?: string;
   /** Injectable collaborators. Production callers omit this. */
