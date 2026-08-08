@@ -81,6 +81,8 @@
 #include <windows.h>
 #include <sddl.h>      /* ConvertSidToStringSidW, ConvertStringSidToSidW */
 #include <userenv.h>   /* CreateAppContainerProfile, DeleteAppContainerProfile */
+#include <aclapi.h>    /* GetNamedSecurityInfoW, SetNamedSecurityInfoW,
+                        * SetEntriesInAclW, EXPLICIT_ACCESSW, TRUSTEE_W */
 #include <stdio.h>     /* fwprintf */
 #include <stdlib.h>    /* wcstoul */
 #include <wchar.h>     /* swprintf_s, _wcsnicmp, wcslen, wcscmp, memcpy (via string.h) */
@@ -1451,6 +1453,629 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Subcommand: grant-acl                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * collect_lpac_sids -- gather the BINARY SID set that identifies an LPAC
+ * process for a package moniker: the package SID + the derived capability
+ * group SIDs + the derived capability SIDs + the loopback capability SID.
+ *
+ * These are exactly the SIDs the launched LPAC token carries (the same set
+ * launch_sandboxed builds into SECURITY_CAPABILITIES). grant-acl grants each
+ * of them READ+EXECUTE on the staged copy dir so the LPAC child — which has
+ * opted OUT of ALL APPLICATION PACKAGES — can still read the copy.
+ *
+ * On success returns S_OK and fills *outSids with a LocalAlloc'd array of
+ * PSID (count in *outCount). The array and every SID in it are LocalAlloc'd;
+ * the caller frees each SID then the array, all with LocalFree. On any
+ * failure *outSids is NULL, *outCount is 0, and every partial allocation is
+ * freed before returning a failure HRESULT.
+ */
+static HRESULT collect_lpac_sids(PCWSTR moniker, PSID **outSids, DWORD *outCount) {
+    PSID packageSid = NULL;
+    PSID *capGroupSids = NULL;
+    DWORD capGroupSidCount = 0;
+    PSID *capSids = NULL;
+    DWORD capSidCount = 0;
+    PSID loopbackCapSid = NULL;
+    LPWSTR loopbackCapSidStr = NULL;
+    PSID *result = NULL;
+    DWORD total = 0;
+    DWORD idx = 0;
+    DWORD i;
+    HRESULT hr = S_OK;
+    DWORD err = 0;
+
+    if (moniker == NULL || outSids == NULL || outCount == NULL) {
+        return E_INVALIDARG;
+    }
+    *outSids = NULL;
+    *outCount = 0;
+
+    /* Package SID (create the profile if absent; derive if it exists). */
+    hr = CreateAppContainerProfile(moniker, moniker,
+                                   L"AgentOctopus sandbox profile",
+                                   NULL, 0, &packageSid);
+    if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
+        hr = DeriveAppContainerSidFromAppContainerName(moniker, &packageSid);
+    }
+    if (FAILED(hr)) goto cleanup;
+
+    /* Derived capability group + normal SIDs. */
+    if (!DeriveCapabilitySidsFromName(moniker,
+                                      &capGroupSids, &capGroupSidCount,
+                                      &capSids, &capSidCount)) {
+        err = GetLastError();
+        hr = HRESULT_FROM_WIN32(err);
+        goto cleanup;
+    }
+
+    /* Loopback capability SID via the Task 6 string derive + re-parse. */
+    hr = derive_loopback_capability_sid(moniker, &loopbackCapSidStr);
+    if (FAILED(hr)) goto cleanup;
+    if (!ConvertStringSidToSidW(loopbackCapSidStr, &loopbackCapSid)) {
+        err = GetLastError();
+        hr = HRESULT_FROM_WIN32(err);
+        goto cleanup;
+    }
+
+    total = 1 + capGroupSidCount + capSidCount + 1;
+    result = (PSID *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT,
+                                total * sizeof(PSID));
+    if (result == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
+
+    /* Move ownership of each SID into the result array. packageSid is
+     * FreeSid-allocated; copy it into a LocalAlloc buffer so the whole
+     * result set has ONE free discipline (LocalFree). */
+    {
+        DWORD pkgLen = GetLengthSid(packageSid);
+        if (pkgLen == 0) { hr = E_UNEXPECTED; goto cleanup; }
+        result[idx] = (PSID)LocalAlloc(LMEM_FIXED, pkgLen);
+        if (result[idx] == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
+        if (!CopySid(pkgLen, result[idx], packageSid)) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err);
+            goto cleanup;
+        }
+        idx++;
+    }
+    for (i = 0; i < capGroupSidCount; i++) {
+        result[idx] = capGroupSids[i];  /* LocalAlloc'd by the API; move */
+        capGroupSids[i] = NULL;
+        idx++;
+    }
+    for (i = 0; i < capSidCount; i++) {
+        result[idx] = capSids[i];       /* LocalAlloc'd by the API; move */
+        capSids[i] = NULL;
+        idx++;
+    }
+    result[idx] = loopbackCapSid;       /* LocalAlloc'd; move */
+    loopbackCapSid = NULL;
+    idx++;
+
+    *outSids = result;
+    *outCount = idx;
+    result = NULL;
+    hr = S_OK;
+
+cleanup:
+    if (result != NULL) {
+        for (i = 0; i < total; i++) {
+            if (result[i] != NULL) LocalFree(result[i]);
+        }
+        LocalFree(result);
+    }
+    if (packageSid != NULL) FreeSid(packageSid);
+    if (loopbackCapSid != NULL) LocalFree(loopbackCapSid);
+    if (loopbackCapSidStr != NULL) LocalFree(loopbackCapSidStr);
+    if (capGroupSids != NULL) {
+        for (i = 0; i < capGroupSidCount; i++) {
+            if (capGroupSids[i] != NULL) LocalFree(capGroupSids[i]);
+        }
+        LocalFree(capGroupSids);
+    }
+    if (capSids != NULL) {
+        for (i = 0; i < capSidCount; i++) {
+            if (capSids[i] != NULL) LocalFree(capSids[i]);
+        }
+        LocalFree(capSids);
+    }
+    return hr;
+}
+
+/*
+ * grant_read_execute_on_path -- add one ACCESS_ALLOWED ACE per LPAC SID
+ * (GENERIC_READ | GENERIC_EXECUTE) to the DACL of a single file or
+ * directory, PRESERVING every existing ACE.
+ *
+ * The merge (not clobber) algorithm:
+ *   1. GetNamedSecurityInfoW(DACL_SECURITY_INFORMATION) reads the current
+ *      DACL (which may be NULL, meaning "no DACL = full access", or absent).
+ *   2. SetEntriesInAclW(count, explicitAccess[], oldDacl, &newDacl) builds a
+ *      NEW DACL that contains every old ACE PLUS the new ones — the API
+ *      merges; it does not replace. New ACEs are appended after existing
+ *      ones so deny-ACEs that already exist keep their precedence.
+ *   3. SetNamedSecurityInfoW(DACL_SECURITY_INFORMATION) writes the merged
+ *      DACL back.
+ *
+ * The ACEs are marked SUB_CONTAINERS_AND_OBJECTS_INHERIT when the target is
+ * a directory so files/subdirs created later inherit the grant; the explicit
+ * recursion in grant_acl_recursive additionally stamps existing children.
+ */
+static HRESULT grant_read_execute_on_path(PCWSTR path, BOOL isDir,
+                                          PSID *sids, DWORD sidCount) {
+    PACL oldDacl = NULL;
+    PACL newDacl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    EXPLICIT_ACCESSW *ea = NULL;
+    DWORD winErr;
+    HRESULT hr = S_OK;
+    DWORD i;
+
+    ea = (EXPLICIT_ACCESSW *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT,
+                                        sidCount * sizeof(EXPLICIT_ACCESSW));
+    if (ea == NULL) return E_OUTOFMEMORY;
+
+    for (i = 0; i < sidCount; i++) {
+        ea[i].grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
+        ea[i].grfAccessMode = SET_ACCESS;
+        /* Directories propagate the grant to future children; files have no
+         * inheritance flags. */
+        ea[i].grfInheritance = isDir
+            ? (SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+            : (NO_INHERITANCE);
+        ea[i].Trustee.pMultipleTrustee = NULL;
+        ea[i].Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+        ea[i].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        ea[i].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        ea[i].Trustee.ptstrName = (LPWSTR)sids[i];
+    }
+
+    /* Read the current DACL. ERROR_SUCCESS with oldDacl == NULL means the
+     * object has no DACL (full access); SetEntriesInAclW treats a NULL old
+     * DACL as "start empty" and still produces a valid merged DACL. */
+    winErr = GetNamedSecurityInfoW(path, SE_FILE_OBJECT,
+                                   DACL_SECURITY_INFORMATION,
+                                   NULL, NULL, &oldDacl, NULL, &sd);
+    if (winErr != ERROR_SUCCESS) {
+        hr = HRESULT_FROM_WIN32(winErr);
+        goto cleanup;
+    }
+
+    winErr = SetEntriesInAclW(sidCount, ea, oldDacl, &newDacl);
+    if (winErr != ERROR_SUCCESS) {
+        hr = HRESULT_FROM_WIN32(winErr);
+        goto cleanup;
+    }
+
+    winErr = SetNamedSecurityInfoW((LPWSTR)path, SE_FILE_OBJECT,
+                                   DACL_SECURITY_INFORMATION,
+                                   NULL, NULL, newDacl, NULL);
+    if (winErr != ERROR_SUCCESS) {
+        hr = HRESULT_FROM_WIN32(winErr);
+        goto cleanup;
+    }
+    hr = S_OK;
+
+cleanup:
+    if (newDacl != NULL) LocalFree(newDacl);
+    if (sd != NULL) LocalFree(sd);
+    if (ea != NULL) LocalFree(ea);
+    return hr;
+}
+
+/*
+ * grant_acl_recursive -- grant READ+EXECUTE on a directory and every file /
+ * subdirectory beneath it.
+ *
+ * FindFirstFileW / FindNextFileW walk; "." and ".." are skipped; subdirs are
+ * recursed into. Long paths (>= MAX_PATH) are handled by prefixing the
+ * search/find paths with "\\?\" when they are absolute — the staged copy dir
+ * is always an absolute per-session path, so the prefix is applied
+ * unconditionally to the walk but NOT to the path handed to
+ * GetNamedSecurityInfoW/SetNamedSecurityInfoW (which accept long paths
+ * natively on Win10).
+ *
+ * A failure on ANY entry aborts the walk with a failure HRESULT (fail-closed
+ * — a partially-granted copy dir must not look like success).
+ */
+static HRESULT grant_acl_recursive(PCWSTR dir, PSID *sids, DWORD sidCount,
+                                   int depth) {
+    WCHAR searchPath[MAX_PATH * 2];
+    WCHAR childPath[MAX_PATH * 2];
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = INVALID_HANDLE_VALUE;
+    HRESULT hr = S_OK;
+    DWORD err;
+
+    /* Defensive recursion cap — the staged copy tree is shallow; 64 levels
+     * is generous and prevents a pathological symlink/junction loop.
+     * ERROR_STACK_OVERFLOW (1001L) is the closest real Win32 code for a
+     * recursion cap. */
+    if (depth > 64) {
+        return HRESULT_FROM_WIN32(ERROR_STACK_OVERFLOW);
+    }
+
+    if (swprintf_s(searchPath, ARRAYSIZE(searchPath),
+                   L"\\\\?\\%s\\*", dir) < 0) {
+        return E_UNEXPECTED;
+    }
+
+    hFind = FindFirstFileW(searchPath, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND) {
+            /* Empty dir — nothing to grant on but the dir itself. */
+            return S_OK;
+        }
+        return HRESULT_FROM_WIN32(err);
+    }
+
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
+            continue;
+        }
+        if (swprintf_s(childPath, ARRAYSIZE(childPath),
+                       L"%s\\%s", dir, fd.cFileName) < 0) {
+            hr = E_UNEXPECTED;
+            break;
+        }
+        {
+            BOOL childIsDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            hr = grant_read_execute_on_path(childPath, childIsDir, sids, sidCount);
+            if (FAILED(hr)) break;
+            if (childIsDir) {
+                hr = grant_acl_recursive(childPath, sids, sidCount, depth + 1);
+                if (FAILED(hr)) break;
+            }
+        }
+    } while (FindNextFileW(hFind, &fd));
+
+    if (hFind != INVALID_HANDLE_VALUE) {
+        FindClose(hFind);
+    }
+    /* Distinguish a loop that ended cleanly from one that broke on error. */
+    if (SUCCEEDED(hr)) {
+        err = GetLastError();
+        if (err != ERROR_NO_MORE_FILES) {
+            hr = HRESULT_FROM_WIN32(err);
+        }
+    }
+    return hr;
+}
+
+static void usage_grant_acl(void) {
+    fwprintf(stderr,
+        L"octopus-sandbox-helper: usage:\n"
+        L"  octopus-sandbox-helper.exe grant-acl --pkg <moniker> --path <dir>\n");
+}
+
+/*
+ * cmd_grant_acl -- grant the package's LPAC SIDs READ+EXECUTE on the staged
+ * copy dir, recursively. Exit 0 on success; non-zero on any failure.
+ */
+static int cmd_grant_acl(int argc, wchar_t **argv, int startIdx) {
+    PCWSTR pkg = NULL;
+    PCWSTR path = NULL;
+    PSID *sids = NULL;
+    DWORD sidCount = 0;
+    HRESULT hr;
+    DWORD i;
+    DWORD attrs;
+
+    for (i = startIdx; i < argc; i++) {
+        if (i + 1 >= argc) { usage_grant_acl(); return 2; }
+        if (wcscmp(argv[i], L"--pkg") == 0) {
+            pkg = argv[++i];
+        } else if (wcscmp(argv[i], L"--path") == 0) {
+            path = argv[++i];
+        } else {
+            usage_grant_acl();
+            return 2;
+        }
+    }
+    if (pkg == NULL || path == NULL) {
+        usage_grant_acl();
+        return 2;
+    }
+
+    /* The target must exist and be a directory — granting on a non-existent
+     * or non-directory path is a usage error, fail-closed. */
+    attrs = GetFileAttributesW(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return fail_win32(L"grant-acl GetFileAttributesW", GetLastError());
+    }
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        fwprintf(stderr, L"octopus-sandbox-helper: grant-acl path is not a directory\n");
+        return 1;
+    }
+
+    hr = collect_lpac_sids(pkg, &sids, &sidCount);
+    if (FAILED(hr)) {
+        return fail_hr(L"grant-acl collect_lpac_sids", hr);
+    }
+
+    /* Grant on the root dir itself, then recurse into children. */
+    hr = grant_read_execute_on_path(path, TRUE, sids, sidCount);
+    if (SUCCEEDED(hr)) {
+        hr = grant_acl_recursive(path, sids, sidCount, 0);
+    }
+
+    for (i = 0; i < sidCount; i++) {
+        if (sids[i] != NULL) LocalFree(sids[i]);
+    }
+    LocalFree(sids);
+
+    if (FAILED(hr)) {
+        return fail_hr(L"grant-acl", hr);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Subcommand: teardown                                                */
+/* ------------------------------------------------------------------ */
+
+/* How long to wait for the Job's active-process count to reach 0 after
+ * TerminateJobObject, and the poll interval. TerminateJobObject is
+ * asynchronous in that already-running threads take a moment to unwind; the
+ * process count typically drops to 0 within a few milliseconds. 5 s is a
+ * generous upper bound for a single Node child; if it is still non-zero
+ * after that, something is genuinely stuck and teardown must fail closed. */
+#define OCT_TEARDOWN_TIMEOUT_MS 5000
+#define OCT_TEARDOWN_POLL_MS    50
+
+/*
+ * delete_tree_recursive -- recursively delete a directory and its contents.
+ *
+ * FindFirstFileW / FindNextFileW walk; "." / ".." skipped; files deleted
+ * with DeleteFileW, subdirs recursed into then removed with RemoveDirectoryW
+ * (bottom-up, so a directory is empty before it is removed). Read-only
+ * attributes are cleared before DeleteFileW / RemoveDirectoryW because both
+ * fail on read-only entries. The root dir itself is removed last.
+ *
+ * Fail-closed: a failure on any entry aborts and returns a failure HRESULT,
+ * leaving whatever could not be deleted in place.
+ */
+static HRESULT delete_tree_recursive(PCWSTR dir, int depth) {
+    WCHAR searchPath[MAX_PATH * 2];
+    WCHAR childPath[MAX_PATH * 2];
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = INVALID_HANDLE_VALUE;
+    HRESULT hr = S_OK;
+    DWORD err;
+
+    /* Recursion cap (see grant_acl_recursive); ERROR_STACK_OVERFLOW (1001L)
+     * is the closest real Win32 code for a recursion cap. */
+    if (depth > 64) {
+        return HRESULT_FROM_WIN32(ERROR_STACK_OVERFLOW);
+    }
+
+    if (swprintf_s(searchPath, ARRAYSIZE(searchPath),
+                   L"\\\\?\\%s\\*", dir) < 0) {
+        return E_UNEXPECTED;
+    }
+
+    hFind = FindFirstFileW(searchPath, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND) {
+            /* Already empty; just remove the dir itself below. */
+        } else {
+            return HRESULT_FROM_WIN32(err);
+        }
+    }
+
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
+                continue;
+            }
+            if (swprintf_s(childPath, ARRAYSIZE(childPath),
+                           L"%s\\%s", dir, fd.cFileName) < 0) {
+                hr = E_UNEXPECTED;
+                break;
+            }
+            {
+                BOOL childIsDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                /* Clear read-only so delete/remove does not fail on it. */
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0) {
+                    (void)SetFileAttributesW(childPath,
+                        fd.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
+                }
+                if (childIsDir) {
+                    hr = delete_tree_recursive(childPath, depth + 1);
+                    if (FAILED(hr)) break;
+                } else {
+                    if (!DeleteFileW(childPath)) {
+                        hr = HRESULT_FROM_WIN32(GetLastError());
+                        break;
+                    }
+                }
+            }
+        } while (FindNextFileW(hFind, &fd));
+
+        FindClose(hFind);
+        if (SUCCEEDED(hr)) {
+            err = GetLastError();
+            if (err != ERROR_NO_MORE_FILES) {
+                hr = HRESULT_FROM_WIN32(err);
+            }
+        }
+        if (FAILED(hr)) return hr;
+    }
+
+    /* The directory is now empty (or was already). Remove it. Clear its own
+     * read-only bit first. */
+    {
+        DWORD dirAttrs = GetFileAttributesW(dir);
+        if (dirAttrs != INVALID_FILE_ATTRIBUTES &&
+            (dirAttrs & FILE_ATTRIBUTE_READONLY) != 0) {
+            (void)SetFileAttributesW(dir, dirAttrs & ~FILE_ATTRIBUTE_READONLY);
+        }
+    }
+    if (!RemoveDirectoryW(dir)) {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    return S_OK;
+}
+
+static void usage_teardown(void) {
+    fwprintf(stderr,
+        L"octopus-sandbox-helper: usage:\n"
+        L"  octopus-sandbox-helper.exe teardown --job <name> --pkg <moniker>\n"
+        L"      --copydir <dir>\n");
+}
+
+/*
+ * cmd_teardown -- kill the named Job's process tree, confirm it is dead,
+ * then delete the AppContainer profile and the staged copy dir.
+ *
+ * FAIL-CLOSED INVARIANT (security-critical): if the Job cannot be confirmed
+ * dead (OpenJobObjectW fails for a reason OTHER than not-found, or the
+ * active-process count does not reach 0 within the timeout), this exits
+ * NON-ZERO and LEAVES the profile + copy dir in place. That leftover state
+ * is what lets the Task 9 companion service keep the WFP gate closed — a
+ * live or unconfirmed-dead skill must never have its gate-related state
+ * deleted out from under the service. The copy dir and profile are deleted
+ * ONLY after confirmed Job death.
+ *
+ * Job-death determination:
+ *   - OpenJobObjectW returns ERROR_FILE_NOT_FOUND -> the Job is already gone
+ *     -> already dead, proceed (this is the crash-safe path where a prior
+ *     helper died and the Job was cleaned up by KILL_ON_JOB_CLOSE).
+ *   - Otherwise TerminateJobObject, then poll BasicAccountingInfo
+ *     .ActiveProcesses until 0 or the bounded timeout.
+ *   - Still non-zero after the timeout -> FAIL, leave state, exit non-zero.
+ */
+static int cmd_teardown(int argc, wchar_t **argv, int startIdx) {
+    PCWSTR job = NULL;
+    PCWSTR pkg = NULL;
+    PCWSTR copydir = NULL;
+    HANDLE hJob = NULL;
+    HRESULT hr = S_OK;
+    DWORD err;
+    BOOL jobConfirmedDead = FALSE;
+    DWORD i;
+
+    for (i = startIdx; i < argc; i++) {
+        if (i + 1 >= argc) { usage_teardown(); return 2; }
+        if (wcscmp(argv[i], L"--job") == 0) {
+            job = argv[++i];
+        } else if (wcscmp(argv[i], L"--pkg") == 0) {
+            pkg = argv[++i];
+        } else if (wcscmp(argv[i], L"--copydir") == 0) {
+            copydir = argv[++i];
+        } else {
+            usage_teardown();
+            return 2;
+        }
+    }
+    if (job == NULL || pkg == NULL || copydir == NULL) {
+        usage_teardown();
+        return 2;
+    }
+
+    /* ---- confirm Job death ------------------------------------------- */
+
+    hJob = OpenJobObjectW(JOB_OBJECT_TERMINATE | JOB_OBJECT_QUERY,
+                          FALSE /* bInheritHandle */, job);
+    if (hJob == NULL) {
+        err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND) {
+            /* Job already gone -> already dead. Proceed. */
+            jobConfirmedDead = TRUE;
+        } else {
+            /* Cannot even open the Job to check it. Fail closed: we do NOT
+             * know the skill is dead, so we must NOT delete state. */
+            return fail_win32(L"teardown OpenJobObjectW", err);
+        }
+    } else {
+        if (!TerminateJobObject(hJob, 1)) {
+            err = GetLastError();
+            /* Terminate failed — Job death unconfirmed. Fail closed. */
+            CloseHandle(hJob);
+            return fail_win32(L"teardown TerminateJobObject", err);
+        }
+
+        /* Poll until ActiveProcesses hits 0 or the timeout expires. */
+        {
+            DWORD waited = 0;
+            for (;;) {
+                JOBOBJECT_BASIC_ACCOUNTING_INFORMATION acct;
+                DWORD retLen = 0;
+                ZeroMemory(&acct, sizeof(acct));
+                if (!QueryInformationJobObject(hJob,
+                        JobObjectBasicAccountingInformation,
+                        &acct, sizeof(acct), &retLen)) {
+                    err = GetLastError();
+                    CloseHandle(hJob);
+                    /* Cannot confirm death -> fail closed. */
+                    return fail_win32(L"teardown QueryInformationJobObject", err);
+                }
+                if (acct.ActiveProcesses == 0) {
+                    jobConfirmedDead = TRUE;
+                    break;
+                }
+                if (waited >= OCT_TEARDOWN_TIMEOUT_MS) {
+                    break; /* timed out, still alive */
+                }
+                Sleep(OCT_TEARDOWN_POLL_MS);
+                waited += OCT_TEARDOWN_POLL_MS;
+            }
+        }
+        CloseHandle(hJob);
+        hJob = NULL;
+    }
+
+    /* ---- fail closed if death is unconfirmed ------------------------- */
+    if (!jobConfirmedDead) {
+        fwprintf(stderr,
+            L"octopus-sandbox-helper: teardown could NOT confirm Job '%ls' dead "
+            L"within %lu ms -- leaving profile and copy dir in place so the "
+            L"companion service keeps the egress gate closed\n",
+            job, (unsigned long)OCT_TEARDOWN_TIMEOUT_MS);
+        return 1;
+    }
+
+    /* ---- confirmed dead: delete profile + copy dir ------------------- */
+
+    /* DeleteAppContainerProfile on a possibly-already-deleted profile
+     * returns S_OK (deleting a non-existent profile is a success), so this
+     * is idempotent. A genuine failure is fail-closed but does NOT resurrect
+     * the gate concern (the Job is already dead) — still report non-zero. */
+    hr = DeleteAppContainerProfile(pkg);
+    if (FAILED(hr)) {
+        return fail_hr(L"teardown DeleteAppContainerProfile", hr);
+    }
+
+    /* Delete the copy dir wholesale. If it does not exist (already cleaned
+     * by a prior teardown), treat as success — teardown is idempotent. */
+    {
+        DWORD attrs = GetFileAttributesW(copydir);
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            DWORD gerr = GetLastError();
+            if (gerr == ERROR_FILE_NOT_FOUND || gerr == ERROR_PATH_NOT_FOUND) {
+                return 0; /* already gone; profile deleted above */
+            }
+            return fail_win32(L"teardown GetFileAttributesW(copydir)", gerr);
+        }
+        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            fwprintf(stderr,
+                L"octopus-sandbox-helper: teardown copydir is not a directory\n");
+            return 1;
+        }
+    }
+    hr = delete_tree_recursive(copydir, 0);
+    if (FAILED(hr)) {
+        return fail_hr(L"teardown delete copy dir", hr);
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* wmain -- argv dispatcher                                            */
 /* ------------------------------------------------------------------ */
 
@@ -1461,7 +2086,10 @@ static void usage(void) {
         L"  octopus-sandbox-helper.exe probe\n"
         L"  octopus-sandbox-helper.exe run --job <name> --mem-mb <n> --pkg <moniker>\n"
         L"      --proxy <host:port> --ca <path> --bootstrap <path> --node <nodePath>\n"
-        L"      -- <argv...>\n");
+        L"      -- <argv...>\n"
+        L"  octopus-sandbox-helper.exe grant-acl --pkg <moniker> --path <dir>\n"
+        L"  octopus-sandbox-helper.exe teardown --job <name> --pkg <moniker>\n"
+        L"      --copydir <dir>\n");
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -1490,9 +2118,17 @@ int wmain(int argc, wchar_t **argv) {
         return cmd_run(argc, argv, 2);
     }
 
-    /* Unknown subcommand. Later tasks (8, 9) will add `grant-acl` and
-     * `teardown` arms here; keep this a plain if/else chain so adding them
-     * is a one-line change each. */
+    if (wcscmp(argv[1], L"grant-acl") == 0) {
+        return cmd_grant_acl(argc, argv, 2);
+    }
+
+    if (wcscmp(argv[1], L"teardown") == 0) {
+        return cmd_teardown(argc, argv, 2);
+    }
+
+    /* Unknown subcommand. Task 9 adds the privileged companion-service RPC
+     * arm(s) here; keep this a plain if/else chain so adding them is a
+     * one-line change each. */
     fwprintf(stderr, L"octopus-sandbox-helper: unknown subcommand '%ls'\n", argv[1]);
     usage();
     return 2;
