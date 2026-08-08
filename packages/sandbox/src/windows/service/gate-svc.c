@@ -296,6 +296,46 @@ static BOOL json_get_uint(const char *json, const char *key,
     return TRUE;
 }
 
+/*
+ * json_get_bool -- extract a boolean value for `key` into *out. Accepts only
+ * the bare JSON literals `true` / `false` (no quotes, no 1/0). Returns TRUE on
+ * a clean extraction; FALSE when the key is absent or the value is not one of
+ * those literals. Matches the strict, hand-rolled idiom of json_get_string /
+ * json_get_uint above: the service never guesses a value it cannot parse.
+ */
+static BOOL json_get_bool(const char *json, const char *key, BOOL *out) {
+    char needle[64];
+    const char *p;
+    size_t klen;
+
+    if (json == NULL || key == NULL || out == NULL) return FALSE;
+
+    klen = strlen(key);
+    if (klen == 0 || klen + 3 > sizeof(needle)) return FALSE;
+    needle[0] = '"';
+    memcpy(needle + 1, key, klen);
+    needle[1 + klen] = '"';
+    needle[2 + klen] = '\0';
+
+    p = strstr(json, needle);
+    if (p == NULL) return FALSE;
+    p += klen + 2;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != ':') return FALSE;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+
+    if (strncmp(p, "true", 4) == 0) {
+        *out = TRUE;
+        return TRUE;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *out = FALSE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 /* ------------------------------------------------------------------ */
 /* Session lease                                                       */
 /* ------------------------------------------------------------------ */
@@ -1295,6 +1335,7 @@ static int handle_request(HANDLE engine, const char *body,
         char proxyHost[OCT_PROXYHOST_MAX];
         char jobName[OCT_JOBNAME_MAX];
         unsigned long proxyPort = 0;
+        BOOL proxyV6Loopback = FALSE; /* fail-closed default: no V6 permit */
         OCT_LEASE lease;
         HRESULT hr;
 
@@ -1308,9 +1349,17 @@ static int handle_request(HANDLE engine, const char *body,
             return (wrote < 0) ? -1 : wrote;
         }
 
+        /* Read the explicit proxyV6Loopback the Task 10 client sends (exact
+         * key name "proxyV6Loopback"). The service must not guess: when the
+         * field is present it drives install_gate's hasV6Loopback; when absent
+         * the fail-closed FALSE default stands (rule 3 omitted, rule 4 blocks
+         * all V6). install_gate still force-enables the V6 permit when
+         * proxyHost is ::1 (gate-svc.c isLoopbackV6 path), so a TRUE here is
+         * only meaningful for a dual-binding V4 proxy. */
+        (void)json_get_bool(body, "proxyV6Loopback", &proxyV6Loopback);
+
         hr = install_gate(engine, sessionId, packageSid, proxyHost, proxyPort,
-                          jobName, FALSE /* hasV6Loopback from v4 host */,
-                          &lease);
+                          jobName, proxyV6Loopback, &lease);
         if (FAILED(hr)) {
             diag(L"install-gate", (DWORD)hr);
             wrote = sprintf_s(respBuf, respCap,
