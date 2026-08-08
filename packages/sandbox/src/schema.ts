@@ -113,6 +113,21 @@ export const SandboxConfigSchema = z
             .object({ manifestPath: z.string() })
             .strict()
             .optional(),
+          /**
+           * Trusted Windows restricted-runtime identity. `manifestPath` is
+           * the host path of the verified Windows runtime closure manifest
+           * (Node exe + bootstrap.cjs + vendored undici). `.strict()`
+           * rejects unknown nested fields so a typo cannot silently weaken
+           * the gate.
+           */
+          windowsRuntime: z
+            .object({
+              manifestPath: z.string(),
+              nodePath: z.string(),
+              bootstrapPath: z.string(),
+            })
+            .strict()
+            .optional(),
           vmRuntime: z
             .object({
               rootfs: ImmutableImageRefSchema,

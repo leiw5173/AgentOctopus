@@ -20,6 +20,17 @@ export interface ResolvedRuntimeProfile {
    * profiles intended for the Darwin restricted OS backend.
    */
   readonly darwinRuntime?: { manifestPath: string };
+  /**
+   * Trusted Windows restricted-runtime identity. `manifestPath` is the host
+   * path of the verified Windows runtime closure manifest (Node exe +
+   * bootstrap.cjs + vendored undici). Present only on profiles intended for
+   * the Windows restricted backend.
+   */
+  readonly windowsRuntime?: {
+    manifestPath: string;
+    nodePath: string;
+    bootstrapPath: string;
+  };
   readonly vmRuntime?: {
     rootfs: string;
     memMib: number;
@@ -107,8 +118,10 @@ export interface BackendPrepareOptions extends SandboxPolicy {
   proxyAddr: string;
   caBundlePath: string;
   runtimeProfile: ResolvedRuntimeProfile;
-  guestSkillRoot: '/skill';
-  guestCaBundlePath: '/etc/skill-ca/ca.pem';
+  /** Each backend asserts its own canonical value (docker/linux/vm assert '/skill'; windows asserts the staged-copy path). */
+  guestSkillRoot: string;
+  /** Each backend asserts its own canonical value (docker/linux/vm assert '/etc/skill-ca/ca.pem'; windows asserts the staged-copy path). */
+  guestCaBundlePath: string;
 }
 
 export interface SandboxBackend {
