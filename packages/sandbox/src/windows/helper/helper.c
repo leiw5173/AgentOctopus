@@ -46,12 +46,36 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
-/* Request a Windows 8+ API surface so AppContainer / capability-SID
- * prototypes in <userenv.h> and <securitybaseapi.h> are visible. The
- * helper's minimum target is Windows 10; NTDDI_WIN10_* would also work but
- * WIN8 is the floor for every API we call here. */
+/* API surface targeting.
+ *
+ * The helper's minimum target is Windows 10. Two independent gates must be
+ * set BEFORE any SDK header is included, because scripts/build-win-helper.mjs
+ * passes NO /D for either (verified — compileObj/linkExe carry only
+ * /nologo /c /W4 /WX /O2 /std:c17 /Fo); the file must self-define them:
+ *
+ *   _WIN32_WINNT  = 0x0A00 (WIN10)   -- selects the Win10 API surface.
+ *   NTDDI_VERSION = NTDDI_WIN10      -- gates the SDK declarations that are
+ *                                       wrapped in #if (NTDDI_VERSION >=
+ *                                       NTDDI_WIN10). This covers
+ *                                       DeriveCapabilitySidsFromName
+ *                                       (securitybaseapi.h) and the LPAC
+ *                                       PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY
+ *                                       constant used by launch_sandboxed,
+ *                                       both of which are Win10-gated.
+ *                                       Task 6's CreateAppContainerProfile
+ *                                       is Win8+ and already covered, but
+ *                                       the single Win10 floor keeps the
+ *                                       whole file consistent.
+ *
+ * NTDDI_WIN10 is defined in <sdkddkver.h>; we cannot reference it before
+ * including a header, so we set NTDDI_VERSION to its literal value
+ * (0x0A000000) and let <sdkddkver.h> (pulled in by <windows.h>) confirm it.
+ * The #ifndef guards let a future build-script /D override win. */
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0602 /* _WIN32_WINNT_WIN8 */
+#define _WIN32_WINNT 0x0A00 /* _WIN32_WINNT_WIN10 */
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION 0x0A000000 /* NTDDI_WIN10 */
 #endif
 
 #include <windows.h>
@@ -400,26 +424,94 @@ static int cmd_probe(void) {
  * CreateProcessW command line.
  *
  * CreateProcessW's lpCommandLine is parsed by the child with
- * CommandLineToArgvW rules: an argument containing whitespace or a quote
- * must be wrapped in double quotes, embedded quotes escaped as \", and a
- * trailing backslash before a closing quote escaped as \\. Node's own
- * argv does not normally need this (it is "node.exe -e <code>" with the
- * code quoted), but the -- <argv...> tail is arbitrary skill input, so
- * every argument is quoted defensively.
+ * CommandLineToArgvW rules (see append_quoted). Node's own argv does not
+ * normally need elaborate quoting (it is "node.exe -e <code>"), but the
+ * -- <argv...> tail is arbitrary skill input, so every argument is quoted
+ * defensively via append_quoted.
  *
  * Returns a LocalAlloc'd, NUL-terminated command line on success; caller
  * frees with LocalFree. NULL on allocation failure.
  */
+/*
+ * append_quoted -- append one argument to a CreateProcessW command line,
+ * wrapped in double quotes with the full CommandLineToArgvW escaping rule.
+ *
+ * CommandLineToArgvW (and the MSVC CRT argument parser Node uses) treats a
+ * backslash as literal EXCEPT when it precedes a double quote:
+ *   - 2n backslashes followed by a quote  -> n literal backslashes; the
+ *     quote is an argument delimiter.
+ *   - 2n+1 backslashes followed by a quote -> n literal backslashes; the
+ *     quote is a LITERAL character (escaped).
+ *   - backslashes not followed by a quote (including at end of the raw arg)
+ *     are literal.
+ *
+ * To round-trip an arbitrary raw argument we therefore emit, for each
+ * maximal run of N backslashes:
+ *   - run followed by a '"'     -> 2N backslashes, then '\"'  (escape the quote)
+ *   - run at end of argument    -> 2N backslashes              (protect the closing quote)
+ *   - run before any other char -> N backslashes               (literal)
+ * and we always wrap the whole argument in double quotes. This handles
+ * backslashes-before-quote EVERYWHERE in the argument, not just at the end.
+ *
+ * The output buffer must have room for at least 2*wcslen(arg)+2 wide chars
+ * (the caller's worst-case bound guarantees this). *ppw is advanced past
+ * the appended text.
+ */
+static void append_quoted(LPWSTR *ppw, PCWSTR arg) {
+    LPWSTR w = *ppw;
+    PCWSTR r = arg;
+
+    *w++ = L'"';
+    while (*r != L'\0') {
+        if (*r == L'\\') {
+            /* Measure the maximal backslash run. */
+            PCWSTR bs = r;
+            SIZE_T n;
+            while (*bs == L'\\') bs++;
+            n = (SIZE_T)(bs - r);
+            if (*bs == L'"') {
+                /* Run before a quote: double it, then escape the quote. */
+                SIZE_T k;
+                for (k = 0; k < 2 * n; k++) *w++ = L'\\';
+                *w++ = L'\\';
+                *w++ = L'"';
+                r = bs + 1; /* consumed the run AND the quote */
+            } else if (*bs == L'\0') {
+                /* Trailing run at end of arg: double it to protect the
+                 * closing quote we are about to emit. */
+                SIZE_T k;
+                for (k = 0; k < 2 * n; k++) *w++ = L'\\';
+                r = bs; /* consumed the run; loop sees the NUL and exits */
+            } else {
+                /* Run before an ordinary char: literal. */
+                SIZE_T k;
+                for (k = 0; k < n; k++) *w++ = L'\\';
+                r = bs; /* leave the ordinary char for the next iteration */
+            }
+        } else if (*r == L'"') {
+            /* A bare quote (not preceded by a backslash run): escape it. */
+            *w++ = L'\\';
+            *w++ = L'"';
+            r++;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w++ = L'"';
+
+    *ppw = w;
+}
+
 static LPWSTR build_command_line(PCWSTR nodePath, PCWSTR *argv) {
-    /* Worst-case length: every char of every arg could need a backslash
-     * escape, plus two quotes and a space per arg, plus the NUL. Compute
-     * the exact length first, then build. */
+    /* Worst-case length: every input char can produce at most 2 output
+     * chars (a run of N backslashes before a quote yields 2N+2 from N+1
+     * input chars, i.e. <= 2x), plus the two wrapping quotes and one
+     * separating space per arg, plus the terminating NUL. */
     SIZE_T len = 0;
     SIZE_T i;
     LPWSTR out = NULL;
     LPWSTR w;
 
-    /* nodePath (always quoted). */
     len += wcslen(nodePath) * 2 + 2 + 1;
 
     if (argv != NULL) {
@@ -433,42 +525,13 @@ static LPWSTR build_command_line(PCWSTR nodePath, PCWSTR *argv) {
     if (out == NULL) return NULL;
     w = out;
 
-    /* Append one quoted argument. */
-    #define APPEND_QUOTED(s)                                          \
-        do {                                                          \
-            PCWSTR _r = (s);                                          \
-            *w++ = L'"';                                              \
-            while (*_r != L'\0') {                                    \
-                if (*_r == L'"') {                                    \
-                    *w++ = L'\\';                                     \
-                    *w++ = L'"';                                      \
-                } else if (*_r == L'\\') {                            \
-                    /* Copy the backslash run; if the next char is    \
-                     * the closing quote we must double the run. */   \
-                    PCWSTR _bs = _r;                                  \
-                    while (*_bs == L'\\') _bs++;                      \
-                    if (*_bs == L'\0') {                              \
-                        /* Trailing backslashes before the closing    \
-                         * quote: double them. */                     \
-                        while (_r < _bs) { *w++ = L'\\'; *w++ = L'\\'; _r++; } \
-                    } else {                                          \
-                        while (_r < _bs) { *w++ = L'\\'; _r++; }      \
-                    }                                                 \
-                } else {                                              \
-                    *w++ = *_r++;                                     \
-                }                                                     \
-            }                                                         \
-            *w++ = L'"';                                              \
-        } while (0)
-
-    APPEND_QUOTED(nodePath);
+    append_quoted(&w, nodePath);
     if (argv != NULL) {
         for (i = 0; argv[i] != NULL; i++) {
             *w++ = L' ';
-            APPEND_QUOTED(argv[i]);
+            append_quoted(&w, argv[i]);
         }
     }
-    #undef APPEND_QUOTED
 
     *w = L'\0';
     return out;
@@ -541,7 +604,19 @@ static LPWSTR build_child_environment(const SANDBOX_LAUNCH_ARGS *args,
     }
 
     /* Each injected entry is "NAME=VALUE". Build them into LocalAlloc'd
-     * buffers so they can be sorted and freed uniformly. */
+     * buffers so they can be sorted and freed uniformly.
+     *
+     * SCHEME CONTRACT (unresolved — owned by Task 8, the TS caller): the
+     * helper passes args->proxyHostPort through VERBATIM as the value of
+     * HTTP_PROXY and HTTPS_PROXY. Spec §4d mandates the value be
+     * "http://127.0.0.1:<proxyPort>" (a full scheme-qualified URL), but the
+     * test currently passes a bare "host:port" and undici's ProxyAgent also
+     * accepts a bare host:port. Whether the helper prepends "http://" or the
+     * TS caller (Task 8) supplies a scheme-qualified value is NOT decided in
+     * Task 7 — the reviewer deferred scheme ownership to Task 8. The helper
+     * therefore does NO scheme normalization here; if Task 8 settles on a
+     * bare host:port from the TS side, the helper must prepend "http://" at
+     * this assignment. Do not silently change one side without the other. */
     {
         PCWSTR injectNames[INJECT_COUNT] = {
             L"NODE_OPTIONS", L"HTTP_PROXY", L"HTTPS_PROXY",
@@ -772,14 +847,6 @@ static HRESULT relay_init(RELAY_PIPE *p, int kind) {
 fail:
     if (p->childEnd != NULL) { CloseHandle(p->childEnd); p->childEnd = NULL; }
     if (p->parentEnd != NULL) { CloseHandle(p->parentEnd); p->parentEnd = NULL; }
-    return hr;
-}
-
-fail:
-    if (p->childEnd != NULL) CloseHandle(p->childEnd);
-    if (p->parentEnd != NULL) CloseHandle(p->parentEnd);
-    p->childEnd = NULL;
-    p->parentEnd = NULL;
     return hr;
 }
 
@@ -1090,8 +1157,11 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     cmdLine = build_command_line(args->nodePath, args->argv);
     if (cmdLine == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
 
-    si.cb = sizeof(si);
-    si.StartupInfo.cb = sizeof(si.StartupInfo);
+    /* STARTUPINFOEXW has no top-level cb member; the embedded STARTUPINFOW's
+     * cb must be set to the size of the FULL extended struct
+     * (sizeof(STARTUPINFOEXW)), per the CreateProcessW docs — otherwise the
+     * EXTENDED_STARTUPINFO_PRESENT attribute list is not honored. */
+    si.StartupInfo.cb = sizeof(STARTUPINFOEXW);
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     si.StartupInfo.hStdInput = inPipe.childEnd;
     si.StartupInfo.hStdOutput = outPipe.childEnd;
@@ -1311,7 +1381,11 @@ static void usage_run(void) {
  */
 static int cmd_run(int argc, wchar_t **argv, int startIdx) {
     SANDBOX_LAUNCH_ARGS a;
-    PCWSTR childArgv = NULL;
+    /* Points at the first element of the NULL-terminated tail of argv that
+     * follows the literal "--" separator. &argv[i] has type wchar_t **,
+     * which decays to PCWSTR * — matching SANDBOX_LAUNCH_ARGS.argv. NULL
+     * when no "--" tail was given. */
+    PCWSTR *childArgv = NULL;
     DWORD memMb = 0;
     DWORD childExit = 0;
     HRESULT hr;
@@ -1324,7 +1398,11 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
         if (wcscmp(f, L"--") == 0) {
             i++;
             if (i < argc) {
-                childArgv = (PCWSTR)&argv[i];
+                /* argv is wchar_t **; &argv[i] is wchar_t **, which the
+                 * struct member (PCWSTR *) accepts — the pointed-to strings
+                 * are treated as read-only. The tail is NULL-terminated
+                 * because wmain's argv[argc] is NULL. */
+                childArgv = (PCWSTR *)&argv[i];
             }
             break;
         }
