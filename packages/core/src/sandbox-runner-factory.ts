@@ -10,15 +10,15 @@
  * `minIsolationLevel` the run fails with NO_SATISFYING_BACKEND — never a host
  * fallback.
  *
- * Sync `createDefaultSandboxRunner` builds Docker + OS only (no regression for
- * existing callers / Executor constructor). Async
+ * Sync `createDefaultSandboxRunner` builds Docker + OS + Windows (no
+ * regression for existing callers / Executor constructor). Async
  * `createDefaultSandboxRunnerAsync` additionally tries the optional VM backend
  * via `createVmBackend` and includes it only when the native package is
  * present and complete.
  */
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DockerBackend, OsSandboxBackend, type SandboxBackend, type SecretProvider } from '@agentoctopus/sandbox';
+import { DockerBackend, OsSandboxBackend, WinSandboxBackend, type SandboxBackend, type SecretProvider } from '@agentoctopus/sandbox';
 import { getConfig, getConfigDir } from './config-resolver.js';
 import { SandboxRunner } from './sandbox-runner.js';
 import {
@@ -51,6 +51,7 @@ export function createDefaultSandboxRunner(secretProvider?: SecretProvider, opti
   const backends: SandboxBackend[] = [
     new DockerBackend({ config, sessionId }),
     new OsSandboxBackend({ sessionId }),
+    new WinSandboxBackend({ sessionId }),
   ];
   return new SandboxRunner({
     config,
@@ -83,6 +84,7 @@ export async function createDefaultSandboxRunnerAsync(
   const backends: SandboxBackend[] = [
     new DockerBackend({ config, sessionId }),
     new OsSandboxBackend({ sessionId }),
+    new WinSandboxBackend({ sessionId }),
   ];
 
   const assemble = deps?.createVmBackend ?? createVmBackend;
