@@ -155,6 +155,12 @@ export class WinSandboxBackend implements SandboxBackend {
    * resolve identically.
    */
   private cleanupOutcome: { error?: ContainmentCleanupError } | undefined;
+  /**
+   * One-shot ExecSpec.stdin payload stashed by run() and consumed by the next
+   * spawn() (forwarded to the launcher's HelperSpawnOptions.stdin). Undefined
+   * for the persistent spawn() path, whose stdin is a live pipe.
+   */
+  private pendingOneShotStdin: string | Uint8Array | undefined;
 
   constructor(opts: WinSandboxBackendOptions) {
     if (!opts.sessionId || typeof opts.sessionId !== 'string') {
@@ -377,9 +383,20 @@ export class WinSandboxBackend implements SandboxBackend {
     // stderr}. The persistent spawn() path uses the same helper via the
     // injected launcher and adapts the result into a SandboxProcess. Tests
     // inject launchSandboxed; production wiring binds the stdio relay.
+    //
+    // Stdin: run() stashes its one-shot ExecSpec.stdin payload on
+    // `pendingOneShotStdin` before delegating here; it is forwarded to the
+    // launcher via HelperSpawnOptions.stdin so spawnHelper writes + closes it
+    // on the helper's stdin (the helper relays it to the sandboxed child).
+    // The persistent spawn() path has no buffered payload (SpawnSpec.stdin is
+    // 'pipe'), so this is undefined there and the helper's stdin stays a live
+    // pipe — its streaming is a Task-12 concern (the reviewer scoped the
+    // one-shot adaptation as the v1 boundary).
     const launch = this.deps.launchSandboxed ?? launchSandboxed;
     const memMb = Math.max(1, Math.round(opts.resources.memoryBytes / (1024 * 1024)));
     const { host: proxyHost, port: proxyPort } = parseProxyAddr(opts.proxyAddr);
+    const oneShotStdin = this.pendingOneShotStdin;
+    this.pendingOneShotStdin = undefined;
 
     const resultPromise = launch(
       {
@@ -392,10 +409,10 @@ export class WinSandboxBackend implements SandboxBackend {
         nodePath: win.nodePath,
         argv: spec.command,
       },
-      undefined,
+      oneShotStdin !== undefined ? { stdin: oneShotStdin } : undefined,
     );
 
-    return adaptHelperResult(resultPromise, opts, spec);
+    return adaptHelperResult(resultPromise, opts, spec, oneShotStdin);
   }
 
   // -------------------------------------------------------------------------
@@ -403,10 +420,18 @@ export class WinSandboxBackend implements SandboxBackend {
   // -------------------------------------------------------------------------
 
   async run(spec: ExecSpec): Promise<BackendRunResult> {
-    const proc = await this.spawn({ ...spec, stdin: 'pipe' });
+    // Stash the one-shot stdin payload so spawn() forwards it to the launcher's
+    // HelperSpawnOptions.stdin — spawnHelper writes it to the helper's stdin
+    // and closes it (the helper relays it to the sandboxed child). This honors
+    // the ExecSpec.stdin contract ("run() writes stdin then closes stdin")
+    // against the REAL child, not a readerless buffer.
     if (typeof spec.stdin === 'string' || spec.stdin instanceof Uint8Array) {
-      proc.stdin.write(spec.stdin);
+      this.pendingOneShotStdin = spec.stdin;
     }
+    const proc = await this.spawn({ ...spec, stdin: 'pipe' });
+    // The SandboxProcess.stdin pipe is a no-op sink for the one-shot path (the
+    // payload already flowed to the launcher above); close it so a caller that
+    // also writes here does not block.
     proc.stdin.end();
     try {
       return await proc.exited;
@@ -594,16 +619,27 @@ function parseProxyAddr(addr: string): { host: string; port: number } {
  * exit is a RESULT, not a wrapper failure. For the DI-driven test path the
  * launcher resolves with {exitCode, stdout, stderr}; the streams expose that
  * captured output and `exited` resolves the BackendRunResult.
+ *
+ * `oneShotStdin` (run() only) has ALREADY been forwarded to the launcher's
+ * HelperSpawnOptions.stdin, so the payload reached the real child; the
+ * returned `stdin` PassThrough is drained (a no-op sink) so any incidental
+ * write to it cannot block. For the persistent spawn() path `oneShotStdin` is
+ * undefined and the live-pipe streaming of `stdin` is a Task-12 concern.
  */
 function adaptHelperResult(
   resultPromise: Promise<{ exitCode: number; stdout: string; stderr: string }>,
   opts: BackendPrepareOptions,
   spec: SpawnSpec,
+  oneShotStdin?: string | Uint8Array,
 ): SandboxProcess {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const timeoutMs = spec.timeoutMs ?? opts.resources.timeoutMs;
+  // Drain the stdin sink: for the one-shot path the payload already flowed to
+  // the launcher, so bytes written here are discarded. resume() keeps the
+  // writable side from filling its buffer and blocking a caller.
+  if (oneShotStdin !== undefined) stdin.resume();
 
   const exited = (async (): Promise<BackendRunResult> => {
     let timedOut = false;

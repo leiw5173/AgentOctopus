@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { WinSandboxBackend } from '../../src/windows/win-backend.js';
 import { stageVerifiedCopy } from '../../src/windows/stage-copy.js';
+import { spawnHelper } from '../../src/windows/helper-spawn.js';
 import { ContainmentCleanupError } from '../../src/backend.js';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -272,5 +273,101 @@ describe('WinSandboxBackend cleanup (memoized first outcome + ContainmentCleanup
     expect(calls).toContain('removeCopyDir');
     // Resolves identically on repeat.
     await b.cleanup();
+  });
+});
+
+describe('WinSandboxBackend run() stdin plumbing (ExecSpec.stdin contract)', () => {
+  const PREPARE_OPTS = {
+    snapshotRoot: '/x',
+    expectedSnapshotDigest: DIGEST,
+    proxyAddr: 'http://127.0.0.1:8080',
+    caBundlePath: '/ca.pem',
+    runtimeProfile: {
+      id: 'r', bins: [], path: '',
+      windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
+    },
+    guestSkillRoot: 'g', guestCaBundlePath: 'c',
+    resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
+  } as never;
+
+  it('forwards the one-shot stdin payload to the launcher as HelperSpawnOptions.stdin', async () => {
+    let capturedStdin: unknown;
+    let capturedOpts: unknown;
+    const b = new WinSandboxBackend({
+      sessionId: 'sess',
+      deps: {
+        ...okDeps(),
+        stageCopy: async () => ({ guestSkillRoot: 'gs', guestCaBundlePath: 'gc' }),
+        deriveLoopbackSid: async () => 'S-1-15-3-1',
+        grantRead: async () => {},
+        installGate: async () => ({ filterKeys: ['k'] }),
+        // Capture the second (HelperSpawnOptions) argument.
+        launchSandboxed: async (_args: unknown, opts: unknown) => {
+          capturedOpts = opts;
+          capturedStdin = (opts as { stdin?: unknown } | undefined)?.stdin;
+          return { exitCode: 0, stdout: 'out', stderr: '' };
+        },
+        teardownSandbox: async () => {},
+        removeGate: async () => {},
+        removeCopyDir: async () => {},
+      } as never,
+    });
+    await b.probe();
+    await b.prepareTopology();
+    await b.prepare(PREPARE_OPTS);
+
+    const res = await b.run({ command: ['main.js'], stdin: 'hello-stdin-payload' } as never);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe('out');
+    // The payload reached the launcher (and would be written to the helper's
+    // stdin by spawnHelper), NOT dropped into a readerless buffer.
+    expect(capturedStdin).toBe('hello-stdin-payload');
+    expect((capturedOpts as { stdin?: unknown }).stdin).toBe('hello-stdin-payload');
+  });
+
+  it('omits HelperSpawnOptions.stdin when run() has no payload', async () => {
+    let capturedOpts: unknown;
+    let called = false;
+    const b = new WinSandboxBackend({
+      sessionId: 'sess',
+      deps: {
+        ...okDeps(),
+        stageCopy: async () => ({ guestSkillRoot: 'gs', guestCaBundlePath: 'gc' }),
+        deriveLoopbackSid: async () => 'S-1-15-3-1',
+        grantRead: async () => {},
+        installGate: async () => ({ filterKeys: ['k'] }),
+        launchSandboxed: async (_args: unknown, opts: unknown) => {
+          called = true;
+          capturedOpts = opts;
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+        teardownSandbox: async () => {},
+        removeGate: async () => {},
+        removeCopyDir: async () => {},
+      } as never,
+    });
+    await b.probe();
+    await b.prepareTopology();
+    await b.prepare(PREPARE_OPTS);
+    await b.run({ command: ['main.js'] } as never);
+    expect(called).toBe(true);
+    // No payload → no stdin option passed (helper stdin stays a plain pipe).
+    expect(capturedOpts).toBeUndefined();
+  });
+});
+
+describe('spawnHelper stdin option (write + close the child stdin)', () => {
+  it('writes the payload to the spawned child stdin', async () => {
+    // Use node itself as a stand-in "helper" that echoes its stdin to stdout,
+    // so we can assert the payload actually flowed through the stdin pipe.
+    const echoScript = `
+      let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{process.stdout.write(d);});
+    `;
+    const res = await spawnHelper(['-e', echoScript], {
+      exePath: process.execPath,
+      stdin: 'payload-through-stdin',
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe('payload-through-stdin');
   });
 });
