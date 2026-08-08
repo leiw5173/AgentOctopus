@@ -46,7 +46,7 @@ A trusted `runtimeProfiles` entry may declare `darwinRuntime.manifestPath` — t
 
 ## Trusted Windows runtime identity
 
-A trusted `runtimeProfiles` entry may declare `windowsRuntime` — `{ manifestPath, nodePath, bootstrapPath }`, the verified Windows Node runtime closure (Node exe + `bootstrap.cjs` + vendored undici) used by the Windows restricted backend. The manifest is verified at `probe()` with the same strict digest/size/mode discipline as the Darwin runtime manifest; the nested object is strict, so unknown fields are rejected at config parse time. The helper launches the skill via `windowsRuntime.nodePath` with `NODE_OPTIONS=--require <windowsRuntime.bootstrapPath>` so every `fetch`/`http`/`https` call converges on the per-session egress proxy.
+A trusted `runtimeProfiles` entry may declare `windowsRuntime` — `{ manifestPath, nodePath, bootstrapPath }`, the verified Windows Node runtime closure (Node exe + `bootstrap.cjs` + vendored undici) used by the Windows restricted backend. The manifest is verified at `probe()` with strict digest + size checks per entry (sha256 and byte size; there is no executable-mode bit on NTFS, so — unlike the Darwin runtime manifest — no mode check). The nested object is strict, so unknown fields are rejected at config parse time. The helper launches the skill via `windowsRuntime.nodePath` with `NODE_OPTIONS=--require <windowsRuntime.bootstrapPath>` so every `fetch`/`http`/`https` call converges on the per-session egress proxy.
 
 ## Windows restricted backend
 

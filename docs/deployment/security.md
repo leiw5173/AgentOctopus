@@ -66,7 +66,7 @@ See [Configuration](../getting-started/configuration.md) for all available setti
 
 The native Windows backend (`WinSandboxBackend`) relies on a **privileged companion service**, `OctopusSandboxGate`, installed once with elevation:
 
-- Runs as a Windows service (`LocalSystem`, `SERVICE_AUTO_START`) from a manifest-verified exe (`octopus-sandbox-gate-svc.exe`).
+- Runs as a Windows service (`LocalSystem`, `SERVICE_AUTO_START`) from a build-produced exe (`octopus-sandbox-gate-svc.exe`). The build script (`build-win-helper.mjs`) writes a per-artifact manifest for the helper and service exes, but `probe()` does not re-verify those manifests at runtime — only the `windowsRuntime` closure (Node exe + `bootstrap.cjs` + vendored undici) is manifest-verified (sha256 + size) at probe time.
 - Owns every write to the per-session **WFP (Windows Filtering Platform) egress allowlist** — the persistent provider/sublayer/filters that scope a sandboxed skill to `TCP 127.0.0.1:<proxyPort>` (and `TCP [::1]:<proxyPort>` when the proxy dual-binds) and block all other connects for the skill's AppContainer package SID. WFP filter add/remove requires administrator rights (`FWPM_ACTRL_ADD` + `FWPM_ACTRL_ADD_LINK`), which is why this component exists; the sandboxed skill execution itself is unprivileged.
 - Exposes a strictly-ACL'd named-pipe RPC at `\\.\pipe\octopus-sandbox-gate` (DACL allows only Builtin Administrators, LocalSystem, and the interactive user) with **exactly two operations** — `install-gate` and `remove-gate`. It is not a general WFP write proxy; any other op is refused.
 - **Service-side verification on remove.** On `remove-gate` the service does not trust the caller: it resolves the recorded session lease, opens the named Job Object itself, confirms the Job is dead/empty (`ActiveProcesses == 0`), verifies the request's package SID and filter keys match the lease, and refuses the deletion otherwise — the gate stays (fail-closed). A service crash can only leave a fail-closed *block* filter; the startup sweep reclaims filters whose Jobs are already dead.
@@ -78,7 +78,7 @@ The native Windows backend (`WinSandboxBackend`) relies on a **privileged compan
 - It is selectable only via the explicit opt-in `defaultBackend:'windows'` + `minIsolationLevel:'restricted'`. Under `auto`, or with a `full` floor, it is never picked — a missing full backend fails closed with `NoFullBackendError`.
 - If the companion service is absent or unresponsive, `probe()` returns `false` and the backend is simply unavailable — there is no unprivileged degraded mode that would widen network access.
 
-Operators should treat the companion service as part of the host's trusted computing base: it is privileged, always-on, and its binary is manifest-verified at probe time, but a compromised service widens the host attack surface. Install it only on hosts where Windows sandboxing is actually needed.
+Operators should treat the companion service as part of the host's trusted computing base: it is privileged, always-on, and — while its exe carries a build-time manifest — that manifest is not re-verified at probe time (only the runtime closure is), so a compromised service widens the host attack surface. Install it only on hosts where Windows sandboxing is actually needed.
 
 ## VM release trust root
 

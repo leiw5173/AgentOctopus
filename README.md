@@ -25,7 +25,7 @@ User: "Translate hello to French"
 | **Multi-Agent** | Isolate agents with separate workspaces, models, and skill registries |
 | **Multi-Channel** | CLI, REST API, Slack, Discord, Telegram, WebSocket WebChat, generic Webhooks |
 | **Skill Composition** | Chain skills into execution DAGs with input/output mapping |
-| **Sandbox Execution** | Skills run in a fail-closed isolation backend (Docker / privileged Linux / VM / Windows restricted) — never on the host |
+| **Sandbox Execution** | Skills run in a fail-closed isolation backend (Docker / privileged Linux / macOS restricted / VM / Windows restricted) — never on the host |
 | **DM Security** | Pairing mode for unknown direct-message senders |
 | **Self-Evolving** | Skills auto-improve based on execution signals and user feedback |
 
