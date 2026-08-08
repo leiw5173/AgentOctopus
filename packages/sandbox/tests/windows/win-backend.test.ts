@@ -92,7 +92,7 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
           id: 'r', bins: [], path: '',
           windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
         },
-        guestSkillRoot: 'g', guestCaBundlePath: 'c',
+        guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
         resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
       } as never),
     ).rejects.toThrow(/probe/);
@@ -112,7 +112,7 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
           id: 'r', bins: [], path: '',
           windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
         },
-        guestSkillRoot: 'g', guestCaBundlePath: 'c',
+        guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
         resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
       } as never),
     ).rejects.toThrow(/expectedSnapshotDigest/);
@@ -129,10 +129,63 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
         proxyAddr: 'http://127.0.0.1:8080',
         caBundlePath: '/ca.pem',
         runtimeProfile: { id: 'r', bins: [], path: '' },
-        guestSkillRoot: 'g', guestCaBundlePath: 'c',
+        guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
         resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
       } as never),
     ).rejects.toThrow(/windowsRuntime/);
+  });
+
+  it('prepare throws when staged guestSkillRoot does not match opts.guestSkillRoot (fail-closed contract)', async () => {
+    const b = new WinSandboxBackend({
+      sessionId: 't',
+      deps: {
+        ...okDeps(),
+        // The fake stageCopy returns a DIFFERENT path than the runner declared.
+        stageCopy: async () => ({ guestSkillRoot: '/wrong/skill', guestCaBundlePath: '/session/ca.pem' }),
+      } as never,
+    });
+    await b.probe();
+    await b.prepareTopology();
+    await expect(
+      b.prepare({
+        snapshotRoot: '/x',
+        expectedSnapshotDigest: DIGEST,
+        proxyAddr: 'http://127.0.0.1:8080',
+        caBundlePath: '/ca.pem',
+        runtimeProfile: {
+          id: 'r', bins: [], path: '',
+          windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
+        },
+        guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
+        resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
+      } as never),
+    ).rejects.toThrow(/guestSkillRoot mismatch/);
+  });
+
+  it('prepare throws when staged guestCaBundlePath does not match opts.guestCaBundlePath (fail-closed contract)', async () => {
+    const b = new WinSandboxBackend({
+      sessionId: 't',
+      deps: {
+        ...okDeps(),
+        stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/wrong/ca.pem' }),
+      } as never,
+    });
+    await b.probe();
+    await b.prepareTopology();
+    await expect(
+      b.prepare({
+        snapshotRoot: '/x',
+        expectedSnapshotDigest: DIGEST,
+        proxyAddr: 'http://127.0.0.1:8080',
+        caBundlePath: '/ca.pem',
+        runtimeProfile: {
+          id: 'r', bins: [], path: '',
+          windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
+        },
+        guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
+        resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
+      } as never),
+    ).rejects.toThrow(/guestCaBundlePath mismatch/);
   });
 });
 
@@ -202,7 +255,7 @@ describe('WinSandboxBackend cleanup (memoized first outcome + ContainmentCleanup
       sessionId: 'sess',
       deps: {
         ...okDeps(),
-        stageCopy: async () => ({ guestSkillRoot: 'gs', guestCaBundlePath: 'gc' }),
+        stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
         deriveLoopbackSid: async () => 'S-1-15-3-1',
         grantRead: async () => { calls.push('grantRead'); },
         installGate: async () => { calls.push('installGate'); return { filterKeys: ['k'] }; },
@@ -225,7 +278,7 @@ describe('WinSandboxBackend cleanup (memoized first outcome + ContainmentCleanup
       id: 'r', bins: [], path: '',
       windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
     },
-    guestSkillRoot: 'g', guestCaBundlePath: 'c',
+    guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
     resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
   } as never;
 
@@ -286,7 +339,7 @@ describe('WinSandboxBackend run() stdin plumbing (ExecSpec.stdin contract)', () 
       id: 'r', bins: [], path: '',
       windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
     },
-    guestSkillRoot: 'g', guestCaBundlePath: 'c',
+    guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
     resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
   } as never;
 
@@ -297,7 +350,7 @@ describe('WinSandboxBackend run() stdin plumbing (ExecSpec.stdin contract)', () 
       sessionId: 'sess',
       deps: {
         ...okDeps(),
-        stageCopy: async () => ({ guestSkillRoot: 'gs', guestCaBundlePath: 'gc' }),
+        stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
         deriveLoopbackSid: async () => 'S-1-15-3-1',
         grantRead: async () => {},
         installGate: async () => ({ filterKeys: ['k'] }),
@@ -332,7 +385,7 @@ describe('WinSandboxBackend run() stdin plumbing (ExecSpec.stdin contract)', () 
       sessionId: 'sess',
       deps: {
         ...okDeps(),
-        stageCopy: async () => ({ guestSkillRoot: 'gs', guestCaBundlePath: 'gc' }),
+        stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
         deriveLoopbackSid: async () => 'S-1-15-3-1',
         grantRead: async () => {},
         installGate: async () => ({ filterKeys: ['k'] }),

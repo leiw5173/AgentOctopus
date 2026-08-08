@@ -298,13 +298,17 @@ describe('SandboxRunner — windows staged-copy guest paths (spec §3)', () => {
 // ---------------------------------------------------------------------------
 
 describe('createDefaultSandboxRunner — windows backend registration', () => {
+  function backendKinds(runner: object): string[] {
+    // SandboxRunner keeps backends private; bracket access is the test seam
+    // (same pattern as sandbox-vm-assembly.test.ts).
+    const backends = (runner as unknown as { backends: { kind: string }[] }).backends;
+    return backends.map((b) => b.kind);
+  }
+
   it('sync builder includes a windows backend in the runner backends list', async () => {
     const { createDefaultSandboxRunner } = await import('../src/sandbox-runner-factory.js');
     const runner = createDefaultSandboxRunner();
-    // The runner's backends are private; we observe registration indirectly
-    // by checking the constructor did not throw and the runner exists.
-    expect(runner).toBeDefined();
-    expect(runner).toBeInstanceOf(SandboxRunner);
+    expect(backendKinds(runner)).toContain('windows');
   });
 
   it('async builder includes a windows backend in the runner backends list', async () => {
@@ -312,7 +316,6 @@ describe('createDefaultSandboxRunner — windows backend registration', () => {
     const runner = await createDefaultSandboxRunnerAsync(undefined, {
       createVmBackend: async () => ({ unavailable: true }),
     });
-    expect(runner).toBeDefined();
-    expect(runner).toBeInstanceOf(SandboxRunner);
+    expect(backendKinds(runner)).toContain('windows');
   });
 });

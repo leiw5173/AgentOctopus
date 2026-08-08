@@ -36,8 +36,8 @@ export function defaultSnapshotStoreDir(): string {
  * Backends are constructed fresh (a new sessionId per runner) so each runner
  * owns its topology; `probe()`/`selectBackend` decide which is actually used.
  *
- * Sync form: Docker + OS only. Prefer `createDefaultSandboxRunnerAsync` when
- * the optional VM native package should be considered.
+ * Sync form: Docker + OS + Windows. Prefer `createDefaultSandboxRunnerAsync`
+ * when the optional VM native package should be considered.
  *
  * An optional `secretProvider` may be injected (built once at the composition
  * root via buildSecretProviderFromConfig). When omitted, the runner defaults to

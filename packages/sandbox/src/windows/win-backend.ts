@@ -318,14 +318,35 @@ export class WinSandboxBackend implements SandboxBackend {
     // re-verify it byte-for-byte against expectedSnapshotDigest (spec §3,
     // Decision 3). A digest mismatch throws before any ACL grant or gate
     // install — the copy is never used unverified.
+    //
+    // The staged copy lands where the runner declared: path.dirname of the
+    // runner-computed guestSkillRoot (the runner's per-session sessionDir).
+    // This keeps the staged copy inside the runner's sessionDir so the
+    // runner's session cleanup owns wholesale removal, and the backend's
+    // own cleanup handles only the Job / gate / profile.
     const stageCopy = this.deps.stageCopy ?? stageVerifiedCopy;
-    this.copyDir = path.join(this.workDir, 'stage');
+    this.copyDir = path.dirname(opts.guestSkillRoot);
     this.staged = await stageCopy({
       snapshotRoot: opts.snapshotRoot,
       caBundlePath: opts.caBundlePath,
       expectedDigest: opts.expectedSnapshotDigest,
       sessionDir: this.copyDir,
     });
+
+    // Step 4b: assert the staged copy landed exactly where the runner
+    // declared — the literal guest-path contract shared by every backend
+    // (docker asserts '/skill'; os/vm assert their literals; windows asserts
+    // the staged-copy paths). Fail-closed on mismatch.
+    if (this.staged.guestSkillRoot !== opts.guestSkillRoot) {
+      throw new WindowsSandboxError(
+        `staged guestSkillRoot mismatch: expected '${opts.guestSkillRoot}', got '${this.staged.guestSkillRoot}'`,
+      );
+    }
+    if (this.staged.guestCaBundlePath !== opts.guestCaBundlePath) {
+      throw new WindowsSandboxError(
+        `staged guestCaBundlePath mismatch: expected '${opts.guestCaBundlePath}', got '${this.staged.guestCaBundlePath}'`,
+      );
+    }
 
     try {
       // Step 5: grant the skill's LPAC SIDs READ-only DACL on the staged copy.
