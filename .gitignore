@@ -100,4 +100,5 @@ competition/
 # local build/runtime artifacts
 .pnpm-store/
 packages/sandbox-vm-native/prebuilds/
+packages/sandbox/prebuilds/
 apps/cli/skills/.registry-cache.json
