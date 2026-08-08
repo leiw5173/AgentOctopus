@@ -738,7 +738,6 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
      * ================================================================ */
     if (isLoopbackV4) {
         FWPM_FILTER_CONDITION0 cond[4];
-        FWP_V4_ADDR_AND_MASK addr;
         FWP_CONDITION_VALUE sidVal;
         FWP_CONDITION_VALUE protoVal;
         FWP_CONDITION_VALUE addrVal;
@@ -746,20 +745,31 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         GUID key;
 
         ZeroMemory(cond, sizeof(cond));
-        /* WFP compares IPv4 condition addresses in NETWORK byte order, so
-         * 127.0.0.1 (0x7F000001 host order) is stored as 0x0100007F. With a
-         * full /32 mask the match is exact. (FWP_UINT32 would also be valid
-         * for this condition; the masked form makes the exact-match intent
-         * explicit and parallels the V6 rule's FWP_V6_ADDR_MASK.) */
-        addr.addr = 0x0100007Fu; /* 127.0.0.1, network byte order */
-        addr.mask = 0xFFFFFFFFu; /* /32 */
+        /* Remote address: 127.0.0.1. We use the FWP_UINT32 encoding, which
+         * FWPM_CONDITION_IP_REMOTE_ADDRESS also accepts alongside
+         * FWP_V4_ADDR_MASK (verified against MS Learn). The two encodings
+         * differ in byte order, which is exactly why FWP_UINT32 is chosen
+         * here:
+         *   - FWP_UINT32 for this condition is NETWORK byte order (Microsoft's
+         *     examples pass inet_addr("x.x.x.x"), which returns network order),
+         *     so 127.0.0.1 is 0x0100007F.
+         *   - The FWP_V4_ADDR_AND_MASK struct, by contrast, holds the address
+         *     in HOST order per its own struct page (127.0.0.1 == 0x7F000001),
+         *     making it the ambiguity-prone choice.
+         * We hardcode the network-order constant rather than call inet_addr:
+         * the V4 permit path is only reached when proxyHost is the fixed
+         * loopback "127.0.0.1" (the isLoopbackV4 gate above), so no runtime
+         * parse is needed, and avoiding Winsock keeps the import surface
+         * minimal (no Ws2_32.lib / no WSAStartup). */
+        addrVal.type = FWP_UINT32;
+        addrVal.uint32 = 0x0100007Fu; /* 127.0.0.1, network byte order */
 
         sidVal.type = FWP_SID;
         sidVal.sid = packageSidBin;
         protoVal.type = FWP_UINT8;
         protoVal.uint8 = IPPROTO_TCP;
-        addrVal.type = FWP_V4_ADDR_MASK;
-        addrVal.v4AddrMask = &addr;
+        /* addrVal (FWP_UINT32, network order) is set above where the byte-order
+         * rationale is documented. */
         portVal.type = FWP_UINT16;
         portVal.uint16 = (UINT16)proxyPort;
 
@@ -827,6 +837,11 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
 
         ZeroMemory(cond, sizeof(cond));
         ZeroMemory(&addr6, sizeof(addr6));
+        /* FWP_V6_ADDR_AND_MASK.addr is a 16-BYTE array, so unlike the V4 case
+         * there is NO host/network byte-order ambiguity: an IPv6 address is a
+         * byte sequence, not an integer. ::1 is 15 zero bytes then a trailing
+         * 0x01 (== in6addr_loopback), in wire order. prefixLength 128 = exact
+         * host match. */
         memcpy(addr6.addr, loopback6, 16);
         addr6.prefixLength = 128; /* exact host match */
 
