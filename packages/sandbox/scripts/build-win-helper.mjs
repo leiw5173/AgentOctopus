@@ -5,7 +5,7 @@
  * verifyWindowsRuntimeManifest() (src/windows/runtime-manifest.ts).
  *
  * Produces (gitignored, reproducible) under prebuilds/windows-x64/:
- *   octopus-sandbox-helper.exe            (helper, Tasks 7-8 C source)
+ *   octopus-sandbox-helper.exe            (helper, Task 6 C source)
  *   octopus-sandbox-helper.exe.manifest.json   (per-artifact)
  *   octopus-sandbox-gate-svc.exe          (companion gate service)
  *   octopus-sandbox-gate-svc.exe.manifest.json (per-artifact)
@@ -13,7 +13,8 @@
  *                                          undici closure; schemaVersion 1,
  *                                          consumable by the Task 4 verifier)
  *
- * Compile target: src/windows/helper.c and src/windows/gate-svc.c with MSVC
+ * Compile target: src/windows/helper/helper.c and src/windows/service/gate-svc.c
+ * with MSVC
  * cl.exe, located via vswhere (VS Installer) first, then PATH. The runtime
  * closure vendors: node.exe (from the running Node on the Windows host —
  * process.execPath), images/runtime/bootstrap.cjs, and the pinned undici
@@ -46,8 +47,8 @@ const execFileAsync = promisify(execFile);
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(HERE, '..');
-const HELPER_SRC = path.join(PKG_ROOT, 'src', 'windows', 'helper.c');
-const GATE_SVC_SRC = path.join(PKG_ROOT, 'src', 'windows', 'gate-svc.c');
+const HELPER_SRC = path.join(PKG_ROOT, 'src', 'windows', 'helper', 'helper.c');
+const GATE_SVC_SRC = path.join(PKG_ROOT, 'src', 'windows', 'service', 'gate-svc.c');
 const BOOTSTRAP_PATH = path.join(PKG_ROOT, 'images', 'runtime', 'bootstrap.cjs');
 const UNDICI_DIR = path.join(PKG_ROOT, 'images', 'runtime', 'undici');
 const IMAGES_LOCK_PATH = path.join(PKG_ROOT, 'images', 'images.lock.json');
@@ -313,12 +314,12 @@ async function buildFull(cl, targetDir) {
   await writePerArtifactManifest(
     `${helperExe}.manifest.json`,
     await manifestEntryFor(helperExe),
-    { kind: 'win-helper-c', file: 'src/windows/helper.c' },
+    { kind: 'win-helper-c', file: 'src/windows/helper/helper.c' },
   );
   await writePerArtifactManifest(
     `${gateSvcExe}.manifest.json`,
     await manifestEntryFor(gateSvcExe),
-    { kind: 'win-gate-svc-c', file: 'src/windows/gate-svc.c' },
+    { kind: 'win-gate-svc-c', file: 'src/windows/service/gate-svc.c' },
   );
 
   // Runtime closure manifest (consumable by verifyWindowsRuntimeManifest).
@@ -401,8 +402,8 @@ async function main() {
     die(`unsupported host arch '${process.arch}' — expected x64 (${TARGET_PLATFORM_ARCH}).`);
   }
 
-  await requireFile(HELPER_SRC, 'Task 7 creates src/windows/helper.c.');
-  await requireFile(GATE_SVC_SRC, 'Task 8 creates src/windows/gate-svc.c.');
+  await requireFile(HELPER_SRC, 'Task 6 creates src/windows/helper/helper.c.');
+  await requireFile(GATE_SVC_SRC, 'Task 9 creates src/windows/service/gate-svc.c.');
 
   const cl = await findCl();
   if (!cl) {
