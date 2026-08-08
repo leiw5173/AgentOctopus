@@ -62,6 +62,24 @@ See [Configuration](../getting-started/configuration.md) for all available setti
 - No user data is persisted beyond session memory (30 min TTL)
 - Rate limiting is configurable per tier
 
+## Windows sandbox companion service
+
+The native Windows backend (`WinSandboxBackend`) relies on a **privileged companion service**, `OctopusSandboxGate`, installed once with elevation:
+
+- Runs as a Windows service (`LocalSystem`, `SERVICE_AUTO_START`) from a manifest-verified exe (`octopus-sandbox-gate-svc.exe`).
+- Owns every write to the per-session **WFP (Windows Filtering Platform) egress allowlist** — the persistent provider/sublayer/filters that scope a sandboxed skill to `TCP 127.0.0.1:<proxyPort>` (and `TCP [::1]:<proxyPort>` when the proxy dual-binds) and block all other connects for the skill's AppContainer package SID. WFP filter add/remove requires administrator rights (`FWPM_ACTRL_ADD` + `FWPM_ACTRL_ADD_LINK`), which is why this component exists; the sandboxed skill execution itself is unprivileged.
+- Exposes a strictly-ACL'd named-pipe RPC at `\\.\pipe\octopus-sandbox-gate` (DACL allows only Builtin Administrators, LocalSystem, and the interactive user) with **exactly two operations** — `install-gate` and `remove-gate`. It is not a general WFP write proxy; any other op is refused.
+- **Service-side verification on remove.** On `remove-gate` the service does not trust the caller: it resolves the recorded session lease, opens the named Job Object itself, confirms the Job is dead/empty (`ActiveProcesses == 0`), verifies the request's package SID and filter keys match the lease, and refuses the deletion otherwise — the gate stays (fail-closed). A service crash can only leave a fail-closed *block* filter; the startup sweep reclaims filters whose Jobs are already dead.
+
+**Honest scope.** The Windows backend provides **`restricted` isolation — not kernel isolation and never `full`**:
+
+- It is **not a VM**: no kernel-memory or side-channel isolation, and no defense against a malicious skill exploiting a Windows kernel vulnerability.
+- The network boundary is the WFP allowlist plus the withheld internet/LAN capabilities on the LPAC token; the filesystem/registry boundary is LPAC DACL isolation at Low Integrity Level; resource bounding and teardown come from the Job Object (`KILL_ON_JOB_CLOSE`).
+- It is selectable only via the explicit opt-in `defaultBackend:'windows'` + `minIsolationLevel:'restricted'`. Under `auto`, or with a `full` floor, it is never picked — a missing full backend fails closed with `NoFullBackendError`.
+- If the companion service is absent or unresponsive, `probe()` returns `false` and the backend is simply unavailable — there is no unprivileged degraded mode that would widen network access.
+
+Operators should treat the companion service as part of the host's trusted computing base: it is privileged, always-on, and its binary is manifest-verified at probe time, but a compromised service widens the host attack surface. Install it only on hosts where Windows sandboxing is actually needed.
+
 ## VM release trust root
 
 The native VM backend (`@agentoctopus/sandbox-vm-native`) ships a **signed

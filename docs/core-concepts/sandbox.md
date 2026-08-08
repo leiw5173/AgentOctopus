@@ -36,12 +36,34 @@ After `selectBackend` and BEFORE any topology creation or proxy launch, the runn
 - `docker` backend → profile requires `dockerImage` (rejects a `darwinRuntime`-only profile)
 - `os` backend at `full` isolation (Linux) → profile requires `osRuntime` (rejects a `darwinRuntime`-only profile)
 - `os` backend at `restricted` isolation (Darwin) → profile requires `darwinRuntime` (rejects `dockerImage`-only and `osRuntime`-only profiles)
+- `windows` backend at `restricted` isolation → profile requires `windowsRuntime` (rejects `dockerImage`-only, `osRuntime`-only, and `darwinRuntime`-only profiles)
 
 A **mixed** profile carrying several identity blocks satisfies each backend via the field relevant to that backend, so one trusted profile can serve both Linux and macOS hosts. The fail-fast guarantees a mismatched config never creates topology or starts a proxy.
 
 ## Trusted Darwin runtime identity
 
 A trusted `runtimeProfiles` entry may declare `darwinRuntime.manifestPath` — the host path of the verified macOS Node runtime closure manifest used by the Darwin restricted OS backend. The manifest is trusted config (never skill input) and the nested object is strict: unknown fields are rejected at config parse time. On Darwin the bare `node` command maps directly to the verified executable from the closure; the guest PATH is derived from that executable's directory, never from the profile's `path` field (which only applies to Linux/Docker guests).
+
+## Trusted Windows runtime identity
+
+A trusted `runtimeProfiles` entry may declare `windowsRuntime` — `{ manifestPath, nodePath, bootstrapPath }`, the verified Windows Node runtime closure (Node exe + `bootstrap.cjs` + vendored undici) used by the Windows restricted backend. The manifest is verified at `probe()` with the same strict digest/size/mode discipline as the Darwin runtime manifest; the nested object is strict, so unknown fields are rejected at config parse time. The helper launches the skill via `windowsRuntime.nodePath` with `NODE_OPTIONS=--require <windowsRuntime.bootstrapPath>` so every `fetch`/`http`/`https` call converges on the per-session egress proxy.
+
+## Windows restricted backend
+
+The `WinSandboxBackend` (`packages/sandbox/src/windows/win-backend.ts`) executes skills on a bare Windows 10/11 host — no WSL, no Docker Desktop, no Hyper-V. Its isolation target is **`restricted`, never `full`**: it is not a VM and provides no kernel-memory or side-channel isolation. Selection mirrors the restricted-OS opt-in contract: a `kind:'windows'` backend reporting `restricted` is selectable **only** when `defaultBackend:'windows'` AND `minIsolationLevel:'restricted'`; under `auto`, or with any `full` floor, it is excluded even when `probe()` succeeds.
+
+The backend layers four user-mode Windows primitives:
+
+- **Job Object** — resource limits (memory, CPU time, process count) plus `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` for guaranteed process-tree teardown. Launch is race-free: `CreateProcess(... CREATE_SUSPENDED ...)` → `SetInformationJobObject` → `AssignProcessToJobObject` → `ResumeThread`, so the child is inside the Job before any user code runs. The Job is **named** so a separate teardown path (or a fresh helper after a TS crash) can terminate it cross-process.
+- **LPAC (Less-Privileged AppContainer)** — capability-based DACL isolation of files, registry, processes, and windows at Low Integrity Level, with the `ALL APPLICATION PACKAGES` grants opted out (LPAC only — no regular-AppContainer fallback; if the verified Node runtime cannot run under LPAC the backend fails closed). The token carries only the loopback capability — no `internetClient`/`privateNetworkClientServer` — so direct internet/LAN is denied at the ALE layer.
+- **Persistent WFP egress allowlist** — because the loopback capability opens *every* localhost port, a set of **persistent** Windows Filtering Platform filters scoped to the skill's AppContainer package SID (`FWPM_CONDITION_ALE_PACKAGE_ID`) permits only `TCP 127.0.0.1:<proxyPort>` (and `TCP [::1]:<proxyPort>` when the proxy dual-binds) and blocks everything else for that SID: all other V4/V6, all UDP, internet, LAN, and every other loopback port. The egress proxy is the only reachable endpoint; a skill that ignores the proxy has no network at all. Persistent (not dynamic) filters mean a crash can only leave a fail-closed block, never widened access.
+- **Privileged companion service** — WFP filter add/remove requires administrator rights, so a minimal auto-start Windows service (`OctopusSandboxGate`, LocalSystem) owns all WFP writes. It is installed once, elevated; per-skill execution itself stays unprivileged. The service exposes a strictly-ACL'd named-pipe RPC (`\\.\pipe\octopus-sandbox-gate`, DACL limited to Administrators/LocalSystem/the interactive user) with **exactly two operations** — `install-gate` and `remove-gate` — and is not a general WFP write proxy. On `remove-gate` the service itself resolves the session lease, opens the named Job, and refuses deletion unless the Job is confirmed dead/empty and the package SID + filter keys match the lease (it does not trust the caller).
+
+**Snapshot delivery is a per-session copy.** AppContainer shares the host filesystem namespace (no bind-map), so `prepare()` stages a per-session copy of the verified snapshot + CA, re-verifies it byte-for-byte against `expectedSnapshotDigest` (TOCTOU guard), and grants the skill's LPAC SIDs READ-only DACL on the copy. Cleanup deletes the whole session directory — the shared snapshot store's DACL is never edited. The backend's `guestSkillRoot`/`guestCaBundlePath` are these staged-copy paths (each backend asserts its own canonical values; docker/linux/vm keep the Linux literals).
+
+**Cleanup ordering is containment-critical.** `cleanup()` terminates the named Job and confirms it empty **before** asking the service to remove the WFP filters: if the Job cannot be confirmed dead the filters stay and a `ContainmentCleanupError` is thrown (never delete the gate while the process may be alive). A post-death filter-removal failure leaves a leftover *block* filter — fail-closed residue, a soft degradation, not a containment breach. Cleanup memoizes the first outcome (identical contract to the other backends).
+
+**Availability precondition (honest):** the backend is available only when the companion service is installed and responsive — `probe()` verifies the trusted runtime manifest, self-tests the helper (Job/SID/LPAC), and installs + removes a throwaway gate; any failure returns `false` and `selectBackend` omits the backend. There is **no unprivileged degraded mode**: without the service there is no Windows sandbox, and the run fail-closes per `minIsolationLevel`. Skills declare eligibility with `os: [windows]` (the router compares the exact string `windows`, not `win32`); skills that omit `os` are eligible on Windows and must actually work there.
 
 ## Env hygiene
 
