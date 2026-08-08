@@ -829,6 +829,114 @@ jobs:
       - name: Run macOS restricted or fail-closed unavailable branch
         run: pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/macos-restricted-lane.test.ts --reporter=verbose
 
+  # windows-restricted — the Windows analog of macos-restricted: a RESTRICTED
+  # lane that NEVER claims full isolation. It is where the native Windows
+  # sandbox backend (Tasks 6-9/11, authored correct-by-construction on macOS)
+  # gets its first authoritative validation on a real Windows host. The lane
+  # builds the helper + companion gate service + trusted runtime via
+  # build-win-helper.mjs, installs + starts the OctopusSandboxGate service in
+  # the runner's elevated context, then runs the tests/windows behavioral
+  # suite (helper sid/probe/run/teardown, gate-svc, win-backend) with a
+  # zero-skip assertion so a C compile error, an artifact gap, or a missing
+  # service fails the lane VISIBLY instead of silently skipping (the tests
+  # gate on win32 + the helper exe / the live service pipe, and
+  # assert-no-skipped-tests.mjs fails on ANY skipped test — fail-closed).
+  #
+  # ELEVATED-CONTEXT ASSUMPTION: GitHub-hosted windows-latest runners execute
+  # steps as an administrator (the default runneradmin account is a local
+  # admin), so `sc.exe create`/`sc.exe start` for a LocalSystem auto-start
+  # service is permitted. This lane runs on the HOSTED pool only; it is NOT a
+  # self-hosted privileged runner. If a future hosted image revokes that admin
+  # context the service-install step fails LOUDLY (exit non-zero) rather than
+  # degrading to a skip — the suite cannot pass without the gate installed.
+  windows-restricted:
+    name: windows-restricted
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+      - name: Build sandbox package
+        run: pnpm --filter @agentoctopus/sandbox build
+      # Build the trusted Windows artifacts: helper exe, gate-svc exe, and the
+      # verified runtime closure (node.exe + bootstrap.cjs + vendored undici)
+      # under prebuilds/windows-x64/. build-win-helper.mjs is fail-closed: a
+      # missing cl.exe, C source, or runtime input exits non-zero, and it never
+      # leaves a half-linked fake ".exe". The helper exe MUST be produced here —
+      # helper-*.test.ts skip unless prebuilds/windows-x64/octopus-sandbox-helper.exe
+      # exists, and the zero-skip gate below turns any such skip into a failure.
+      - name: Build Windows helper, gate service, and trusted runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node packages/sandbox/scripts/build-win-helper.mjs
+          $helper = 'packages/sandbox/prebuilds/windows-x64/octopus-sandbox-helper.exe'
+          $svc    = 'packages/sandbox/prebuilds/windows-x64/octopus-sandbox-gate-svc.exe'
+          $rt     = 'packages/sandbox/prebuilds/windows-x64/runtime.manifest.json'
+          foreach ($f in @($helper, $svc, $rt)) {
+            if (-not (Test-Path $f)) {
+              Write-Error "ERROR: build-win-helper did not produce $f — full build is required on this lane (compile-only smoke is not enough)."
+            }
+          }
+      # Install + start the companion gate service (elevated). The exe has NO
+      # self-install mode (only `(no args)` = SCM service entry, and
+      # `--run-foreground` = console debug), so register it via sc.exe as a
+      # LocalSystem, auto-start service pointing at the built exe, then start it.
+      # gate-svc.test.ts drives the INSTALLED+RUNNING service over its named pipe
+      # and skips when the pipe is absent — so a failed install/start here must
+      # fail the lane, never fall through to a silent skip. Resolve the exe to an
+      # ABSOLUTE path: the SCM does not inherit the step's working directory.
+      - name: Install and start the OctopusSandboxGate service (elevated)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $svc = (Resolve-Path 'packages/sandbox/prebuilds/windows-x64/octopus-sandbox-gate-svc.exe').Path
+          # Idempotent across reruns on a reused image: remove any stale
+          # registration first (best-effort), then create + start fresh.
+          & sc.exe stop OctopusSandboxGate 2>$null | Out-Null
+          & sc.exe delete OctopusSandboxGate 2>$null | Out-Null
+          # sc.exe requires `name= value` with the space AFTER `=`.
+          & sc.exe create OctopusSandboxGate binPath= "$svc" start= auto obj= LocalSystem
+          if ($LASTEXITCODE -ne 0) { Write-Error "sc.exe create failed (exit $LASTEXITCODE) — the runner lacks the elevated context this lane requires." }
+          & sc.exe start OctopusSandboxGate
+          if ($LASTEXITCODE -ne 0) { Write-Error "sc.exe start failed (exit $LASTEXITCODE) — the gate service did not start; the WFP allowlist cannot be installed." }
+          # Confirm the service reached RUNNING before the suite probes its pipe.
+          $deadline = (Get-Date).AddSeconds(30)
+          do {
+            $status = (sc.exe query OctopusSandboxGate | Out-String)
+            if ($status -match 'STATE\s*:\s*4\s+RUNNING') { break }
+            Start-Sleep -Milliseconds 500
+          } while ((Get-Date) -lt $deadline)
+          if ($status -notmatch 'STATE\s*:\s*4\s+RUNNING') {
+            & sc.exe query OctopusSandboxGate | Out-Null
+            Write-Error "OctopusSandboxGate did not reach RUNNING within 30s:`n$status"
+          }
+          Write-Output "OctopusSandboxGate service is RUNNING (LocalSystem, auto-start)."
+      # Behavioral suite: helper sid/probe/run/teardown, gate-svc RPC, and the
+      # win-backend lifecycle/fail-closed contract. default reporter -> the CI
+      # log; json -> a file for the zero-skip assertion (same split as the
+      # privileged-linux and vm lanes). No lane-specific retry config: these are
+      # fast in-process / named-pipe tests, not resource-constrained VM boots.
+      - name: Run Windows restricted behavioral suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'windows-security.json'
+          pnpm --filter @agentoctopus/sandbox exec vitest run `
+            tests/windows `
+            --reporter=json --reporter=default `
+            --outputFile.json=$report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node packages/sandbox/scripts/assert-no-skipped-tests.mjs $report
+      # Leave the hosted runner clean. Best-effort: a missing or already-stopped
+      # service is not an error, and this must never mask the suite result.
+      - name: Stop and remove the OctopusSandboxGate service
+        if: always()
+        shell: pwsh
+        run: |
+          & sc.exe stop OctopusSandboxGate 2>$null | Out-Null
+          & sc.exe delete OctopusSandboxGate 2>$null | Out-Null
+          Write-Output "OctopusSandboxGate service removed (best-effort)."
+
   # Probe whether this macOS runner can actually create a Hypervisor VM.
   # GitHub-hosted macos-15 runners run INSIDE an Apple Virtualization.framework
   # guest, and HVF does NOT grant nested hv_vm_create to guests — so the G1/G2
@@ -1079,7 +1187,7 @@ jobs:
   security-gate:
     name: security-gate
     if: always()
-    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted, vm-lane]
+    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted, windows-restricted, vm-lane]
     runs-on: ubuntu-latest
     steps:
       - name: Require every security lane
@@ -1088,6 +1196,7 @@ jobs:
           PRODUCER_RESULT: ${{ needs.produce-linux-artifacts.result }}
           LINUX_RESULT: ${{ needs.privileged-linux.result }}
           MACOS_RESULT: ${{ needs.macos-restricted.result }}
+          WINDOWS_RESULT: ${{ needs.windows-restricted.result }}
           VM_RESULT: ${{ needs.vm-lane.result }}
         run: |
           test "$HOSTED_RESULT" = success
@@ -1105,6 +1214,12 @@ jobs:
             exit 1
           fi
           test "$MACOS_RESULT" = success
+          # windows-restricted is a hosted RESTRICTED lane that must always
+          # succeed — it has no fork-guard skip and no environment-specific
+          # qualification skip (unlike privileged-linux / vm-lane). It is the
+          # Windows analog of macos-restricted and never claims full isolation.
+          # An unexpected skip, failure, or cancellation is fail-closed here.
+          test "$WINDOWS_RESULT" = success
           # vm-lane is an environment-specific QUALIFICATION gate, not an
           # unconditional hosted-CI gate. It is 'skipped' ONLY for the recognized
           # nested-virtualization limitation (vm-hvf-probe found HVF unavailable
