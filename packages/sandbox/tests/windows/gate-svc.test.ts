@@ -17,9 +17,18 @@
 // (a one-time elevated step); when the pipe is absent the tests skip too.
 import { describe, it, expect } from 'vitest';
 import net from 'node:net';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const PIPE = '\\\\.\\pipe\\octopus-sandbox-gate';
+
+const run = promisify(execFile);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const HELPER_EXE = path.join(HERE, '..', '..', 'prebuilds', 'windows-x64', 'octopus-sandbox-helper.exe');
 
 // On Windows a named pipe is not a filesystem object, so existsSync() is not
 // a reliable probe. We treat "can we connect" as the availability signal and
@@ -106,35 +115,136 @@ async function serviceReachable(): Promise<boolean> {
 }
 
 const reachable = await serviceReachable();
+// The live-Job remove-gate test additionally needs the built helper exe to
+// create + populate a real named Job. Off Windows (or before the helper is
+// built) every test in this file skips — it must never fail or block.
+const helperReady = isWin && existsSync(HELPER_EXE);
 const itSvc = reachable ? it : it.skip;
+const itSvcLiveJob = (reachable && helperReady) ? it : it.skip;
 
 describe('gate service (OctopusSandboxGate)', () => {
-  itSvc('installs a gate, then refuses remove-gate while the named Job is alive', async () => {
-    // install-gate returns the per-session filter keys. The Job name here is
-    // a FAKE live job stand-in: because the service cannot confirm it dead,
-    // remove-gate must be refused (Acceptance #9, spec §4c service-side
-    // verification). We do NOT create a real Job; an unresolvable/absent Job
-    // is reported differently from a confirmed-dead one, and the test asserts
-    // the refuse invariant for the "not confirmed dead" case by using a Job
-    // name that maps to a genuinely running job object in the full CI lane.
+  itSvcLiveJob('installs a gate, then refuses remove-gate while the named Job is alive', async () => {
+    // Acceptance #9 (spec §4c) is the fail-closed invariant: the service must
+    // NOT remove a session's WFP filters while that session's Job is alive.
+    //
+    // The service's job_confirmed_dead() correctly treats OpenJobObjectW ==
+    // ERROR_FILE_NOT_FOUND as DEAD (a Job that no longer exists IS gone). So a
+    // FAKE job name exercises the "Job already gone" path (remove-gate ->
+    // ok:true), NOT the "Job alive" path this test claims. The run-1 version
+    // passed jobName 'OctJob-s1' without ever creating a real Job and asserted
+    // ok:false — which was wrong: the service (correctly, fail-safe) saw the
+    // Job as gone and removed the gate. Service behavior is correct; the test
+    // premise was not.
+    //
+    // To genuinely test the alive invariant we must create a REAL, live, named
+    // Job. Node cannot call CreateJobObjectW, but the helper.exe CAN: `run`
+    // creates the named Job and assigns the child to it. Launch a LONG-LIVED
+    // child under `--job OctJob-s1`; while that child runs, the service opens
+    // OctJob-s1 and sees ActiveProcesses>0, so remove-gate MUST be refused
+    // (ok:false). Afterwards we kill the child so the Job drains and the gate
+    // can be removed (cleanup), and assert removal then succeeds (ok:true).
+    const sessionId = 's1';
+    const jobName = 'OctJob-s1';
+    const pkg = 'AgentOctopus.Sandbox.gate1';
+
+    // Stage a real loadable bootstrap + CA and grant the LPAC SIDs read access
+    // (same reasoning as helper-run.test.ts): the LPAC child cannot read
+    // arbitrary temp paths, and cannot read node.exe's install dir by default.
+    const node = process.execPath;
+    const stage = mkdtempSync(path.join(tmpdir(), 'oct-gate-svc-'));
+    const bootstrap = path.join(stage, 'bootstrap.cjs');
+    const ca = path.join(stage, 'ca.pem');
+    writeFileSync(bootstrap, '// empty bootstrap for gate-svc live-job test\n');
+    writeFileSync(ca, '');
+    await run(HELPER_EXE, ['grant-acl', '--pkg', pkg, '--path', stage]);
+    await run(HELPER_EXE, ['grant-acl', '--pkg', pkg, '--path', path.dirname(node)]).catch(() => {});
+
+    // Launch the long-lived child detached (do NOT await — it runs ~5 min).
+    // We capture its stderr via the process object so a launch failure is
+    // diagnosable from the CI log. unref() so the test process is not held.
+    const child = execFile(HELPER_EXE, [
+      'run',
+      '--job', jobName,
+      '--mem-mb', '256',
+      '--pkg', pkg,
+      '--proxy', '127.0.0.1:1',
+      '--ca', ca,
+      '--bootstrap', bootstrap,
+      '--node', node,
+      '--',
+      '-e', 'setTimeout(()=>{},300000)',
+    ], (err, stdout, stderr) => {
+      if (err) {
+        console.error('[gate-svc] long-lived helper exited:',
+          '\n  code=', (err as any).code,
+          '\n  stdout=<<<', stdout, '>>>',
+          '\n  stderr=<<<', stderr, '>>>');
+      }
+    });
+    child.unref();
+
+    // Give the helper a moment to create the Job, assign the child, and resume
+    // it. 1500ms is generous for process+job setup on a CI runner.
+    await new Promise((r) => setTimeout(r, 1500));
+
+    try {
+      const ins = await rpc({
+        op: 'install-gate',
+        sessionId,
+        packageSid: 'S-1-15-2-1',
+        proxyHost: '127.0.0.1',
+        proxyPort: 8080,
+        jobName,
+      });
+      expect(ins.ok).toBe(true);
+      expect(Array.isArray(ins.filterKeys)).toBe(true);
+      expect(ins.filterKeys.length).toBeGreaterThan(0);
+
+      // remove-gate MUST be refused while the Job is alive: the service
+      // resolves the lease, opens the named Job, sees ActiveProcesses>0, and
+      // keeps the gate (fail-closed) reporting ok:false.
+      const rem = await rpc({ op: 'remove-gate', sessionId });
+      console.error('[gate-svc] remove-gate while Job alive ->', JSON.stringify(rem));
+      expect(rem.ok).toBe(false);
+    } finally {
+      // Kill the long-lived child so the Job drains, then removal must succeed.
+      // KILL_ON_JOB_CLOSE guarantees the child dies with the Job; killing the
+      // helper tears down the whole tree. Best-effort: the lane is ephemeral.
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      rmSync(stage, { recursive: true, force: true });
+    }
+
+    // After the child dies the Job is empty/gone; remove-gate now succeeds.
+    // Poll briefly — KILL_ON_JOB_CLOSE unwind is not instantaneous.
+    let removed: any = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      removed = await rpc({ op: 'remove-gate', sessionId });
+      if (removed.ok === true) break;
+    }
+    console.error('[gate-svc] remove-gate after Job drained ->', JSON.stringify(removed));
+    expect(removed.ok).toBe(true);
+  });
+
+  itSvc('remove-gate on a nonexistent Job succeeds (Job is genuinely gone)', async () => {
+    // Precise fail-closed contract for the OTHER branch: a Job that no longer
+    // exists IS dead (OpenJobObjectW == ERROR_FILE_NOT_FOUND), so remove-gate
+    // proceeds and returns ok:true. This is the service's correct, fail-safe
+    // behavior — complementary to the alive-Job refusal asserted above. We use
+    // a fresh session with a Job name that was never created.
     const ins = await rpc({
       op: 'install-gate',
-      sessionId: 's1',
+      sessionId: 's-gone',
       packageSid: 'S-1-15-2-1',
       proxyHost: '127.0.0.1',
       proxyPort: 8080,
-      jobName: 'OctJob-s1',
+      jobName: 'OctJob-never-existed',
     });
     expect(ins.ok).toBe(true);
-    expect(Array.isArray(ins.filterKeys)).toBe(true);
-    expect(ins.filterKeys.length).toBeGreaterThan(0);
 
-    // remove-gate MUST be refused: the service resolves the lease, opens the
-    // named Job itself, and only deletes the WFP filters after confirming the
-    // Job is dead/empty. With the Job not confirmed dead the gate stays
-    // (fail-closed) and the RPC reports ok:false.
-    const rem = await rpc({ op: 'remove-gate', sessionId: 's1' });
-    expect(rem.ok).toBe(false);
+    const rem = await rpc({ op: 'remove-gate', sessionId: 's-gone' });
+    console.error('[gate-svc] remove-gate nonexistent Job ->', JSON.stringify(rem));
+    expect(rem.ok).toBe(true);
   });
 
   itSvc('rejects a malformed / oversized frame without crashing', async () => {

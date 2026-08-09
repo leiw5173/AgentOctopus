@@ -52,6 +52,23 @@ describe('helper run', () => {
       // the bootstrap and exits non-zero before the -e script runs.
       await run(EXE, ['grant-acl', '--pkg', 'AgentOctopus.Sandbox.t1', '--path', stage]);
 
+      // LPAC read-access gap (run-2 fix): production stages the skill copy AND
+      // the trusted runtime closure (node.exe + bootstrap.cjs + undici) under a
+      // tree it grants. This test points --node at the HOST process.execPath,
+      // whose install dir the LPAC token almost certainly cannot read/execute —
+      // CreateProcess then fails with ACCESS_DENIED (0x80070005) and the helper
+      // relays exit 1, indistinguishable from the child exiting 1. Grant
+      // READ+EXECUTE on node.exe's install dir too so the LPAC child can load
+      // the runtime. grant-acl takes a directory, so pass path.dirname(node).
+      const nodeDir = path.dirname(node);
+      const gNode = await run(EXE, ['grant-acl', '--pkg', 'AgentOctopus.Sandbox.t1', '--path', nodeDir]).catch((e) => e);
+      if (gNode.code !== 0) {
+        // Diagnostic only — surface the grant failure but let the run proceed
+        // so the run's own stderr tells us whether the grant was needed.
+        console.error('[helper-run] grant-acl on nodeDir failed:',
+          '\n  code=', gNode.code, '\n  stdout=', gNode.stdout, '\n  stderr=', gNode.stderr);
+      }
+
       const r = await run(EXE, [
         'run',
         '--job', 'OctJob-t1',
@@ -65,7 +82,19 @@ describe('helper run', () => {
         '-e', "process.stdout.write('hi');process.exit(3)",
       ]).catch((e) => e);
       // execFile rejects when the child exits non-zero; the .catch above hands
-      // us the error object, which carries code/stdout.
+      // us the error object, which carries code/stdout/stderr.
+      //
+      // DIAGNOSTIC (keep on the lane): the helper reports WHY a launch failed
+      // on its stderr — fail_hr/fail_win32 write "octopus-sandbox-helper:
+      // <context> failed (hr=0x...)" before returning 1, and the LPAC child's
+      // own stderr (e.g. a node --require ACCESS_DENIED) is relayed verbatim.
+      // Without printing this, an exit-1 result is opaque. Print the full
+      // stdout+stderr BEFORE the assertion so the CI log shows the real cause.
+      console.error('[helper-run] run result:',
+        '\n  code=', r.code,
+        '\n  signal=', r.signal,
+        '\n  stdout=<<<', r.stdout, '>>>',
+        '\n  stderr=<<<', r.stderr, '>>>');
       expect(r.code).toBe(3);
       expect(r.stdout).toContain('hi');
     } finally {
