@@ -164,12 +164,16 @@ static int fail_hr(PCWSTR context, HRESULT hr) {
      * cast to unsigned long for a well-defined varargs type under /W4. */
     fwprintf(stderr, L"octopus-sandbox-helper: %ls failed (hr=0x%08lx)\n",
              context, (unsigned long)hr);
+    /* stderr to a pipe is block-buffered; flush or a quick exit(1) drops the
+     * diagnostic before the parent's relay ever reads it. */
+    fflush(stderr);
     return 1;
 }
 
 static int fail_win32(PCWSTR context, DWORD err) {
     fwprintf(stderr, L"octopus-sandbox-helper: %ls failed (err=%lu)\n",
              context, (unsigned long)err);
+    fflush(stderr);
     return 1;
 }
 
