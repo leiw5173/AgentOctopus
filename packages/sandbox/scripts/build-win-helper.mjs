@@ -165,17 +165,21 @@ async function msvcEnv(vsInstall) {
   if (!vsInstall) return undefined; // bare cl.exe on PATH: can't locate vcvars
   const vcvars = path.join(vsInstall, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
   if (!existsSync(vcvars)) return undefined;
-  // Run vcvars64 then dump the environment. `call` is REQUIRED: vcvars64.bat
-  // chains to vsdevcmd.bat, and invoking a .bat by bare path (no `call`)
-  // inside `cmd /c` replaces the current cmd context so the trailing `&& set`
-  // never runs (and the exit code goes non-zero). vcvars's own chatter goes
-  // to stderr (1>&2) so `set` stays clean on stdout; on failure we surface
-  // stderr so the real vcvars error is not swallowed.
+  // Run vcvars64 then dump the environment. Two cmd quoting rules bite here:
+  //  (1) `call` is REQUIRED: vcvars64.bat chains to vsdevcmd.bat, and invoking
+  //      a .bat by bare path (no `call`) replaces the current cmd context so
+  //      the trailing `&& set` never runs.
+  //  (2) Do NOT pass /s. With `/s /c`, cmd strips the outer quotes of the
+  //      whole command string, mangling the quoted vcvars path into
+  //      '"C:\...\vcvars64.bat" is not recognized'. Plain `/d /c` lets cmd
+  //      parse `call "quoted path" && set` correctly.
+  // vcvars's own chatter goes to stderr (1>&2) so `set` stays clean on
+  // stdout; on failure we surface stderr so the real error is not swallowed.
   let stdout;
   try {
     ({ stdout } = await execFileAsync(
       'cmd.exe',
-      ['/d', '/s', '/c', `call "${vcvars}" 1>&2 && set`],
+      ['/d', '/c', `call "${vcvars}" 1>&2 && set`],
       { maxBuffer: 16 * 1024 * 1024 },
     ));
   } catch (err) {
