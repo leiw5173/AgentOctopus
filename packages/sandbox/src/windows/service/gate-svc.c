@@ -73,6 +73,8 @@
 #endif
 
 #include <windows.h>
+#include <ws2def.h>     /* IPPROTO_TCP (the IPPROTO enum the WFP protocol
+                         * condition expects); fwpmtypes.h does not pull it in */
 #include <fwpmu.h>     /* WFP 1.0 user-mode API (Fwpm*0, FWPM_*, FWP_*) */
 #include <fwpmtypes.h> /* FWPM_PROVIDER0 / FWPM_SUBLAYER0 / FWPM_FILTER0 */
 #include <sddl.h>      /* ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -807,7 +809,7 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         sidVal.type = FWP_SID;
         sidVal.sid = packageSidBin;
         protoVal.type = FWP_UINT8;
-        protoVal.uint8 = IPPROTO_TCP;
+        protoVal.uint8 = (UINT8)IPPROTO_TCP;
         /* addrVal (FWP_UINT32, network order) is set above where the byte-order
          * rationale is documented. */
         portVal.type = FWP_UINT16;
@@ -888,7 +890,7 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         sidVal.type = FWP_SID;
         sidVal.sid = packageSidBin;
         protoVal.type = FWP_UINT8;
-        protoVal.uint8 = IPPROTO_TCP;
+        protoVal.uint8 = (UINT8)IPPROTO_TCP;
         addrVal.type = FWP_V6_ADDR_MASK;
         addrVal.v6AddrMask = &addr6;
         portVal.type = FWP_UINT16;
