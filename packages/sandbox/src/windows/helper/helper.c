@@ -1521,15 +1521,13 @@ cleanup:
  * Exit code 3 is chosen to match the helper-run test's expected child exit so
  * the same assertion path validates both arms.
  */
-static int cmd_run_probe_child(void) {
+static void cmd_run_probe_child(void) {
     fwprintf(stderr, L"[run-probe-child] alive under LPAC, exiting 3\n");
     fflush(stderr);
     /* Use ExitProcess (not return from wmain) so no atexit / CRT teardown
      * runs — the point is the smallest possible surface that still proves the
-     * loader + process init succeeded under LPAC. */
+     * loader + process init succeeded under LPAC. ExitProcess is noreturn. */
     ExitProcess(3);
-    /* Unreachable, but satisfies /W4 (no "not all paths return a value"). */
-    return 3;
 }
 
 
@@ -2322,7 +2320,10 @@ int wmain(int argc, wchar_t **argv) {
      * experiment). Not a user-facing subcommand; launched only as the
      * sandboxed child. */
     if (wcscmp(argv[1], L"run-probe-child") == 0) {
-        return cmd_run_probe_child();
+        /* noreturn: ExitProcess(3) inside. The trailing return is unreachable
+         * in practice but keeps wmain's int signature well-formed. */
+        cmd_run_probe_child();
+        return 3;
     }
 
     if (wcscmp(argv[1], L"grant-acl") == 0) {
