@@ -102,6 +102,52 @@ describe('helper run', () => {
           '\n  code=', gNode.code, '\n  stdout=', gNode.stdout, '\n  stderr=', gNode.stderr);
       }
 
+      // ------------------------------------------------------------------
+      // RUN-5 CONTROLLED EXPERIMENT, arm 1: the LPAC self-test child.
+      //
+      // `run --selftest` launches the helper EXE ITSELF running the minimal
+      // `run-probe-child` subcommand (no V8, no --require bootstrap execution;
+      // it writes a stderr liveness marker and ExitProcess(3)es) under the
+      // IDENTICAL LPAC token + Job. This isolates the crash cause in ONE run:
+      //   - self-test relays exit 3 + the liveness marker, but the node arm
+      //     (below) fastfails 0x80000003  => node.exe / V8 init under LPAC is
+      //     the culprit, NOT the token / Job / file access.
+      //   - self-test ALSO fastfails 0x80000003  => the LPAC token / file
+      //     access itself is broken independent of node.
+      //
+      // The self-test child IS the helper exe, so the LPAC token must be able
+      // to read/execute it: grant READ+EXECUTE on the helper's own dir first.
+      // ------------------------------------------------------------------
+      await run(EXE, ['grant-acl', '--pkg', 'AgentOctopus.Sandbox.t1', '--path', path.dirname(EXE)]).catch(() => {});
+      const selftest = await runHelperStreaming([
+        'run', '--selftest',
+        '--job', 'OctJob-t1-selftest',
+        '--mem-mb', '256',
+        '--pkg', 'AgentOctopus.Sandbox.t1',
+        '--proxy', '127.0.0.1:1',
+        '--ca', ca,
+        '--bootstrap', bootstrap,
+        '--node', node,
+      ]);
+      console.error('[helper-run] SELFTEST (run-probe-child) result:',
+        '\n  code=', selftest.code,
+        '\n  signal=', selftest.signal,
+        '\n  stdout=<<<', selftest.stdout, '>>>',
+        '\n  stderr=<<<', selftest.stderr, '>>>');
+      // 0x80000003 (STATUS_BREAKPOINT) as an unsigned DWORD is 2147483651; as
+      // a signed 32-bit int (what Node's exit 'code' surfaces) it is
+      // -2147483645. Report which arm crashed so the log is unambiguous.
+      const SELFTEST_CRASH = selftest.code === 2147483651 || selftest.code === -2147483645;
+      console.error('[helper-run] SELFTEST outcome:',
+        SELFTEST_CRASH
+          ? 'CRASHED 0x80000003 -> LPAC token/file-access broken (node-independent)'
+          : selftest.code === 3
+            ? 'RAN CLEAN (exit 3) -> LPAC+Job viable; node/V8 is the crash cause'
+            : `unexpected exit ${selftest.code}`);
+
+      // ------------------------------------------------------------------
+      // arm 2: the real node.exe LPAC child (the original assertion).
+      // ------------------------------------------------------------------
       const r = await runHelperStreaming([
         'run',
         '--job', 'OctJob-t1',
@@ -126,6 +172,11 @@ describe('helper run', () => {
         '\n  signal=', r.signal,
         '\n  stdout=<<<', r.stdout, '>>>',
         '\n  stderr=<<<', r.stderr, '>>>');
+      const NODE_CRASH = r.code === 2147483651 || r.code === -2147483645;
+      console.error('[helper-run] NODE-ARM outcome:',
+        NODE_CRASH
+          ? 'CRASHED 0x80000003 (STATUS_BREAKPOINT / __fastfail int3)'
+          : `exit ${r.code}`);
       expect(r.code).toBe(3);
       expect(r.stdout).toContain('hi');
     } finally {

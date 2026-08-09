@@ -64,6 +64,18 @@ typedef struct SANDBOX_LAUNCH_ARGS {
     PCWSTR  bootstrapPath;/* trusted absolute path to bootstrap.cjs for NODE_OPTIONS */
     PCWSTR  nodePath;     /* trusted absolute path to the verified node.exe */
     PCWSTR *argv;         /* NULL-terminated array of child argv strings */
+    /* selfTest (run-5 diagnostic): when non-zero, launch_sandboxed IGNORES
+     * nodePath/argv and instead launches the helper EXE ITSELF
+     * (GetModuleFileNameW) running the `run-probe-child` subcommand, under
+     * the IDENTICAL LPAC token + Job. run-probe-child is a minimal native
+     * child that does no V8/CRT-heavy init and ExitProcess(3)es. This is the
+     * controlled experiment that isolates "LPAC+Job viability" from
+     * "node.exe/V8 init under LPAC": if the self-test child runs clean but
+     * node fastfails (0x80000003), node/V8 is the culprit; if the self-test
+     * child ALSO fastfails, the LPAC token / file access is broken. The
+     * NODE_OPTIONS=--require bootstrap injection is still applied (it is
+     * inert for the helper exe, which never reads NODE_OPTIONS). */
+    int     selfTest;
 } SANDBOX_LAUNCH_ARGS;
 
 /*

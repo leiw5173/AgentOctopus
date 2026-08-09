@@ -1123,6 +1123,31 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
              loopbackCapSidStr);
     fflush(stderr);
 
+    /* DIAGNOSTIC (run 5, SID-match): print the AppContainer (package) SID and
+     * EVERY capability SID placed in the token, as strings. The LPAC access
+     * check is the INTERSECTION of user/group SIDs and AppContainer SIDs
+     * (MS "Launch an AppContainer": "the permitted access is the intersection
+     * of that granted by the user/group SIDs and AppContainer SIDs"), so the
+     * SIDs granted by grant-acl MUST be SIDs the token actually presents.
+     * Comparing these strings against the grant-acl "[grant] sid=" lines in
+     * the same CI log proves match/mismatch. */
+    {
+        LPWSTR pkgSidStr = NULL;
+        if (ConvertSidToStringSidW(packageSid, &pkgSidStr)) {
+            fwprintf(stderr, L"[run] token AppContainerSid=%ls\n", pkgSidStr);
+            LocalFree(pkgSidStr);
+        }
+        for (i = 0; i < secCapSidCount; i++) {
+            LPWSTR capStr = NULL;
+            if (ConvertSidToStringSidW(secCapSids[i].Sid, &capStr)) {
+                fwprintf(stderr, L"[run] token capability[%lu]=%ls\n",
+                         (unsigned long)i, capStr);
+                LocalFree(capStr);
+            }
+        }
+        fflush(stderr);
+    }
+
     /* A5. Attribute list: size round-trip, allocate, initialize, then set
      * both LPAC attributes. */
     if (!InitializeProcThreadAttributeList(NULL, 2, 0, &attrListSize) &&
@@ -1191,7 +1216,33 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     envBlock = build_child_environment(args, &envBlockBytes);
     if (envBlock == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
 
-    cmdLine = build_command_line(args->nodePath, args->argv);
+    if (args->selfTest) {
+        /* RUN-5 CONTROLLED EXPERIMENT: launch the helper EXE itself running
+         * `run-probe-child` instead of node.exe. The probe child is a minimal
+         * native process (no V8, no --require bootstrap execution) that
+         * ExitProcess(3)es. It runs under the IDENTICAL LPAC token + Job, so:
+         *   - self-test passes (exit 3 relayed)  => LPAC token + Job + file
+         *     access to the launched exe are all viable; node/V8 is the cause.
+         *   - self-test also fastfails 0x80000003 => the LPAC token / file
+         *     access itself is broken, independent of node.
+         * GetModuleFileNameW(NULL,...) resolves the running helper's own path
+         * (a real, readable exe the LPAC token can load once granted). */
+        WCHAR selfPath[MAX_PATH];
+        PCWSTR probeArgv[2];
+        DWORD mlen = GetModuleFileNameW(NULL, selfPath, ARRAYSIZE(selfPath));
+        if (mlen == 0 || mlen >= ARRAYSIZE(selfPath)) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err == ERROR_SUCCESS ? ERROR_BUFFER_OVERFLOW : err);
+            goto cleanup;
+        }
+        probeArgv[0] = L"run-probe-child";
+        probeArgv[1] = NULL;
+        cmdLine = build_command_line(selfPath, probeArgv);
+        fwprintf(stderr, L"[run] selftest: child = self exe run-probe-child\n");
+        fflush(stderr);
+    } else {
+        cmdLine = build_command_line(args->nodePath, args->argv);
+    }
     if (cmdLine == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
 
     fwprintf(stderr, L"[run] relay pipes + env + cmdline ready\n");
@@ -1457,13 +1508,42 @@ cleanup:
 /* Subcommand: run                                                     */
 /* ------------------------------------------------------------------ */
 
+/*
+ * cmd_run_probe_child -- the minimal LPAC child used by `run --selftest`.
+ *
+ * This is the controlled experiment's "no-V8" arm. It does NO node/V8/CRT-
+ * heavy init: it writes a liveness marker to its stderr (relayed by the
+ * parent to the helper's stderr) and ExitProcess(3)es. If THIS child runs
+ * clean under the LPAC token + Job but node.exe fastfails (0x80000003), the
+ * crash is in node/V8 init under LPAC, not in the token / Job / file access.
+ * If it ALSO fastfails, the LPAC token / file access itself is broken.
+ *
+ * Exit code 3 is chosen to match the helper-run test's expected child exit so
+ * the same assertion path validates both arms.
+ */
+static int cmd_run_probe_child(void) {
+    fwprintf(stderr, L"[run-probe-child] alive under LPAC, exiting 3\n");
+    fflush(stderr);
+    /* Use ExitProcess (not return from wmain) so no atexit / CRT teardown
+     * runs — the point is the smallest possible surface that still proves the
+     * loader + process init succeeded under LPAC. */
+    ExitProcess(3);
+    /* Unreachable, but satisfies /W4 (no "not all paths return a value"). */
+    return 3;
+}
+
+
 static void usage_run(void) {
     fwprintf(stderr,
         L"octopus-sandbox-helper: usage:\n"
         L"  octopus-sandbox-helper.exe run\n"
         L"      --job <name> --mem-mb <n> --pkg <moniker>\n"
         L"      --proxy <host:port> --ca <path> --bootstrap <path>\n"
-        L"      --node <nodePath> -- <argv...>\n");
+        L"      --node <nodePath> -- <argv...>\n"
+        L"  octopus-sandbox-helper.exe run --selftest --job <name> --mem-mb <n>\n"
+        L"      --pkg <moniker> --proxy <host:port> --ca <path> --bootstrap <path>\n"
+        L"      --node <nodePath>   (selftest launches the helper exe itself as the\n"
+        L"      LPAC child via run-probe-child; --node is accepted but unused)\n");
 }
 
 /*
@@ -1496,6 +1576,11 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
                 childArgv = (PCWSTR *)&argv[i];
             }
             break;
+        }
+        /* Flag with no argument. */
+        if (wcscmp(f, L"--selftest") == 0) {
+            a.selfTest = 1;
+            continue;
         }
         if (i + 1 >= argc) { usage_run(); return 2; }
         if (wcscmp(f, L"--job") == 0) {
@@ -1897,6 +1982,20 @@ static int cmd_grant_acl(int argc, wchar_t **argv, int startIdx) {
         return fail_hr(L"grant-acl collect_lpac_sids", hr);
     }
 
+    /* DIAGNOSTIC (run 5, SID-match): print every SID about to be granted, as
+     * a string, so it can be compared against the "[run] token ..." lines the
+     * launch emits. The LPAC access check intersects user/group SIDs with
+     * AppContainer SIDs, so the granted set MUST contain a SID the token
+     * actually presents (the package/AppContainer SID or a capability SID). */
+    for (si = 0; si < sidCount; si++) {
+        LPWSTR sidStr = NULL;
+        if (sids[si] != NULL && ConvertSidToStringSidW(sids[si], &sidStr)) {
+            fwprintf(stderr, L"[grant] sid[%lu]=%ls\n", (unsigned long)si, sidStr);
+            LocalFree(sidStr);
+        }
+    }
+    fflush(stderr);
+
     /* Grant on the root dir itself, then recurse into children. */
     hr = grant_read_execute_on_path(path, TRUE, sids, sidCount);
     if (SUCCEEDED(hr)) {
@@ -2217,6 +2316,13 @@ int wmain(int argc, wchar_t **argv) {
 
     if (wcscmp(argv[1], L"run") == 0) {
         return cmd_run(argc, argv, 2);
+    }
+
+    /* The minimal LPAC child launched by `run --selftest` (run-5 controlled
+     * experiment). Not a user-facing subcommand; launched only as the
+     * sandboxed child. */
+    if (wcscmp(argv[1], L"run-probe-child") == 0) {
+        return cmd_run_probe_child();
     }
 
     if (wcscmp(argv[1], L"grant-acl") == 0) {
