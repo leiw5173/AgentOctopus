@@ -1762,6 +1762,7 @@ static int cmd_grant_acl(int argc, wchar_t **argv, int startIdx) {
     DWORD sidCount = 0;
     HRESULT hr;
     int i;
+    DWORD si;
     DWORD attrs;
 
     for (i = startIdx; i < argc; i++) {
@@ -1802,8 +1803,8 @@ static int cmd_grant_acl(int argc, wchar_t **argv, int startIdx) {
         hr = grant_acl_recursive(path, sids, sidCount, 0);
     }
 
-    for (i = 0; i < sidCount; i++) {
-        if (sids[i] != NULL) LocalFree(sids[i]);
+    for (si = 0; si < sidCount; si++) {
+        if (sids[si] != NULL) LocalFree(sids[si]);
     }
     LocalFree(sids);
 
