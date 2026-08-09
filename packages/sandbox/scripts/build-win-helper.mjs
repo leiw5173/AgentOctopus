@@ -237,10 +237,24 @@ async function compileObj(cl, src, objPath, env) {
     await execFileAsync(cl, args, env ? { env } : undefined);
   } catch (err) {
     await fs.rm(tmpObj, { force: true }).catch(() => {});
-    die(`compile failed for ${src}: ${err.stderr ?? err.stdout ?? err.message}`);
+    die(`compile failed for ${src}:\n${clDiagnostics(err)}`);
   }
   await fs.rename(tmpObj, objPath);
   return objPath;
+}
+
+/**
+ * Extract the compiler/linker's own diagnostics from a failed execFile.
+ * cl.exe prints compile errors (C4xxx) to STDOUT and link errors (LNKxxxx)
+ * to STDERR; a bare `err.stderr ?? err.stdout` shows nothing because stderr
+ * is the empty string (not undefined) on a compile failure. Concatenate both,
+ * prefer whichever is non-empty, fall back to the spawn error message.
+ */
+function clDiagnostics(err) {
+  const out = (err.stdout ?? '').toString().trim();
+  const serr = (err.stderr ?? '').toString().trim();
+  const joined = [serr, out].filter(Boolean).join('\n');
+  return joined || err.message || String(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +269,7 @@ async function linkExe(cl, objPath, exePath, env) {
     await execFileAsync(cl, args, env ? { env } : undefined);
   } catch (err) {
     await fs.rm(tmpExe, { force: true }).catch(() => {});
-    die(`link failed for ${objPath}: ${err.stderr ?? err.stdout ?? err.message}`);
+    die(`link failed for ${objPath}:\n${clDiagnostics(err)}`);
   }
   await fs.rename(tmpExe, exePath);
   return exePath;
@@ -415,7 +429,7 @@ async function buildCompileOnly(cl, targetDir, env) {
   } catch (err) {
     await fs.rm(tmpObj, { force: true }).catch(() => {});
     die(
-      `compile-only smoke failed: ${err.stderr ?? err.stdout ?? err.message}\n` +
+      `compile-only smoke failed:\n${clDiagnostics(err)}\n` +
       '  helper.c must compile under MSVC /std:c17 /W4 /WX.',
     );
   }
