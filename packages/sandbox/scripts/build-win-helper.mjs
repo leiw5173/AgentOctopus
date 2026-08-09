@@ -165,14 +165,17 @@ async function msvcEnv(vsInstall) {
   if (!vsInstall) return undefined; // bare cl.exe on PATH: can't locate vcvars
   const vcvars = path.join(vsInstall, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
   if (!existsSync(vcvars)) return undefined;
-  // Run vcvars64 then dump the environment. vcvars's own chatter goes to
-  // stderr (1>&2) so `set` stays clean on stdout; on failure we surface
+  // Run vcvars64 then dump the environment. `call` is REQUIRED: vcvars64.bat
+  // chains to vsdevcmd.bat, and invoking a .bat by bare path (no `call`)
+  // inside `cmd /c` replaces the current cmd context so the trailing `&& set`
+  // never runs (and the exit code goes non-zero). vcvars's own chatter goes
+  // to stderr (1>&2) so `set` stays clean on stdout; on failure we surface
   // stderr so the real vcvars error is not swallowed.
   let stdout;
   try {
     ({ stdout } = await execFileAsync(
       'cmd.exe',
-      ['/d', '/s', '/c', `"${vcvars}" 1>&2 && set`],
+      ['/d', '/s', '/c', `call "${vcvars}" 1>&2 && set`],
       { maxBuffer: 16 * 1024 * 1024 },
     ));
   } catch (err) {
