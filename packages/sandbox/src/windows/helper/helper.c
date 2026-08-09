@@ -1761,7 +1761,7 @@ static int cmd_grant_acl(int argc, wchar_t **argv, int startIdx) {
     PSID *sids = NULL;
     DWORD sidCount = 0;
     HRESULT hr;
-    DWORD i;
+    int i;
     DWORD attrs;
 
     for (i = startIdx; i < argc; i++) {
@@ -1957,7 +1957,7 @@ static int cmd_teardown(int argc, wchar_t **argv, int startIdx) {
     HRESULT hr = S_OK;
     DWORD err;
     BOOL jobConfirmedDead = FALSE;
-    DWORD i;
+    int i;
 
     for (i = startIdx; i < argc; i++) {
         if (i + 1 >= argc) { usage_teardown(); return 2; }
