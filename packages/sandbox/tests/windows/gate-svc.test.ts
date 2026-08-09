@@ -18,7 +18,7 @@
 import { describe, it, expect } from 'vitest';
 import net from 'node:net';
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -159,10 +159,15 @@ describe('gate service (OctopusSandboxGate)', () => {
     await run(HELPER_EXE, ['grant-acl', '--pkg', pkg, '--path', stage]);
     await run(HELPER_EXE, ['grant-acl', '--pkg', pkg, '--path', path.dirname(node)]).catch(() => {});
 
-    // Launch the long-lived child detached (do NOT await — it runs ~5 min).
-    // We capture its stderr via the process object so a launch failure is
-    // diagnosable from the CI log. unref() so the test process is not held.
-    const child = execFile(HELPER_EXE, [
+    // Launch the long-lived child with spawn() so its stdout/stderr STREAM live
+    // into the test as chunks arrive (execFile's callback only fires on child
+    // exit, so a helper that hangs during run setup showed nothing — that is
+    // exactly what masked this test's 5s timeout in run 31319124171). We mirror
+    // each chunk to console.error immediately so the CI log shows the last
+    // "[run] <stage>" marker reached — telling us whether the Job was created
+    // ("[run] child assigned to job" / "[run] child resumed") or the helper
+    // hung earlier. unref() so the test process is not held.
+    const child = spawn(HELPER_EXE, [
       'run',
       '--job', jobName,
       '--mem-mb', '256',
@@ -173,19 +178,44 @@ describe('gate service (OctopusSandboxGate)', () => {
       '--node', node,
       '--',
       '-e', 'setTimeout(()=>{},300000)',
-    ], (err, stdout, stderr) => {
-      if (err) {
-        console.error('[gate-svc] long-lived helper exited:',
-          '\n  code=', (err as any).code,
-          '\n  stdout=<<<', stdout, '>>>',
-          '\n  stderr=<<<', stderr, '>>>');
-      }
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let childStdout = '';
+    let childStderr = '';
+    const exitRef: { current: { code: number | null; signal: string | null } | null } = { current: null };
+    child.stdout.on('data', (d: Buffer) => {
+      const s = d.toString('utf8');
+      childStdout += s;
+      process.stderr.write(`[gate-svc helper stdout] ${s}`);
+    });
+    child.stderr.on('data', (d: Buffer) => {
+      const s = d.toString('utf8');
+      childStderr += s;
+      process.stderr.write(`[gate-svc helper stderr] ${s}`);
+    });
+    child.on('error', (e) => {
+      process.stderr.write(`[gate-svc helper spawn error] ${String(e)}\n`);
+    });
+    child.on('close', (code, signal) => {
+      exitRef.current = { code, signal };
+      // The child is launched for ~5 min; an early close means the helper
+      // failed to launch/run the long-lived node. Surface its captured output
+      // so the refusal assertion below can be interpreted (Job never created).
+      console.error('[gate-svc] long-lived helper exited early:',
+        '\n  code=', code, '\n  signal=', signal,
+        '\n  stdout=<<<', childStdout, '>>>',
+        '\n  stderr=<<<', childStderr, '>>>');
     });
     child.unref();
 
     // Give the helper a moment to create the Job, assign the child, and resume
-    // it. 1500ms is generous for process+job setup on a CI runner.
+    // it. 1500ms is generous for process+job setup on a CI runner. If the
+    // helper already exited early, report it now so a failed-alive-assertion is
+    // attributable to "Job never created" rather than "remove-gate allowed".
     await new Promise((r) => setTimeout(r, 1500));
+    if (exitRef.current !== null) {
+      console.error('[gate-svc] WARNING: helper exited before install-gate;',
+        'OctJob-s1 may never have been populated. exit=', JSON.stringify(exitRef.current));
+    }
 
     try {
       const ins = await rpc({
@@ -224,7 +254,10 @@ describe('gate service (OctopusSandboxGate)', () => {
     }
     console.error('[gate-svc] remove-gate after Job drained ->', JSON.stringify(removed));
     expect(removed.ok).toBe(true);
-  });
+    // 60s timeout: the settle (1.5s) + drain poll (up to 5s) + RPC round-trips
+    // must not false-timeout on a slow CI runner, and a hung helper streams its
+    // stage markers live before the timeout fires.
+  }, 60_000);
 
   itSvc('remove-gate on a nonexistent Job succeeds (Job is genuinely gone)', async () => {
     // Precise fail-closed contract for the OTHER branch: a Job that no longer

@@ -1040,6 +1040,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
                                                        &packageSid);
     }
     if (FAILED(hr)) goto cleanup;
+    fwprintf(stderr, L"[run] appcontainer profile resolved\n");
+    fflush(stderr);
 
     /* A2. Derive the base capability SIDs for the moniker (group + normal).
      * These give the token the moniker's declared capabilities. */
@@ -1050,6 +1052,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         hr = HRESULT_FROM_WIN32(err);
         goto cleanup;
     }
+    fwprintf(stderr, L"[run] capability sids derived\n");
+    fflush(stderr);
 
     /* A3. Derive the LOOPBACK capability SID via the Task 6 helper, then
      * convert the string back to a binary SID for the SECURITY_CAPABILITIES
@@ -1119,6 +1123,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         hr = HRESULT_FROM_WIN32(err);
         goto cleanup;
     }
+    fwprintf(stderr, L"[run] attribute list built\n");
+    fflush(stderr);
 
     /* ==============================================================
      * Step B -- stdio pipes + env block + command line, then the
@@ -1159,6 +1165,9 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     cmdLine = build_command_line(args->nodePath, args->argv);
     if (cmdLine == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
 
+    fwprintf(stderr, L"[run] relay pipes + env + cmdline ready\n");
+    fflush(stderr);
+
     /* STARTUPINFOEXW has no top-level cb member; the embedded STARTUPINFOW's
      * cb must be set to the size of the FULL extended struct
      * (sizeof(STARTUPINFOEXW)), per the CreateProcessW docs — otherwise the
@@ -1187,6 +1196,9 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         goto cleanup;
     }
     processCreated = TRUE;
+    fwprintf(stderr, L"[run] child process created (suspended), pid=%lu\n",
+             (unsigned long)pi.dwProcessId);
+    fflush(stderr);
 
     /* The child now holds its own copies of the inheritable pipe ends; the
      * parent closes its copies of the CHILD ends so EOF propagates when the
@@ -1240,6 +1252,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         hr = HRESULT_FROM_WIN32(err);
         goto cleanup;
     }
+    fwprintf(stderr, L"[run] child assigned to job\n");
+    fflush(stderr);
 
     /* ==============================================================
      * Step E -- everything succeeded. Resume the child: it now runs
@@ -1252,6 +1266,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         goto cleanup;
     }
     threadResumed = TRUE;
+    fwprintf(stderr, L"[run] child resumed\n");
+    fflush(stderr);
 
     /* ---- stdin payload: this launch contract has no stdin payload from
      * the TS side (the skill's stdin is the relay itself), so we close the
@@ -1266,7 +1282,14 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     (void)relay_start_read(&outPipe);
     (void)relay_start_read(&errPipe);
 
-    for (;;) {
+    fwprintf(stderr, L"[run] relay loop entered\n");
+    fflush(stderr);
+
+    {
+        BOOL loggedExit = FALSE;
+        BOOL loggedOutEof = FALSE;
+        BOOL loggedErrEof = FALSE;
+        for (;;) {
         HANDLE waitSet[3];
         DWORD nWait = 0;
         DWORD waitRes;
@@ -1298,17 +1321,41 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         if (FAILED(hr = relay_flush_ready(&outPipe, 1))) goto cleanup;
         if (FAILED(hr = relay_flush_ready(&errPipe, 2))) goto cleanup;
 
+        /* DIAGNOSTIC stage markers (run 3): log the first time each terminal
+         * condition becomes true so a hang shows exactly which condition is
+         * never satisfied — child-exited, stdout-EOF, stderr-EOF. */
+        if (!loggedExit &&
+            WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
+            loggedExit = TRUE;
+            fwprintf(stderr, L"[run] child exited\n");
+            fflush(stderr);
+        }
+        if (!loggedOutEof && outPipe.eof) {
+            loggedOutEof = TRUE;
+            fwprintf(stderr, L"[run] stdout pipe eof\n");
+            fflush(stderr);
+        }
+        if (!loggedErrEof && errPipe.eof) {
+            loggedErrEof = TRUE;
+            fwprintf(stderr, L"[run] stderr pipe eof\n");
+            fflush(stderr);
+        }
+
         /* Exit the loop once the child is gone AND both pipes are drained. */
         if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0 &&
             outPipe.eof && errPipe.eof &&
             !outPipe.pending && !errPipe.pending) {
             break;
         }
+        }
     }
 
     /* Final flush — anything still buffered after EOF. */
     (void)relay_flush_ready(&outPipe, 1);
     (void)relay_flush_ready(&errPipe, 2);
+
+    fwprintf(stderr, L"[run] relay loop exited\n");
+    fflush(stderr);
 
     if (!GetExitCodeProcess(pi.hProcess, outExitCode)) {
         err = GetLastError();
@@ -1443,10 +1490,21 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
         return 2;
     }
 
+    /* DIAGNOSTIC stage marker (CI hang localization, run 3): parsed args OK.
+     * These markers go to the helper's OWN stderr, which the tests now stream
+     * live so a hang in launch_sandboxed localizes to the last stage reached.
+     * fflush forces each line out immediately (stderr to a pipe is otherwise
+     * block-buffered and a hang would swallow the markers). */
+    fwprintf(stderr, L"[run] parsed args\n");
+    fflush(stderr);
+
     hr = launch_sandboxed(&a, &childExit);
     if (FAILED(hr)) {
         return fail_hr(L"launch_sandboxed", hr);
     }
+    fwprintf(stderr, L"[run] launch_sandboxed returned, child exit=%lu\n",
+             (unsigned long)childExit);
+    fflush(stderr);
     /* Propagate the child's exit code verbatim. A DWORD can exceed 255 but
      * the Windows process exit code IS a DWORD, so this is lossless. */
     return (int)childExit;

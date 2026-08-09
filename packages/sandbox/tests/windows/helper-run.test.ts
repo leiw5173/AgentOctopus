@@ -8,7 +8,7 @@
 // yet) every test in this file SKIPS cleanly — it must never fail, crash,
 // or leave the test runner waiting on a missing binary.
 import { describe, it, expect } from 'vitest';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,6 +22,39 @@ const EXE = path.join(HERE, '..', '..', 'prebuilds', 'windows-x64', 'octopus-san
 
 // Skip when not on Windows OR when the helper has not been built yet.
 const itWin = (process.platform === 'win32' && existsSync(EXE)) ? it : it.skip;
+
+// Run the helper with spawn() so stdout/stderr STREAM live into the test as
+// chunks arrive (execFile only yields output on child exit, so a hung helper
+// showed nothing). We mirror each chunk to console.error immediately AND
+// accumulate it, so a hang localizes to the last "[run] <stage>" marker in
+// the CI log. Resolves with {code, signal, stdout, stderr} on exit; on a
+// spawn-level error (e.g. ENOENT) code is -1.
+function runHelperStreaming(
+  args: string[],
+): Promise<{ code: number | null; signal: string | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(EXE, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => {
+      const s = d.toString('utf8');
+      stdout += s;
+      process.stderr.write(`[helper stdout] ${s}`);
+    });
+    child.stderr.on('data', (d: Buffer) => {
+      const s = d.toString('utf8');
+      stderr += s;
+      process.stderr.write(`[helper stderr] ${s}`);
+    });
+    child.on('error', (e) => {
+      process.stderr.write(`[helper spawn error] ${String(e)}\n`);
+      resolve({ code: -1, signal: null, stdout, stderr });
+    });
+    child.on('close', (code, signal) => {
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+}
 
 describe('helper run', () => {
   itWin('runs a command and relays stdout + exit code', async () => {
@@ -69,7 +102,7 @@ describe('helper run', () => {
           '\n  code=', gNode.code, '\n  stdout=', gNode.stdout, '\n  stderr=', gNode.stderr);
       }
 
-      const r = await run(EXE, [
+      const r = await runHelperStreaming([
         'run',
         '--job', 'OctJob-t1',
         '--mem-mb', '256',
@@ -80,16 +113,14 @@ describe('helper run', () => {
         '--node', node,
         '--',
         '-e', "process.stdout.write('hi');process.exit(3)",
-      ]).catch((e) => e);
-      // execFile rejects when the child exits non-zero; the .catch above hands
-      // us the error object, which carries code/stdout/stderr.
-      //
-      // DIAGNOSTIC (keep on the lane): the helper reports WHY a launch failed
-      // on its stderr — fail_hr/fail_win32 write "octopus-sandbox-helper:
-      // <context> failed (hr=0x...)" before returning 1, and the LPAC child's
-      // own stderr (e.g. a node --require ACCESS_DENIED) is relayed verbatim.
-      // Without printing this, an exit-1 result is opaque. Print the full
-      // stdout+stderr BEFORE the assertion so the CI log shows the real cause.
+      ]);
+      // The helper now emits "[run] <stage>" markers on stderr at each major
+      // step of launch_sandboxed, and runHelperStreaming mirrors them live.
+      // If this test times out, the LAST marker printed before the timeout is
+      // the stage where the helper blocked (e.g. "[run] relay loop entered"
+      // with no "[run] child exited"/"[run] * pipe eof" => the EOF/grandchild
+      // handle theory is confirmed). Print the accumulated buffers too so the
+      // full capture is in the CI log even if mirroring interleaved oddly.
       console.error('[helper-run] run result:',
         '\n  code=', r.code,
         '\n  signal=', r.signal,
@@ -100,5 +131,6 @@ describe('helper run', () => {
     } finally {
       rmSync(stage, { recursive: true, force: true });
     }
-  });
+  }, 60_000); // generous timeout: a slow CI runner must not false-timeout, and
+              // a real hang yields 60s of streamed stage markers before failing.
 });
