@@ -165,12 +165,22 @@ async function msvcEnv(vsInstall) {
   if (!vsInstall) return undefined; // bare cl.exe on PATH: can't locate vcvars
   const vcvars = path.join(vsInstall, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
   if (!existsSync(vcvars)) return undefined;
-  // Run vcvars64 then dump the environment. `set` output is `KEY=VALUE` lines.
-  const { stdout } = await execFileAsync(
-    'cmd.exe',
-    ['/d', '/s', '/c', `"${vcvars}" >nul 2>&1 && set`],
-    { maxBuffer: 16 * 1024 * 1024 },
-  );
+  // Run vcvars64 then dump the environment. vcvars's own chatter goes to
+  // stderr (1>&2) so `set` stays clean on stdout; on failure we surface
+  // stderr so the real vcvars error is not swallowed.
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync(
+      'cmd.exe',
+      ['/d', '/s', '/c', `"${vcvars}" 1>&2 && set`],
+      { maxBuffer: 16 * 1024 * 1024 },
+    ));
+  } catch (err) {
+    die(
+      `vcvars64.bat failed (${vcvars}):\n` +
+      `${err.stderr ?? ''}${err.stdout ?? ''}${err.message}`,
+    );
+  }
   const env = { ...process.env };
   for (const line of String(stdout).split(/\r?\n/)) {
     const eq = line.indexOf('=');
