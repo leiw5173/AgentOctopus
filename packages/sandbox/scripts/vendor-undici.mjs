@@ -29,7 +29,10 @@ try {
   execFileSync('tar', ['-xzf', tgz, '-C', tmp]);
   const dest = path.join(RUNTIME_DIR, 'undici');
   fs.rmSync(dest, { recursive: true, force: true });
-  fs.renameSync(path.join(tmp, 'package'), dest);
+  // Copy, not rename: os.tmpdir() may be on a different volume than the repo
+  // (e.g. CI runner TEMP on C: vs checkout on D:), and fs.rename across
+  // volumes throws EXDEV on Windows. cp + rm is volume-agnostic.
+  fs.cpSync(path.join(tmp, 'package'), dest, { recursive: true });
   console.log(`vendored undici@${undiciVersion} -> ${dest}`);
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

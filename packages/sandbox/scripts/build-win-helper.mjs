@@ -129,7 +129,7 @@ async function findCl() {
           .reverse();
         for (const v of versions) {
           const candidate = path.join(msvcRoot, v, 'bin', 'Hostx64', 'x64', 'cl.exe');
-          if (existsSync(candidate)) return candidate;
+          if (existsSync(candidate)) return { cl: candidate, vsInstall: installPath };
         }
       }
     } catch {
@@ -138,13 +138,50 @@ async function findCl() {
   }
   try {
     await execFileAsync('cl.exe', []);
-    return 'cl.exe';
+    return { cl: 'cl.exe', vsInstall: null };
   } catch (err) {
     // cl with no args prints its banner and exits non-zero (typically 2) —
     // that means it IS present. Only an ENOENT spawn failure means absent.
     if (err && err.code === 'ENOENT') return null;
-    return 'cl.exe';
+    return { cl: 'cl.exe', vsInstall: null };
   }
+}
+
+/**
+ * Resolve the MSVC build environment for invoking cl.exe by full path.
+ *
+ * cl.exe located via vswhere is invoked by absolute path, which does NOT set
+ * up the INCLUDE/LIB/LIBPATH environment the compiler needs to find system
+ * headers (windows.h) and libs — invoking it bare fails with fatal error
+ * C1034. When the caller is not already inside a VS developer prompt (no
+ * INCLUDE in process.env), source the VS vcvars64.bat and capture the env it
+ * produces. Returns an env object to pass to child_process, or undefined to
+ * inherit process.env unchanged.
+ */
+async function msvcEnv(vsInstall) {
+  if (process.platform !== 'win32') return undefined;
+  // Already inside a VS developer prompt (or otherwise configured) — inherit.
+  if (process.env.INCLUDE && process.env.LIB) return undefined;
+  if (!vsInstall) return undefined; // bare cl.exe on PATH: can't locate vcvars
+  const vcvars = path.join(vsInstall, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
+  if (!existsSync(vcvars)) return undefined;
+  // Run vcvars64 then dump the environment. `set` output is `KEY=VALUE` lines.
+  const { stdout } = await execFileAsync(
+    'cmd.exe',
+    ['/d', '/s', '/c', `"${vcvars}" >nul 2>&1 && set`],
+    { maxBuffer: 16 * 1024 * 1024 },
+  );
+  const env = { ...process.env };
+  for (const line of String(stdout).split(/\r?\n/)) {
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq);
+    if (/^(INCLUDE|LIB|LIBPATH|PATH|Path)$/i.test(key)) env[key] = line.slice(eq + 1);
+  }
+  if (!env.INCLUDE || !env.LIB) {
+    die(`vcvars64.bat ran but did not yield INCLUDE/LIB — MSVC environment is broken (${vcvars}).`);
+  }
+  return env;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +198,7 @@ async function requireFile(p, hint) {
 // Compile one C source to a .obj, atomically. Returns the object path.
 // ---------------------------------------------------------------------------
 
-async function compileObj(cl, src, objPath) {
+async function compileObj(cl, src, objPath, env) {
   const tmpObj = `${objPath}.tmp-${process.pid}`;
   const args = [
     '/nologo',
@@ -174,7 +211,7 @@ async function compileObj(cl, src, objPath) {
     src,
   ];
   try {
-    await execFileAsync(cl, args);
+    await execFileAsync(cl, args, env ? { env } : undefined);
   } catch (err) {
     await fs.rm(tmpObj, { force: true }).catch(() => {});
     die(`compile failed for ${src}: ${err.stderr ?? err.stdout ?? err.message}`);
@@ -187,12 +224,12 @@ async function compileObj(cl, src, objPath) {
 // Link one .obj to an .exe, atomically. Returns the exe path.
 // ---------------------------------------------------------------------------
 
-async function linkExe(cl, objPath, exePath) {
+async function linkExe(cl, objPath, exePath, env) {
   const tmpExe = `${exePath}.tmp-${process.pid}`;
   // cl links when given an .obj without /c; /link pass-through carries OUT:.
   const args = ['/nologo', objPath, '/link', `/OUT:${tmpExe}`];
   try {
-    await execFileAsync(cl, args);
+    await execFileAsync(cl, args, env ? { env } : undefined);
   } catch (err) {
     await fs.rm(tmpExe, { force: true }).catch(() => {});
     die(`link failed for ${objPath}: ${err.stderr ?? err.stdout ?? err.message}`);
@@ -284,7 +321,7 @@ async function writeRuntimeManifest(targetDir, nodeSrcPath) {
 // Path A: full build (cl.exe + all runtime inputs present)
 // ---------------------------------------------------------------------------
 
-async function buildFull(cl, targetDir) {
+async function buildFull(cl, targetDir, env) {
   // Runtime-closure inputs — fail-closed before compiling anything so a
   // missing runtime never leaves compiled exes without their manifest.
   await requireFile(BOOTSTRAP_PATH, 'Committed at images/runtime/bootstrap.cjs.');
@@ -301,14 +338,14 @@ async function buildFull(cl, targetDir) {
   // Compile both C sources.
   const helperObj = path.join(targetDir, 'octopus-sandbox-helper.obj');
   const gateSvcObj = path.join(targetDir, 'octopus-sandbox-gate-svc.obj');
-  await compileObj(cl, HELPER_SRC, helperObj);
-  await compileObj(cl, GATE_SVC_SRC, gateSvcObj);
+  await compileObj(cl, HELPER_SRC, helperObj, env);
+  await compileObj(cl, GATE_SVC_SRC, gateSvcObj, env);
 
   // Link both executables.
   const helperExe = path.join(targetDir, 'octopus-sandbox-helper.exe');
   const gateSvcExe = path.join(targetDir, 'octopus-sandbox-gate-svc.exe');
-  await linkExe(cl, helperObj, helperExe);
-  await linkExe(cl, gateSvcObj, gateSvcExe);
+  await linkExe(cl, helperObj, helperExe, env);
+  await linkExe(cl, gateSvcObj, gateSvcExe, env);
 
   // Per-artifact manifests.
   await writePerArtifactManifest(
@@ -341,7 +378,7 @@ async function buildFull(cl, targetDir) {
 // Path B: compile-only smoke (cl.exe present, runtime closure inputs absent)
 // ---------------------------------------------------------------------------
 
-async function buildCompileOnly(cl, targetDir) {
+async function buildCompileOnly(cl, targetDir, env) {
   const tmpObj = path.join(
     os.tmpdir(),
     `octopus-sandbox-helper-${process.pid}-${Date.now()}.obj`,
@@ -351,7 +388,7 @@ async function buildCompileOnly(cl, targetDir) {
       '/nologo', '/c', '/W4', '/WX', '/O2', '/std:c17',
       `/Fo${tmpObj}`,
       HELPER_SRC,
-    ]);
+    ], env ? { env } : undefined);
   } catch (err) {
     await fs.rm(tmpObj, { force: true }).catch(() => {});
     die(
@@ -405,15 +442,18 @@ async function main() {
   await requireFile(HELPER_SRC, 'Task 6 creates src/windows/helper/helper.c.');
   await requireFile(GATE_SVC_SRC, 'Task 9 creates src/windows/service/gate-svc.c.');
 
-  const cl = await findCl();
-  if (!cl) {
+  const found = await findCl();
+  if (!found) {
     die(
       "required tool 'cl.exe' not found — install Visual Studio Build Tools with the " +
       "'MSVC v143 - VS 2022 C++ x64/x86 build tools' component, or run from a " +
       "'x64 Native Tools Command Prompt'.",
     );
   }
+  const { cl, vsInstall } = found;
   console.log(`build-win-helper: cl.exe = ${cl}`);
+  const env = await msvcEnv(vsInstall);
+  if (env) console.log('build-win-helper: sourced MSVC env from vcvars64.bat');
 
   const targetDir = path.join(PKG_ROOT, 'prebuilds', TARGET_PLATFORM_ARCH);
   await fs.mkdir(targetDir, { recursive: true });
@@ -421,9 +461,9 @@ async function main() {
   const haveRuntimeInputs =
     existsSync(BOOTSTRAP_PATH) && existsSync(UNDICI_DIR) && existsSync(IMAGES_LOCK_PATH);
   if (haveRuntimeInputs) {
-    await buildFull(cl, targetDir);
+    await buildFull(cl, targetDir, env);
   } else {
-    await buildCompileOnly(cl, targetDir);
+    await buildCompileOnly(cl, targetDir, env);
   }
 }
 
