@@ -165,21 +165,25 @@ async function msvcEnv(vsInstall) {
   if (!vsInstall) return undefined; // bare cl.exe on PATH: can't locate vcvars
   const vcvars = path.join(vsInstall, 'VC', 'Auxiliary', 'Build', 'vcvars64.bat');
   if (!existsSync(vcvars)) return undefined;
-  // Run vcvars64 then dump the environment. Two cmd quoting rules bite here:
-  //  (1) `call` is REQUIRED: vcvars64.bat chains to vsdevcmd.bat, and invoking
-  //      a .bat by bare path (no `call`) replaces the current cmd context so
-  //      the trailing `&& set` never runs.
-  //  (2) Do NOT pass /s. With `/s /c`, cmd strips the outer quotes of the
-  //      whole command string, mangling the quoted vcvars path into
-  //      '"C:\...\vcvars64.bat" is not recognized'. Plain `/d /c` lets cmd
-  //      parse `call "quoted path" && set` correctly.
-  // vcvars's own chatter goes to stderr (1>&2) so `set` stays clean on
-  // stdout; on failure we surface stderr so the real error is not swallowed.
+  // Run vcvars64 then dump the environment. Node's execFile re-quotes every
+  // argument when spawning, so ANY `cmd /c "call \"<path>\" && set"` string
+  // with an embedded quoted path gets its quotes re-wrapped and cmd reports
+  // '"C:\...\vcvars64.bat" is not recognized'. The robust form is a real
+  // .bat FILE whose body does the `call`; we then ask cmd to run that file by
+  // passing its path as the SINGLE /c argument (no operators, no inner quotes
+  // for Node to mangle — cmd just executes the batch file).
+  const wrapper = path.join(os.tmpdir(), `oct-msvcenv-${process.pid}.bat`);
+  const wrapperBody =
+    '@echo off\r\n' +
+    `call "${vcvars}" 1>&2\r\n` +
+    'if errorlevel 1 exit /b 1\r\n' +
+    'set\r\n';
   let stdout;
   try {
+    await fs.writeFile(wrapper, wrapperBody);
     ({ stdout } = await execFileAsync(
       'cmd.exe',
-      ['/d', '/c', `call "${vcvars}" 1>&2 && set`],
+      ['/d', '/c', wrapper],
       { maxBuffer: 16 * 1024 * 1024 },
     ));
   } catch (err) {
@@ -187,6 +191,8 @@ async function msvcEnv(vsInstall) {
       `vcvars64.bat failed (${vcvars}):\n` +
       `${err.stderr ?? ''}${err.stdout ?? ''}${err.message}`,
     );
+  } finally {
+    await fs.rm(wrapper, { force: true }).catch(() => {});
   }
   const env = { ...process.env };
   for (const line of String(stdout).split(/\r?\n/)) {
