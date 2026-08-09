@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * build-win-helper.mjs — producer for the trusted Windows sandbox artifacts
  * consumed by @agentoctopus/sandbox's Windows backend and its

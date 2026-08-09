@@ -46,11 +46,23 @@ describe('WinSandboxBackend probe', () => {
     expect(b.isolationLevel).toBe('none');
   });
 
-  it('fails closed on a non-Windows platform with no DI override', async () => {
-    // No platform override → real process.platform ('darwin' here) → gate fires.
+  it('no DI override: probe() gates on the real platform (fail-closed off win32)', async () => {
+    // No platform override → the backend reads the real process.platform. The
+    // fail-closed contract being asserted is "probe() never reports a Windows
+    // backend available on a non-Windows host". On a non-Windows host that
+    // means probe() === false. On a REAL Windows host (the windows-restricted
+    // CI lane) the same no-override probe() correctly runs the real
+    // verify/helper/gate path and returns true (full runtime manifest + running
+    // LocalSystem gate service present) — so asserting false there would be
+    // wrong, and skipping is not allowed (the lane forbids skipped tests).
+    // The assertion is therefore platform-aware: false off win32 (fail-closed),
+    // true on win32 (genuinely available). This never weakens the gate — the
+    // win32 branch is the backend behaving exactly as designed on its target
+    // platform, and the non-win32 branch is the fail-closed invariant.
     const b = new WinSandboxBackend({ sessionId: 't' });
-    expect(await b.probe()).toBe(false);
-    expect(b.isolationLevel).toBe('none');
+    const expected = process.platform === 'win32';
+    expect(await b.probe()).toBe(expected);
+    expect(b.isolationLevel).toBe(expected ? 'restricted' : 'none');
   });
 
   it('fails closed when the runtime manifest cannot be verified', async () => {
