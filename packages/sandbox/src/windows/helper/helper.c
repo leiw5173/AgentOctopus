@@ -1071,20 +1071,31 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         goto cleanup;
     }
 
-    /* A4. Build the SID_AND_ATTRIBUTES array: all derived capability SIDs
-     * (group + normal) PLUS the loopback capability, each with
-     * SE_GROUP_ENABLED. */
-    secCapSidCount = capGroupSidCount + capSidCount + 1;
+    /* A4. Build the SID_AND_ATTRIBUTES array for SECURITY_CAPABILITIES.
+     *
+     * ROOT CAUSE of the run-4 E_INVALIDARG (0x80070057) at CreateProcessW:
+     * this array previously ALSO included every CapabilityGroupSid returned
+     * by DeriveCapabilitySidsFromName. Those are NT-Authority group SIDs
+     * (S-1-5-...), NOT AppContainer capability SIDs. SECURITY_CAPABILITIES
+     * .Capabilities must contain ONLY AppAuthority capability SIDs
+     * (S-1-15-3-...). Microsoft's "Launch an AppContainer" doc is explicit:
+     * "Group SIDs are only used for services" and its GetCapabilitySidFromName
+     * helper FREES the group SIDs and keeps only CapabilitySids[0]. Putting
+     * NT-Authority group SIDs into the AppContainer capability list makes the
+     * token-creation parameters invalid, and CreateProcessW rejects the launch
+     * with ERROR_INVALID_PARAMETER.
+     *
+     * Fix: exclude the group SIDs. The array carries the AppAuthority
+     * capability SIDs (capSids) PLUS the loopback capability, each with
+     * SE_GROUP_ENABLED. The group SIDs are still derived above (their
+     * successful derivation sanity-checks the moniker) and are freed in the
+     * cleanup block below; they are simply never placed in the token. */
+    secCapSidCount = capSidCount + 1;
     secCapSids = (SID_AND_ATTRIBUTES *)LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT,
         secCapSidCount * sizeof(SID_AND_ATTRIBUTES));
     if (secCapSids == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
     {
         DWORD idx = 0;
-        for (i = 0; i < capGroupSidCount; i++) {
-            secCapSids[idx].Sid = capGroupSids[i];
-            secCapSids[idx].Attributes = SE_GROUP_ENABLED;
-            idx++;
-        }
         for (i = 0; i < capSidCount; i++) {
             secCapSids[idx].Sid = capSids[i];
             secCapSids[idx].Attributes = SE_GROUP_ENABLED;
@@ -1097,6 +1108,20 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     secCaps.Capabilities = secCapSids;
     secCaps.CapabilityCount = secCapSidCount;
     secCaps.Reserved = 0;
+
+    /* DIAGNOSTIC (run 5): print the exact capability-array composition and
+     * the loopback SID string so the next CI run confirms the token's
+     * capability list contains only AppAuthority S-1-15-3 capability SIDs.
+     * capGroupSidCount is printed to prove the group SIDs were derived but
+     * are now EXCLUDED from the array. */
+    fwprintf(stderr,
+             L"[run] secCaps: capSids=%lu loopback=1 groupSids(excluded)=%lu "
+             L"totalInArray=%lu loopbackSid=%ls\n",
+             (unsigned long)capSidCount,
+             (unsigned long)capGroupSidCount,
+             (unsigned long)secCapSidCount,
+             loopbackCapSidStr);
+    fflush(stderr);
 
     /* A5. Attribute list: size round-trip, allocate, initialize, then set
      * both LPAC attributes. */
@@ -1170,6 +1195,19 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     if (cmdLine == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
 
     fwprintf(stderr, L"[run] relay pipes + env + cmdline ready\n");
+    fflush(stderr);
+
+    /* DIAGNOSTIC (run 5): print the env block byte count, the full command
+     * line, and the AppContainer moniker so that if CreateProcessW still
+     * returns E_INVALIDARG after the group-SID fix, the next CI log shows
+     * exactly which remaining parameter (env block size / cmdline quoting /
+     * moniker) is malformed. envBlockBytes must be the Unicode block size in
+     * bytes (4 zero bytes terminate it); cmdLine must be properly quoted. */
+    fwprintf(stderr,
+             L"[run] createprocess params: envBlockBytes=%lu pkgMoniker=%ls\n",
+             (unsigned long)envBlockBytes, args->pkgMoniker);
+    fflush(stderr);
+    fwprintf(stderr, L"[run] createprocess cmdline: %ls\n", cmdLine);
     fflush(stderr);
 
     /* STARTUPINFOEXW has no top-level cb member; the embedded STARTUPINFOW's
