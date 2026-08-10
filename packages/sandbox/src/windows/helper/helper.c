@@ -1027,8 +1027,16 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
 
     /* ==============================================================
      * Step A -- build the LPAC attribute list.
+     *
+     * RUN-6 DIAGNOSTIC (skipLpac): when args->skipLpac is set this entire
+     * step is skipped — no AppContainer profile, no SECURITY_CAPABILITIES,
+     * no ALL_APPLICATION_PACKAGES opt-out, and attrList stays NULL so
+     * CreateProcessW gets a plain (non-LPAC) token. This is the
+     * single-variable "no LPAC" matrix arm; it is diagnostic-only and the
+     * production win-backend never sets it.
      * ============================================================== */
 
+    if (!args->skipLpac) {
     /* A1. Resolve the package SID for the moniker. Create the profile if it
      * does not exist yet (the real sandbox profile — the TS side may or may
      * not have created it already; CreateAppContainerProfile is idempotent
@@ -1179,6 +1187,16 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     }
     fwprintf(stderr, L"[run] attribute list built\n");
     fflush(stderr);
+    } else {
+        /* RUN-6 DIAGNOSTIC (skipLpac): attrList is left NULL and
+         * si.lpAttributeList is never set, so CreateProcessW launches the
+         * child with a PLAIN token — no AppContainer, no capability SIDs,
+         * no ALL_APPLICATION_PACKAGES opt-out. packageSid / capSids /
+         * loopbackCapSid / secCapSids all stay NULL and the cleanup block
+         * already NULL-guards each free, so skipping Step A is safe. */
+        fwprintf(stderr, L"[run] DIAG skipLpac: LPAC attribute list omitted (plain token)\n");
+        fflush(stderr);
+    }
 
     /* ==============================================================
      * Step B -- stdio pipes + env block + command line, then the
@@ -1270,7 +1288,7 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     si.StartupInfo.hStdInput = inPipe.childEnd;
     si.StartupInfo.hStdOutput = outPipe.childEnd;
     si.StartupInfo.hStdError = errPipe.childEnd;
-    si.lpAttributeList = attrList;
+    si.lpAttributeList = attrList; /* NULL when skipLpac (no LPAC attrs) */
 
     if (!CreateProcessW(NULL,           /* lpApplicationName — use cmdLine */
                         cmdLine,        /* lpCommandLine */
@@ -1279,7 +1297,11 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
                         TRUE,           /* bInheritHandles — inherit the 3 pipe ends */
                         CREATE_SUSPENDED |
                         CREATE_UNICODE_ENVIRONMENT |
-                        EXTENDED_STARTUPINFO_PRESENT,
+                        /* EXTENDED_STARTUPINFO_PRESENT is required to honor
+                         * lpAttributeList; it is harmless-but-pointless when
+                         * the list is NULL, so omit it on the skipLpac arm to
+                         * keep that arm's CreateProcess call minimal. */
+                        (args->skipLpac ? 0 : EXTENDED_STARTUPINFO_PRESENT),
                         envBlock,
                         NULL,           /* lpCurrentDirectory — inherit */
                         &si.StartupInfo,
@@ -1302,8 +1324,22 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
 
     /* ==============================================================
      * Step C -- Job Object create + configure.
+     *
+     * RUN-6 DIAGNOSTIC (skipJob): when args->skipJob is set this step and
+     * Step D are skipped entirely — no Job is created and the child is
+     * never assigned to one. The child is still CREATE_SUSPENDED ->
+     * ResumeThread with the stdio relay; only the Job layer is omitted
+     * (the single-variable "no Job" matrix arm). job stays NULL and the
+     * cleanup block NULL-guards CloseHandle(job). Diagnostic-only.
+     *
+     * RUN-6 DIAGNOSTIC (noJobMemLimit): when set, the Job is created and
+     * assigned but JOB_OBJECT_LIMIT_JOB_MEMORY is omitted from the
+     * extended limit (KILL_ON_JOB_CLOSE and the active-process cap are
+     * kept). This isolates whether the per-Job commit cap is the node/V8
+     * fast-fail trigger. Diagnostic-only.
      * ============================================================== */
 
+    if (!args->skipJob) {
     jobSa.nLength = sizeof(jobSa);
     jobSa.lpSecurityDescriptor = NULL;
     jobSa.bInheritHandle = FALSE; /* the untrusted child must NOT inherit the Job handle */
@@ -1316,9 +1352,14 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     }
 
     ZeroMemory(&jeli, sizeof(jeli));
-    jeli.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    jeli.JobMemoryLimit = (SIZE_T)args->memMb * 1024u * 1024u;
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!args->noJobMemLimit) {
+        jeli.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+        jeli.JobMemoryLimit = (SIZE_T)args->memMb * 1024u * 1024u;
+    } else {
+        fwprintf(stderr, L"[run] DIAG noJobMemLimit: JOB_OBJECT_LIMIT_JOB_MEMORY omitted\n");
+        fflush(stderr);
+    }
     if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
                                  &jeli, sizeof(jeli))) {
         err = GetLastError();
@@ -1347,6 +1388,10 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     }
     fwprintf(stderr, L"[run] child assigned to job\n");
     fflush(stderr);
+    } else {
+        fwprintf(stderr, L"[run] DIAG skipJob: no Job created/assigned\n");
+        fflush(stderr);
+    }
 
     /* ==============================================================
      * Step E -- everything succeeded. Resume the child: it now runs
@@ -1542,7 +1587,14 @@ static void usage_run(void) {
         L"  octopus-sandbox-helper.exe run --selftest --job <name> --mem-mb <n>\n"
         L"      --pkg <moniker> --proxy <host:port> --ca <path> --bootstrap <path>\n"
         L"      --node <nodePath>   (selftest launches the helper exe itself as the\n"
-        L"      LPAC child via run-probe-child; --node is accepted but unused)\n");
+        L"      LPAC child via run-probe-child; --node is accepted but unused)\n"
+        L"  RUN-6 DIAGNOSTIC-ONLY flags (not part of the production launch\n"
+        L"  contract; each removes ONE sandbox layer for the node/V8 root-cause\n"
+        L"  matrix; must be removed/guarded before release):\n"
+        L"      --skip-job          do not create/assign the Job Object\n"
+        L"      --skip-lpac         do not attach the AppContainer attribute list\n"
+        L"                          (plain token; Job still applied unless --skip-job)\n"
+        L"      --no-job-mem-limit  create the Job but omit JOB_OBJECT_LIMIT_JOB_MEMORY\n");
 }
 
 /*
@@ -1579,6 +1631,22 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
         /* Flag with no argument. */
         if (wcscmp(f, L"--selftest") == 0) {
             a.selfTest = 1;
+            continue;
+        }
+        /* RUN-6 DIAGNOSTIC-ONLY flags (see helper.h): each removes exactly
+         * one sandbox layer for the node/V8 root-cause matrix. They are NOT
+         * part of the production launch contract and must be removed /
+         * hard-guarded before release. */
+        if (wcscmp(f, L"--skip-job") == 0) {
+            a.skipJob = 1;
+            continue;
+        }
+        if (wcscmp(f, L"--skip-lpac") == 0) {
+            a.skipLpac = 1;
+            continue;
+        }
+        if (wcscmp(f, L"--no-job-mem-limit") == 0) {
+            a.noJobMemLimit = 1;
             continue;
         }
         if (i + 1 >= argc) { usage_run(); return 2; }
@@ -1623,6 +1691,14 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
      * block-buffered and a hang would swallow the markers). */
     fwprintf(stderr, L"[run] parsed args\n");
     fflush(stderr);
+    /* RUN-6 DIAGNOSTIC: echo the active matrix toggles so each matrix arm's
+     * CI log line is self-describing (which single variable was removed). */
+    if (a.skipJob || a.skipLpac || a.noJobMemLimit) {
+        fwprintf(stderr,
+                 L"[run] DIAG toggles: skipJob=%d skipLpac=%d noJobMemLimit=%d\n",
+                 a.skipJob, a.skipLpac, a.noJobMemLimit);
+        fflush(stderr);
+    }
 
     hr = launch_sandboxed(&a, &childExit);
     if (FAILED(hr)) {

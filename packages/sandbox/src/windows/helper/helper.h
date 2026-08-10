@@ -76,6 +76,37 @@ typedef struct SANDBOX_LAUNCH_ARGS {
      * NODE_OPTIONS=--require bootstrap injection is still applied (it is
      * inert for the helper exe, which never reads NODE_OPTIONS). */
     int     selfTest;
+
+    /* ---------------------------------------------------------------
+     * RUN-6 ROOT-CAUSE MATRIX — DIAGNOSTIC-ONLY TOGGLES.
+     *
+     * These three fields exist ONLY for the run-6 single-variable
+     * experiment that localizes why node.exe (v22) fast-fails
+     * (0x80000003 / STATUS_BREAKPOINT) under the full LPAC+Job sandbox
+     * while a minimal no-V8 child (run-probe-child) runs clean. Each one
+     * removes exactly ONE layer of the sandbox so the matrix can isolate
+     * the trigger. They are set ONLY by the helper's own `run` CLI flags
+     * (--skip-job / --skip-lpac / --no-job-mem-limit), NEVER by the
+     * production WinSandboxBackend launch path — the win-backend
+     * production launch must keep the full LPAC token + Job + memory
+     * limit. These flags MUST be removed (or hard-guarded behind a
+     * build-time diagnostic macro) before any release; they are not part
+     * of the launch contract and weaken isolation when set.
+     *
+     *   skipJob        — do NOT create/assign the Job Object. The child
+     *                    is still CREATE_SUSPENDED -> ResumeThread and the
+     *                    stdio relay still runs; only the Job is omitted.
+     *   skipLpac       — do NOT attach the AppContainer attribute list
+     *                    (plain token, no SECURITY_CAPABILITIES / no
+     *                    ALL_APPLICATION_PACKAGES opt-out). The Job is
+     *                    still applied unless skipJob is also set.
+     *   noJobMemLimit  — create the Job but OMIT JOB_OBJECT_LIMIT_JOB_MEMORY
+     *                    (keep KILL_ON_JOB_CLOSE + the active-process cap).
+     *                    No effect when skipJob is set (there is no Job).
+     * --------------------------------------------------------------- */
+    int     skipJob;
+    int     skipLpac;
+    int     noJobMemLimit;
 } SANDBOX_LAUNCH_ARGS;
 
 /*
