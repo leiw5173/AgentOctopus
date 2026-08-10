@@ -3,7 +3,7 @@
 // Cross-platform lifecycle + fail-closed contract for WinSandboxBackend.
 // The class gates on process.platform === 'win32' FIRST, but every
 // side-effecting collaborator (runtime-manifest verify, helper self-test,
-// gate install/remove, ACL grant, staged copy, sandboxed launch, teardown)
+// gate install/remove, staged copy, sandboxed launch, teardown)
 // is injectable via the constructor `deps` seam — so the full lifecycle,
 // cleanup ordering, and the memoized-first-outcome ContainmentCleanupError
 // contract are exercised on this (macOS) host without Windows.
@@ -199,6 +199,76 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
       } as never),
     ).rejects.toThrow(/guestCaBundlePath mismatch/);
   });
+
+  it('Option 3: installGate is keyed on windowsRuntime.nodePath (appIdPath), never a package SID', async () => {
+    let captured: unknown;
+    const b = new WinSandboxBackend({
+      sessionId: 't',
+      deps: {
+        ...okDeps(),
+        stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
+        installGate: async (req: unknown) => { captured = req; return { filterKeys: ['k'] }; },
+        launchSandboxed: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        teardownSandbox: async () => {},
+        removeGate: async () => {},
+        removeCopyDir: async () => {},
+      } as never,
+    });
+    await b.probe();
+    await b.prepareTopology();
+    await b.prepare({
+      snapshotRoot: '/x',
+      expectedSnapshotDigest: DIGEST,
+      proxyAddr: 'http://127.0.0.1:8080',
+      caBundlePath: '/ca.pem',
+      runtimeProfile: {
+        id: 'r', bins: [], path: '',
+        windowsRuntime: { manifestPath: 'm', nodePath: 'C:\\rt\\node.exe', bootstrapPath: 'b' },
+      },
+      guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
+      resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
+    } as never);
+    const req = captured as Record<string, unknown>;
+    expect(req.appIdPath).toBe('C:\\rt\\node.exe');
+    expect(req).not.toHaveProperty('packageSid');
+    await b.cleanup();
+  });
+
+  it('Option 3: spawn launches with restrictedToken:true (no LPAC)', async () => {
+    let capturedArgs: unknown;
+    const b = new WinSandboxBackend({
+      sessionId: 't',
+      deps: {
+        ...okDeps(),
+        stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
+        installGate: async () => ({ filterKeys: ['k'] }),
+        launchSandboxed: async (args: unknown) => {
+          capturedArgs = args;
+          return { exitCode: 0, stdout: '', stderr: '' };
+        },
+        teardownSandbox: async () => {},
+        removeGate: async () => {},
+        removeCopyDir: async () => {},
+      } as never,
+    });
+    await b.probe();
+    await b.prepareTopology();
+    await b.prepare({
+      snapshotRoot: '/x',
+      expectedSnapshotDigest: DIGEST,
+      proxyAddr: 'http://127.0.0.1:8080',
+      caBundlePath: '/ca.pem',
+      runtimeProfile: {
+        id: 'r', bins: [], path: '',
+        windowsRuntime: { manifestPath: 'm', nodePath: 'C:\\rt\\node.exe', bootstrapPath: 'b' },
+      },
+      guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
+      resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
+    } as never);
+    await b.run({ command: ['main.js'] } as never);
+    expect((capturedArgs as Record<string, unknown>).restrictedToken).toBe(true);
+    await b.cleanup();
+  });
 });
 
 describe('stageVerifiedCopy', () => {
@@ -268,8 +338,6 @@ describe('WinSandboxBackend cleanup (memoized first outcome + ContainmentCleanup
       deps: {
         ...okDeps(),
         stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
-        deriveLoopbackSid: async () => 'S-1-15-3-1',
-        grantRead: async () => { calls.push('grantRead'); },
         installGate: async () => { calls.push('installGate'); return { filterKeys: ['k'] }; },
         launchSandboxed: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
         teardownSandbox: async () => { calls.push('teardownSandbox'); },
@@ -363,8 +431,6 @@ describe('WinSandboxBackend run() stdin plumbing (ExecSpec.stdin contract)', () 
       deps: {
         ...okDeps(),
         stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
-        deriveLoopbackSid: async () => 'S-1-15-3-1',
-        grantRead: async () => {},
         installGate: async () => ({ filterKeys: ['k'] }),
         // Capture the second (HelperSpawnOptions) argument.
         launchSandboxed: async (_args: unknown, opts: unknown) => {
@@ -398,8 +464,6 @@ describe('WinSandboxBackend run() stdin plumbing (ExecSpec.stdin contract)', () 
       deps: {
         ...okDeps(),
         stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
-        deriveLoopbackSid: async () => 'S-1-15-3-1',
-        grantRead: async () => {},
         installGate: async () => ({ filterKeys: ['k'] }),
         launchSandboxed: async (_args: unknown, opts: unknown) => {
           called = true;

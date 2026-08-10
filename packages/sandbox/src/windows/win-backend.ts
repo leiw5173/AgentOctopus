@@ -1,15 +1,25 @@
 /**
  * Windows restricted backend — `WinSandboxBackend`.
  *
- * Wires the Task 1–10 primitives into the canonical `SandboxBackend`
- * interface:
+ * Wires the primitives into the canonical `SandboxBackend` interface:
  *   - Task 4  `verifyWindowsRuntimeManifest`        (src/windows/runtime-manifest.ts)
- *   - Task 10 `launchSandboxed`/`grantRead`/`deriveLoopbackSid`/`installGate`/`removeGate`
- *                                                   (src/windows/{job,acl,sid,gate-client}.ts)
+ *   - Task 10 `launchSandboxed`/`installGate`/`removeGate`
+ *                                                   (src/windows/{job,gate-client}.ts)
  *   - Task 11 `teardownSandbox`                     (src/windows/teardown.ts)
  *   - Task 11 `stageVerifiedCopy`                   (src/windows/stage-copy.ts)
  *
- * The heavy lifting (Job Object, LPAC token, WFP gate, ACL grant, spawn,
+ * PRODUCTION ISOLATION MODEL (Option 3): the skill's node.exe is launched by
+ * the native helper under a CreateRestrictedToken-hardened token (privileges
+ * stripped, Administrators deny-only, Low integrity) inside a Job Object — NO
+ * AppContainer profile, NO LPAC token. Network egress is scoped by the
+ * companion service's persistent WFP allowlist keyed on
+ * `FWPM_CONDITION_ALE_APP_ID` — the sandbox node.exe DOS path — NOT the
+ * (AppContainer-only) PACKAGE_ID. There is therefore NO AppContainer ACL grant
+ * and NO loopback capability SID anywhere on the production path (the LPAC
+ * `grant-acl`/`sid` helper subcommands + acl.ts/sid.ts wrappers survive only
+ * as the diagnostic selftest baseline).
+ *
+ * The heavy lifting (Job Object, restricted-token launch, WFP gate, spawn,
  * teardown) is delegated to the native helper exe + the privileged companion
  * service; this TS class owns orchestration, lifecycle, and the
  * cleanup-memoization contract. Isolation target is `restricted` — never
@@ -54,8 +64,6 @@ import { SNAPSHOT_DIGEST_RE } from '../schema.js';
 import type { IsolationLevel } from '../types.js';
 import { verifyWindowsRuntimeManifest } from './runtime-manifest.js';
 import { launchSandboxed } from './job.js';
-import { grantRead } from './acl.js';
-import { deriveLoopbackSid } from './sid.js';
 import { installGate, removeGate } from './gate-client.js';
 import { teardownSandbox } from './teardown.js';
 import { stageVerifiedCopy, type StagedCopy } from './stage-copy.js';
@@ -85,6 +93,29 @@ function defaultRuntimeManifestPath(): string {
   );
 }
 
+/**
+ * Resolve the sandbox node.exe DOS path from the runtime manifest for the
+ * gate-availability probe. The probe runs BEFORE prepare() has
+ * `opts.runtimeProfile.windowsRuntime.nodePath`, so it reads the `nodePath`
+ * field out of the same manifest that `verifyRuntime` just verified. The WFP
+ * gate is APP_ID-scoped (Option 3) and the service canonicalizes the path via
+ * `FwpmGetAppIdFromFileName0`, which REQUIRES a real, existing node.exe DOS
+ * path — so the probe must pass the manifest's nodePath (the trusted,
+ * on-host node.exe), never a throwaway path. Returns undefined when the
+ * manifest cannot be read/parsed (the probe then reports unavailable).
+ */
+async function probeNodePath(manifestPath: string): Promise<string | undefined> {
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as { nodePath?: unknown };
+    return typeof parsed.nodePath === 'string' && parsed.nodePath.length > 0
+      ? parsed.nodePath
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // DI seam — injectable collaborators (never consulted for behavior)
 // ---------------------------------------------------------------------------
@@ -105,11 +136,7 @@ export interface WinBackendDeps {
   gateAvailable?: () => Promise<boolean>;
   /** Stage the per-session snapshot+CA copy + re-verify the digest (spec §3). */
   stageCopy?: typeof stageVerifiedCopy;
-  /** Derive the loopback capability SID for the session package moniker. */
-  deriveLoopbackSid?: (moniker: string) => Promise<string>;
-  /** Grant the session package READ on the staged copy. */
-  grantRead?: (pkgMoniker: string, dir: string) => Promise<void>;
-  /** Install the per-session WFP gate (explicit proxyV6Loopback). */
+  /** Install the per-session WFP gate keyed on the node.exe APP_ID path. */
   installGate?: typeof installGate;
   /** Launch the sandboxed child via the helper `run` subcommand. */
   launchSandboxed?: typeof launchSandboxed;
@@ -258,18 +285,25 @@ export class WinSandboxBackend implements SandboxBackend {
   }
 
   /**
-   * Default gate-availability self-check: derive a throwaway SID, install a
-   * throwaway gate for it, then remove it. Any failure → unavailable. Uses a
-   * dedicated probe session id so a leftover throwaway gate can never collide
-   * with a real session.
+   * Default gate-availability self-check: install a throwaway gate keyed on the
+   * REAL sandbox node.exe APP_ID path, then remove it. Any failure →
+   * unavailable. Uses a dedicated probe session id so a leftover throwaway gate
+   * can never collide with a real session.
+   *
+   * CRITICAL (task-37 contract): the gate is APP_ID-scoped and the service
+   * canonicalizes `appIdPath` via `FwpmGetAppIdFromFileName0`, which fails on a
+   * nonexistent path. So the probe MUST pass the manifest's real, existing
+   * node.exe DOS path — a throwaway/derived path would make the service reject
+   * install-gate and the probe would WRONGLY report the gate unavailable.
    */
   private async defaultGateAvailable(): Promise<boolean> {
     const probeSession = `probe-${this.sessionId}`;
     try {
-      const sid = await deriveLoopbackSid(`AgentOctopus.Sandbox.${probeSession}`);
+      const appIdPath = await probeNodePath(defaultRuntimeManifestPath());
+      if (!appIdPath) return false;
       await installGate({
         sessionId: probeSession,
-        packageSid: sid,
+        appIdPath,
         proxyHost: '127.0.0.1',
         proxyPort: 9, // discard port — a throwaway endpoint, never dialed
         jobName: `OctJob-${probeSession}`,
@@ -351,21 +385,29 @@ export class WinSandboxBackend implements SandboxBackend {
     }
 
     try {
-      // Step 5: grant the skill's LPAC SIDs READ-only DACL on the staged copy.
-      const grantReadFn =
-        this.deps.grantRead ?? ((moniker: string, dir: string) => grantRead(moniker, dir));
-      await grantReadFn(this.pkgMoniker!, this.staged.guestSkillRoot);
+      // Step 5 (Option 3): NO AppContainer ACL grant. Under the
+      // restricted-token production model there is no AppContainer token, so a
+      // package ACL grant (`grantRead`) would be meaningless — the restricted
+      // child reads the staged copy via NORMAL file ACLs (the staged copy under
+      // the runner's sessionDir is readable by the user the helper runs as).
+      // OPEN EMPIRICAL ITEM: if the windows-restricted CI lane shows the
+      // Low-integrity restricted token CANNOT read the staged copy, the fix is
+      // a least-privilege Users/Everyone read grant on the staged dir — do NOT
+      // pre-build it here.
 
-      // Step 6: install the per-session WFP allowlist for this session's
-      // package SID + proxy endpoint (§4c). proxyV6Loopback is computed from
-      // whether the proxy actually listens on ::1 — the service must not guess.
-      const deriveSid = this.deps.deriveLoopbackSid ?? ((m: string) => deriveLoopbackSid(m));
-      const packageSid = await deriveSid(this.pkgMoniker!);
+      // Step 6: install the per-session WFP allowlist keyed on the sandbox
+      // node.exe APP_ID path (Option 3) + proxy endpoint (§4c). proxyV6Loopback
+      // is computed from whether the proxy actually listens on ::1 — the
+      // service must not guess. The APP_ID path is the trusted closure's
+      // node.exe (windowsRuntime.nodePath): it MUST be a real, existing DOS
+      // path or the service's FwpmGetAppIdFromFileName0 rejects the install
+      // (fail-closed).
+      const win = opts.runtimeProfile.windowsRuntime!;
       const { host: proxyHost, port: proxyPort } = parseProxyAddr(opts.proxyAddr);
       const install = this.deps.installGate ?? installGate;
       await install({
         sessionId: this.sessionId,
-        packageSid,
+        appIdPath: win.nodePath,
         proxyHost,
         proxyPort,
         jobName: this.jobName!,
@@ -426,6 +468,7 @@ export class WinSandboxBackend implements SandboxBackend {
         jobName: this.jobName!,
         memMb,
         pkgMoniker: this.pkgMoniker!,
+        restrictedToken: true, // Option-3 production mode: hardened restricted token, no LPAC
         proxy: { host: proxyHost, port: proxyPort },
         caPath: staged.guestCaBundlePath,
         bootstrapPath: win.bootstrapPath,
@@ -504,10 +547,13 @@ export class WinSandboxBackend implements SandboxBackend {
    *      filters. A removal failure here leaves a leftover BLOCK filter —
    *      fail-closed residue / host hygiene, a SOFT degradation, NOT a
    *      containment breach.
-   *   3. Delete the AppContainer profile + the staged copy wholesale (host
-   *      hygiene — soft). The helper's teardown already deletes the profile +
-   *      copy on the confirmed-dead path; removeCopyDir is the TS-side
-   *      best-effort sweep of the staged dir.
+   *   3. Delete the staged copy wholesale (host hygiene — soft). Under Option 3
+   *      no AppContainer profile is ever created; the helper's teardown still
+   *      issues DeleteAppContainerProfile for the (nonexistent) profile, which
+   *      is a harmless no-op, plus the copy removal on the confirmed-dead path.
+   *      removeCopyDir is the TS-side best-effort sweep of the staged dir.
+   *      (C-side follow-up: drop the now-dead profile-delete from the helper's
+   *      teardown subcommand.)
    */
   private async cleanupPartial(containmentReasons: string[]): Promise<void> {
     const softErrors: unknown[] = [];
@@ -544,8 +590,9 @@ export class WinSandboxBackend implements SandboxBackend {
       });
     }
 
-    // 3. Delete the staged copy dir (host fs hygiene — soft). The helper's
-    //    teardown removes the profile + copy on the confirmed-dead path; this
+    // 3. Delete the staged copy dir (host fs hygiene — soft). Under Option 3
+    //    the helper's teardown performs a no-op profile delete (no AppContainer
+    //    profile exists) plus the copy removal on the confirmed-dead path; this
     //    is the TS-side best-effort sweep of the session stage dir.
     if (jobConfirmedDead && this.copyDir) {
       const dir = this.copyDir;

@@ -8,7 +8,7 @@
  * Pipe path: \\.\pipe\octopus-sandbox-gate.
  *
  * Ops:
- *   install-gate { op, sessionId, packageSid, proxyHost, proxyPort, jobName,
+ *   install-gate { op, sessionId, appIdPath, proxyHost, proxyPort, jobName,
  *                  proxyV6Loopback }
  *     -> { ok:true, filterKeys:[...] }  |  { ok:false, error:"..." }
  *   remove-gate  { op, sessionId }
@@ -44,7 +44,16 @@ export interface GateClientOptions {
 
 export interface InstallGateRequest {
   sessionId: string;
-  packageSid: string;
+  /**
+   * DOS path of the sandbox node.exe the WFP `FWPM_CONDITION_ALE_APP_ID`
+   * condition keys on (Option 3: the restricted-token child is scoped by its
+   * image path, not an AppContainer package). The service canonicalizes it via
+   * `FwpmGetAppIdFromFileName0`, which requires a real, existing node.exe DOS
+   * path on the host — a throwaway/nonexistent path makes the service reject
+   * install-gate (fail-closed). Send the plain DOS form (`C:\...\node.exe`),
+   * never an NT device path or a `\\?\`-prefixed extended path.
+   */
+  appIdPath: string;
   /** Loopback proxy host the WFP permit targets: "127.0.0.1" or "::1". */
   proxyHost: string;
   proxyPort: number;
@@ -150,11 +159,14 @@ export async function installGate(
   req: InstallGateRequest,
   opts?: GateClientOptions,
 ): Promise<{ filterKeys: string[] }> {
+  if (typeof req.appIdPath !== 'string' || req.appIdPath.length === 0) {
+    throw new WindowsSandboxError('appIdPath must be a non-empty string');
+  }
   const resp = await gateRpc(
     {
       op: 'install-gate',
       sessionId: req.sessionId,
-      packageSid: req.packageSid,
+      appIdPath: req.appIdPath,
       proxyHost: req.proxyHost,
       proxyPort: req.proxyPort,
       jobName: req.jobName,

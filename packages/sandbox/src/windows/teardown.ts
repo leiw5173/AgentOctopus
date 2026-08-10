@@ -8,6 +8,13 @@
  * active-process count reaches 0, then deletes the AppContainer profile and
  * the staged per-session copy dir (helper.c cmd_teardown, ~1952).
  *
+ * OPTION-3 NOTE: under the restricted-token production model NO AppContainer
+ * profile is ever created, so the helper's DeleteAppContainerProfile call is a
+ * harmless no-op (deleting a nonexistent profile). The Job-terminate +
+ * copy-removal work is still required, so this invocation is unchanged. The
+ * now-dead profile-delete is flagged for a C-side follow-up; do not remove it
+ * here.
+ *
  * FAIL-CLOSED (security-critical, mirrors the helper's own invariant): the
  * helper exits NON-ZERO and LEAVES the profile + copy dir in place whenever
  * the Job cannot be confirmed dead — a live or unconfirmed-dead skill must

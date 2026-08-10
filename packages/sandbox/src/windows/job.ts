@@ -3,9 +3,20 @@
  *
  * Spawns
  *   octopus-sandbox-helper.exe run --job <name> --mem-mb <n> --pkg <moniker>
- *     --proxy <url> --ca <path> --bootstrap <path> --node <nodePath> -- <argv...>
- * which creates the Job object + AppContainer profile, launches the child
- * node.exe inside it, relays stdio, and exits with the child's exit code.
+ *     --proxy <url> --ca <path> --bootstrap <path> --node <nodePath>
+ *     [--restricted-token] -- <argv...>
+ * which creates the Job object and, in the production mode, launches the child
+ * node.exe under a CreateRestrictedToken-hardened token (no AppContainer /
+ * LPAC), relays stdio, and exits with the child's exit code.
+ *
+ * PRODUCTION MODE (Option 3): pass `restrictedToken: true`. The helper then
+ * builds a hardened restricted token (privileges stripped, Administrators
+ * deny-only, Low integrity) and launches via CreateProcessAsUserW — NO LPAC
+ * profile, NO AppContainer token. The legacy LPAC path is DIAGNOSTIC-ONLY
+ * (the LPAC selftest baseline); production always uses restricted-token.
+ * `pkgMoniker` is still passed (the helper requires it for the LPAC diagnostic
+ * baseline + selftest), but the restricted-token path ignores the LPAC profile
+ * creation.
  *
  * PROXY SCHEME CONTRACT (Task 7 -> Task 8/10 deferral, resolved TS-side):
  * helper.c passes its --proxy value VERBATIM into the child's
@@ -30,7 +41,18 @@ import { spawnHelper, type HelperSpawnOptions, type HelperResult } from './helpe
 export interface LaunchSandboxedArgs {
   jobName: string;
   memMb: number;
+  /**
+   * Session package moniker. Still required by the helper for the LPAC
+   * diagnostic baseline + selftest; the restricted-token production path passes
+   * it through but ignores the LPAC profile creation.
+   */
   pkgMoniker: string;
+  /**
+   * PRODUCTION MODE (Option 3): when true, append `--restricted-token` so the
+   * helper launches node under a CreateRestrictedToken-hardened token (no
+   * LPAC). LPAC is diagnostic-only; production always sets this true.
+   */
+  restrictedToken: boolean;
   /** Egress proxy endpoint: "host:port", {host, port}, or a full URL. */
   proxy: string | { host: string; port: number };
   caPath: string;
@@ -87,6 +109,9 @@ export async function launchSandboxed(
     '--ca', args.caPath,
     '--bootstrap', args.bootstrapPath,
     '--node', args.nodePath,
+    // Option-3 production mode: launch under a hardened restricted token, no
+    // LPAC. Placed immediately before the `--` separator.
+    ...(args.restrictedToken ? ['--restricted-token'] : []),
     '--',
     ...args.argv,
   ];

@@ -42,6 +42,7 @@ describe('windows wrappers fail closed when backend pieces missing', () => {
           jobName: 'J',
           memMb: 128,
           pkgMoniker: 'AgentOctopus.Sandbox.x',
+          restrictedToken: true,
           proxy: '127.0.0.1:8080',
           caPath: 'C:\\no\\ca.pem',
           bootstrapPath: 'C:\\no\\bootstrap.cjs',
@@ -58,7 +59,23 @@ describe('windows wrappers fail closed when backend pieces missing', () => {
       installGate(
         {
           sessionId: 'x',
-          packageSid: 'S-1-5-1',
+          appIdPath: 'C:\\no\\node.exe',
+          proxyHost: '127.0.0.1',
+          proxyPort: 1,
+          jobName: 'J',
+          proxyV6Loopback: false,
+        },
+        { pipePath: BOGUS_PIPE, timeoutMs: 2000 },
+      ),
+    ).rejects.toThrow(WindowsSandboxError);
+  });
+
+  it('installGate rejects an empty appIdPath before any transport', async () => {
+    await expect(
+      installGate(
+        {
+          sessionId: 'x',
+          appIdPath: '',
           proxyHost: '127.0.0.1',
           proxyPort: 1,
           jobName: 'J',

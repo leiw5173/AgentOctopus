@@ -236,7 +236,10 @@ describe('gate service (OctopusSandboxGate)', () => {
       const ins = await rpc({
         op: 'install-gate',
         sessionId,
-        packageSid: 'S-1-15-2-1',
+        // Option 3: the gate is APP_ID-scoped. The service canonicalizes the
+        // sandbox node.exe DOS path via FwpmGetAppIdFromFileName0, which
+        // requires a real existing node.exe — pass the host's real node path.
+        appIdPath: node,
         proxyHost: '127.0.0.1',
         proxyPort: 8080,
         jobName,
@@ -311,7 +314,8 @@ describe('gate service (OctopusSandboxGate)', () => {
     const ins = await rpc({
       op: 'install-gate',
       sessionId: 's-gone',
-      packageSid: 'S-1-15-2-1',
+      // Option 3: APP_ID-scoped gate — pass a real existing node.exe DOS path.
+      appIdPath: process.execPath,
       proxyHost: '127.0.0.1',
       proxyPort: 8080,
       jobName: 'OctJob-never-existed',

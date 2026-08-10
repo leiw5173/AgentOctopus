@@ -2,6 +2,13 @@
  * Loopback capability SID derivation — TS wrapper for the helper's `sid`
  * subcommand.
  *
+ * DEPRECATION NOTE (Option 3): NOT used by the production Windows node path.
+ * The production model launches node under a CreateRestrictedToken-hardened
+ * token (no AppContainer) and the WFP gate is APP_ID-scoped, so a loopback
+ * capability SID is never derived on that path. This wrapper is retained
+ * FUNCTIONAL for the LPAC selftest diagnostic only (the helper's `sid`
+ * subcommand still exists).
+ *
  * Spawns `octopus-sandbox-helper.exe sid <moniker>`, which prints the
  * loopback capability SID (S-1-15-3-*) derived from the AppContainer package
  * moniker to stdout and exits 0. Any spawn failure, non-zero exit, or

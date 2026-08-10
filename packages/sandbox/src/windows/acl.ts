@@ -1,6 +1,13 @@
 /**
  * Read-only ACL grant — TS wrapper for the helper's `grant-acl` subcommand.
  *
+ * DEPRECATION NOTE (Option 3): NOT used by the production Windows node path.
+ * The production model launches node under a CreateRestrictedToken-hardened
+ * token (no AppContainer), so an AppContainer package ACL grant is meaningless
+ * on that path — the restricted child reads the staged copy via normal file
+ * ACLs. This wrapper is retained FUNCTIONAL for the LPAC selftest diagnostic
+ * only (the helper's `grant-acl` subcommand still exists).
+ *
  * Spawns `octopus-sandbox-helper.exe grant-acl --pkg <moniker> --path <dir>`,
  * which grants the AppContainer package read access to the given directory
  * (used for the trusted runtime closure: node.exe, bootstrap, vendored
