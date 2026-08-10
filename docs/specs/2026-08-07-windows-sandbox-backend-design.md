@@ -7,10 +7,18 @@
 
 > **Implementation note (post-design pivot — Option 3).** During implementation the LPAC/AppContainer
 > token proved incompatible with the Node runtime: a controlled single-variable matrix established that the
-> LPAC token is the **necessary trigger** of the Node launch crash (`0x80000003` / `STATUS_BREAKPOINT`); the
-> specific internal trigger point is pending crash-stack confirmation. The node execution path was therefore
+> LPAC token is the **necessary trigger** of the Node launch crash (`0x80000003` / `STATUS_BREAKPOINT`).
+> Run-7 identified the internal trigger point at subsystem level: every crashing LPAC arm prints
+> `WSAStartup: (10107) A system call has failed.` on the child's stderr immediately before the fail-fast,
+> and no non-LPAC arm does — Node dies in its Winsock initialization under the LPAC token (consistent with
+> the jitless/no-WASM-trap-handler arms changing nothing: the trigger is pre-V8). A symbolizable WER dump
+> was not produced (WerFault did not write one for the AppContainer crash), so the stack itself remains
+> unconfirmed. The node execution path was therefore
 > pivoted **off LPAC** to **Option 3 — a `CreateRestrictedToken`-hardened token** (privileges stripped,
-> Administrators deny-only, Low Integrity) launched via `CreateProcessAsUserW`, plus the same Job Object.
+> Administrators deny-only, Low Integrity) launched via `CreateProcessWithTokenW` (run-7 finding:
+> `CreateProcessAsUserW` fails with `ERROR_PRIVILEGE_NOT_HELD`/1314 outside a service token, which alone
+> carries `SeAssignPrimaryTokenPrivilege`; `CreateProcessWithTokenW` needs only `SeImpersonatePrivilege`,
+> which admin tokens hold), plus the same Job Object.
 > Consequences relative to the design below: (a) the WFP egress allowlist is scoped by the sandbox `node.exe`
 > **application ID** (`FWPM_CONDITION_ALE_APP_ID`), not the AppContainer package SID (`ALE_PACKAGE_ID`, which
 > only matches AppContainer processes); (b) there is no AppContainer package grant on the staged copy — the
