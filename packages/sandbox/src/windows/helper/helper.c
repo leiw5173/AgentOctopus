@@ -27,6 +27,14 @@
  *                                                 exit 0 on success; any
  *                                                 failure -> stderr message
  *                                                 + non-zero exit.
+ *   octopus-sandbox-helper.exe diag-launch --node <path>
+ *                                              -- run-10 diagnostic: probe
+ *                                                 image/winsta/desktop access
+ *                                                 under the production
+ *                                                 restricted token and run a
+ *                                                 launch-variant battery; all
+ *                                                 output on stderr, exit 0
+ *                                                 once the battery completes.
  *
  * Exit codes:
  *   0  success
@@ -1453,7 +1461,20 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
          * explicit envBlock (not the profile environment), and node needs no
          * HKCU hive to start. LOGON_NETCREDENTIALS_ONLY skips the profile
          * load entirely; the token's credentials still apply for network
-         * authentication. */
+         * authentication.
+         *
+         * WHY CREATE_NO_WINDOW (run-10 candidate fix): run-9 still failed
+         * hr=0x80070005 under LOGON_NETCREDENTIALS_ONLY, so the profile is
+         * not (the only) access-checked resource. The leading remaining
+         * candidate is the window station / desktop association: with
+         * lpDesktop == NULL the child joins the caller's winsta/desktop and
+         * the access check runs against the CHILD token — a Low-integrity
+         * token is write-up-blocked on the Medium-integrity winsta/desktop.
+         * CREATE_NO_WINDOW removes the console association; the child's
+         * stdio is the relay pipes either way, so it never needed a console.
+         * The `diag-launch` subcommand's battery isolates which factor
+         * denies; if CREATE_NO_WINDOW is not the fix the battery output
+         * points at the next one. */
         fwprintf(stderr, L"[run] launching via CreateProcessWithTokenW\n");
         fflush(stderr);
         /* CreateProcessWithTokenW takes a plain STARTUPINFOW (not the
@@ -1472,7 +1493,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
                                   LOGON_NETCREDENTIALS_ONLY,
                                   NULL,         /* lpApplicationName — use cmdLine */
                                   cmdLine,      /* lpCommandLine */
-                                  CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                                  CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
+                                  CREATE_NO_WINDOW,
                                   envBlock,
                                   NULL,         /* lpCurrentDirectory — inherit */
                                   &si.StartupInfo,
@@ -2574,6 +2596,349 @@ static int cmd_teardown(int argc, wchar_t **argv, int startIdx) {
     return 0;
 }
 
+/* ==================================================================
+ * RUN-10 DIAGNOSTIC: cmd_diag_launch -- pinpoint the ACCESS_DENIED.
+ *
+ * Run-8/run-9 CI: the Option-3 restricted token builds cleanly ("[run]
+ * restricted token built") but CreateProcessWithTokenW returns
+ * ERROR_ACCESS_DENIED (hr=0x80070005) on the windows-latest runner, for
+ * BOTH logon flags (LOGON_WITH_PROFILE run-8, LOGON_NETCREDENTIALS_ONLY
+ * run-9). So the denial is NOT (only) the profile load. This subcommand
+ * decomposes the remaining access checks in ONE CI run.
+ *
+ * Impersonation probes -- the production-form restricted token is
+ * impersonated on the helper's own thread (plus the helper's own identity
+ * as baseline) and attempts the three objects a CreateProcess access check
+ * can touch:
+ *   P1  CreateFileW(node.exe, GENERIC_READ|GENERIC_EXECUTE)  -- image DACL
+ *   P2  OpenWindowStationW(L"WinSta0", MAXIMUM_ALLOWED)      -- winsta
+ *   P3  OpenDesktopW(L"Default", MAXIMUM_ALLOWED)            -- desktop
+ *
+ * Launch battery -- each arm builds its own token, launches node
+ * CREATE_SUSPENDED with `-e "process.exit(0)"`, then terminates the child
+ * immediately (no user code ever runs, no Job is involved -- this isolates
+ * the launch access check itself):
+ *   G  plain duplicate (no restriction at all)     NETCRED + NO_WINDOW
+ *   A  production form (Low + admins deny-only)    NETCRED            (run-9 repro)
+ *   B  production form                             NETCRED + NO_WINDOW  (run-10 fix?)
+ *   C  production form                             WITH_PROFILE + NO_WINDOW
+ *   D  restricted but Medium integrity (no Low)    NETCRED + NO_WINDOW
+ *   E  Low integrity but admins NOT deny-only      NETCRED + NO_WINDOW
+ *
+ * Interpretation key:
+ *   G fails too          -> the denial is NOT the restriction: it is the
+ *                           session / winsta / CreateProcessWithTokenW
+ *                           itself on this runner (escalate: service context
+ *                           or explicit desktop).
+ *   G ok, A/B fail       -> some hardening denies; D vs B isolates the
+ *                           integrity label, E vs B isolates admins-deny-only.
+ *   B ok                 -> CREATE_NO_WINDOW is the production fix (arm A is
+ *                           the failing without-control in the same run).
+ *
+ * Output: "[diag] ..." lines on stderr. Exit 0 once the battery ran to
+ * completion -- launch failures are DATA here, not failures. Exit 1 on a
+ * structural error (baseline token cannot even be built), 2 on usage.
+ * Diagnostic-only: never wired to the production launch path.
+ * ============================================================== */
+
+#define OCT_DIAG_PATH_MAX    1024
+#define OCT_DIAG_CMDLINE_MAX 2048
+
+/* Build one battery token. Flags: restrict=0 returns a plain duplicate of
+ * our own token (the G baseline, no CreateRestrictedToken); restrict=1
+ * applies DISABLE_MAX_PRIVILEGE (+ optional admins deny-only + optional Low
+ * integrity). impersonationForm=1 returns an impersonation-level duplicate
+ * (for SetThreadToken) instead of the primary. Fail-closed: any step's
+ * failure frees everything and returns the HRESULT. */
+static HRESULT diag_make_token(int restrict, int lowIntegrity, int denyAdmins,
+                               int impersonationForm, HANDLE *outToken) {
+    HANDLE hToken = NULL;
+    HANDLE hPrimary = NULL;
+    HANDLE hRestricted = NULL;
+    HANDLE hFinal = NULL;
+    PSID pAdminSid = NULL;
+    PSID pLowSid = NULL;
+    SID_AND_ATTRIBUTES disableSids[1];
+    DWORD disableSidCount = 0;
+    TOKEN_MANDATORY_LABEL tml;
+    DWORD adminSidSize = 0;
+    HRESULT hr = S_OK;
+
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_DUPLICATE | TOKEN_QUERY, &hToken)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+    if (!DuplicateTokenEx(hToken, TOKEN_ALL_ACCESS, NULL,
+                          SecurityImpersonation, TokenPrimary, &hPrimary)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+
+    if (!restrict) {
+        /* G baseline: an unrestricted copy of our own token. */
+        if (impersonationForm) {
+            if (!DuplicateTokenEx(hPrimary, TOKEN_ALL_ACCESS, NULL,
+                                  SecurityImpersonation, TokenImpersonation,
+                                  &hFinal)) {
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                goto done;
+            }
+        } else {
+            hFinal = hPrimary;
+            hPrimary = NULL;
+        }
+        *outToken = hFinal;
+        goto done;
+    }
+
+    if (denyAdmins) {
+        adminSidSize = (DWORD)SECURITY_MAX_SID_SIZE;
+        pAdminSid = (PSID)LocalAlloc(LMEM_FIXED, adminSidSize);
+        if (pAdminSid == NULL) { hr = E_OUTOFMEMORY; goto done; }
+        if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL,
+                                pAdminSid, &adminSidSize)) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+        disableSids[0].Sid = pAdminSid;
+        disableSids[0].Attributes = 0; /* deny-only */
+        disableSidCount = 1;
+    }
+
+    if (!CreateRestrictedToken(hPrimary, DISABLE_MAX_PRIVILEGE,
+                               disableSidCount, disableSids,
+                               0, NULL, 0, NULL, &hRestricted)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+
+    if (lowIntegrity) {
+        if (!ConvertStringSidToSidW(L"S-1-16-4096", &pLowSid)) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+        ZeroMemory(&tml, sizeof(tml));
+        tml.Label.Sid = pLowSid;
+        tml.Label.Attributes = SE_GROUP_INTEGRITY;
+        if (!SetTokenInformation(hRestricted, TokenIntegrityLevel,
+                                 &tml, (DWORD)sizeof(tml))) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+    }
+
+    if (impersonationForm) {
+        if (!DuplicateTokenEx(hRestricted, TOKEN_ALL_ACCESS, NULL,
+                              SecurityImpersonation, TokenImpersonation,
+                              &hFinal)) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+    } else {
+        hFinal = hRestricted;
+        hRestricted = NULL;
+    }
+    *outToken = hFinal;
+
+done:
+    if (hToken) CloseHandle(hToken);
+    if (hPrimary) CloseHandle(hPrimary);
+    if (hRestricted) CloseHandle(hRestricted);
+    if (FAILED(hr) && hFinal) CloseHandle(hFinal);
+    if (pAdminSid) LocalFree(pAdminSid);
+    if (pLowSid) LocalFree(pLowSid);
+    return hr;
+}
+
+/* The three access-check probes under ONE identity (who labels the output:
+ * either the helper's own identity or the impersonated restricted token). */
+static void diag_probe_as(const WCHAR *who, const WCHAR *nodePath) {
+    HANDLE hFile = INVALID_HANDLE_VALUE;
+    HWINSTA hWinsta = NULL;
+    HDESK hDesktop = NULL;
+    DWORD err = 0;
+
+    hFile = CreateFileW(nodePath, GENERIC_READ | GENERIC_EXECUTE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        fwprintf(stderr, L"[diag] %ls P1 image read+exec: OK\n", who);
+        CloseHandle(hFile);
+    } else {
+        err = GetLastError();
+        fwprintf(stderr, L"[diag] %ls P1 image read+exec: FAIL err=%lu\n",
+                 who, (unsigned long)err);
+    }
+
+    hWinsta = OpenWindowStationW(L"WinSta0", FALSE, MAXIMUM_ALLOWED);
+    if (hWinsta != NULL) {
+        fwprintf(stderr, L"[diag] %ls P2 OpenWindowStationW(WinSta0): OK\n", who);
+        CloseWindowStation(hWinsta);
+    } else {
+        err = GetLastError();
+        fwprintf(stderr, L"[diag] %ls P2 OpenWindowStationW(WinSta0): FAIL err=%lu\n",
+                 who, (unsigned long)err);
+    }
+
+    hDesktop = OpenDesktopW(L"Default", 0, FALSE, MAXIMUM_ALLOWED);
+    if (hDesktop != NULL) {
+        fwprintf(stderr, L"[diag] %ls P3 OpenDesktopW(Default): OK\n", who);
+        CloseDesktop(hDesktop);
+    } else {
+        err = GetLastError();
+        fwprintf(stderr, L"[diag] %ls P3 OpenDesktopW(Default): FAIL err=%lu\n",
+                 who, (unsigned long)err);
+    }
+    fflush(stderr);
+}
+
+/* One battery arm: launch node suspended under `token`, report OK/FAIL,
+ * terminate immediately. No Job, no stdio relay — this isolates the
+ * CreateProcessWithTokenW access check. */
+static void diag_try_launch(const WCHAR *tag, HANDLE token, DWORD logonFlags,
+                            DWORD extraCreateFlags, const WCHAR *nodePath) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    WCHAR cmdLine[OCT_DIAG_CMDLINE_MAX];
+    int rc = 0;
+    DWORD err = 0;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    rc = swprintf_s(cmdLine, ARRAYSIZE(cmdLine),
+                    L"\"%ls\" -e \"process.exit(0)\"", nodePath);
+    if (rc < 0) {
+        fwprintf(stderr, L"[diag] %ls: cmdline build failed\n", tag);
+        fflush(stderr);
+        return;
+    }
+
+    if (CreateProcessWithTokenW(token, logonFlags, NULL, cmdLine,
+                                CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
+                                extraCreateFlags,
+                                NULL,   /* inherit caller environment */
+                                NULL,   /* inherit cwd */
+                                &si, &pi)) {
+        fwprintf(stderr, L"[diag] %ls: OK pid=%lu\n", tag,
+                 (unsigned long)pi.dwProcessId);
+        TerminateProcess(pi.hProcess, 99);
+        WaitForSingleObject(pi.hProcess, 3000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    } else {
+        err = GetLastError();
+        fwprintf(stderr, L"[diag] %ls: FAIL hr=0x%08lx (err=%lu)\n", tag,
+                 (unsigned long)HRESULT_FROM_WIN32(err), (unsigned long)err);
+    }
+    fflush(stderr);
+}
+
+static void diag_run_battery(const WCHAR *nodePath) {
+    HANDLE t = NULL;
+    HRESULT hr = S_OK;
+
+    /* G -- baseline: plain duplicate, no restriction at all. */
+    hr = diag_make_token(0, 0, 0, 0, &t);
+    if (SUCCEEDED(hr)) {
+        diag_try_launch(L"G plain-duplicate NETCRED+NO_WINDOW", t,
+                        LOGON_NETCREDENTIALS_ONLY, CREATE_NO_WINDOW, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] G token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    /* A/B/C -- the exact production token form, three launch shapes. */
+    hr = diag_make_token(1, 1, 1, 0, &t);
+    if (SUCCEEDED(hr)) {
+        diag_try_launch(L"A low+denyadmins NETCRED (run-9 repro)", t,
+                        LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+        diag_try_launch(L"B low+denyadmins NETCRED+NO_WINDOW", t,
+                        LOGON_NETCREDENTIALS_ONLY, CREATE_NO_WINDOW, nodePath);
+        diag_try_launch(L"C low+denyadmins WITH_PROFILE+NO_WINDOW", t,
+                        LOGON_WITH_PROFILE, CREATE_NO_WINDOW, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] A/B/C token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    /* D -- same restriction but NO Low-integrity lowering. */
+    hr = diag_make_token(1, 0, 1, 0, &t);
+    if (SUCCEEDED(hr)) {
+        diag_try_launch(L"D medium+denyadmins NETCRED+NO_WINDOW", t,
+                        LOGON_NETCREDENTIALS_ONLY, CREATE_NO_WINDOW, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] D token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    /* E -- Low integrity but admins NOT deny-only. */
+    hr = diag_make_token(1, 1, 0, 0, &t);
+    if (SUCCEEDED(hr)) {
+        diag_try_launch(L"E low-only NETCRED+NO_WINDOW", t,
+                        LOGON_NETCREDENTIALS_ONLY, CREATE_NO_WINDOW, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] E token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+    fflush(stderr);
+}
+
+static int cmd_diag_launch(int argc, wchar_t **argv, int startIdx) {
+    WCHAR nodePath[OCT_DIAG_PATH_MAX];
+    HANDLE hProdImp = NULL;
+    HRESULT hr = S_OK;
+    DWORD sessionId = 0;
+    int i = 0;
+
+    nodePath[0] = L'\0';
+    for (i = startIdx; i < argc; i++) {
+        if (wcscmp(argv[i], L"--node") == 0 && i + 1 < argc) {
+            wcsncpy_s(nodePath, ARRAYSIZE(nodePath), argv[i + 1], _TRUNCATE);
+            i++;
+        }
+    }
+    if (nodePath[0] == L'\0') {
+        fwprintf(stderr,
+            L"octopus-sandbox-helper: diag-launch requires --node <path>\n");
+        return 2;
+    }
+
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &sessionId)) {
+        sessionId = 0xFFFFFFFFUL;
+    }
+    fwprintf(stderr, L"[diag] battery start node=%ls sessionId=%lu\n",
+             nodePath, (unsigned long)sessionId);
+    fflush(stderr);
+
+    /* Baseline probes under the helper's own identity. */
+    diag_probe_as(L"baseline(helper-identity)", nodePath);
+
+    /* Probes under the production-form restricted token (impersonated). */
+    hr = diag_make_token(1, 1, 1, 1, &hProdImp);
+    if (SUCCEEDED(hr)) {
+        if (SetThreadToken(NULL, hProdImp)) {
+            diag_probe_as(L"restricted(low+denyadmins-impersonated)", nodePath);
+            RevertToSelf();
+        } else {
+            fwprintf(stderr, L"[diag] SetThreadToken failed err=%lu\n",
+                     (unsigned long)GetLastError());
+        }
+        CloseHandle(hProdImp);
+    } else {
+        fwprintf(stderr, L"[diag] impersonation-token build failed hr=0x%08lx\n",
+                 (unsigned long)hr);
+    }
+
+    diag_run_battery(nodePath);
+
+    fwprintf(stderr, L"[diag] battery complete\n");
+    fflush(stderr);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* wmain -- argv dispatcher                                            */
 /* ------------------------------------------------------------------ */
@@ -2588,7 +2953,8 @@ static void usage(void) {
         L"      -- <argv...>\n"
         L"  octopus-sandbox-helper.exe grant-acl --pkg <moniker> --path <dir>\n"
         L"  octopus-sandbox-helper.exe teardown --job <name> --pkg <moniker>\n"
-        L"      --copydir <dir>\n");
+        L"      --copydir <dir>\n"
+        L"  octopus-sandbox-helper.exe diag-launch --node <nodePath>\n");
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -2632,6 +2998,12 @@ int wmain(int argc, wchar_t **argv) {
 
     if (wcscmp(argv[1], L"teardown") == 0) {
         return cmd_teardown(argc, argv, 2);
+    }
+
+    /* RUN-10 DIAGNOSTIC: decompose the restricted-token launch
+     * ACCESS_DENIED. Log-only; never used by the production launch. */
+    if (wcscmp(argv[1], L"diag-launch") == 0) {
+        return cmd_diag_launch(argc, argv, 2);
     }
 
     /* Unknown subcommand. Task 9 adds the privileged companion-service RPC

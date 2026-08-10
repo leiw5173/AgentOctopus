@@ -19,6 +19,12 @@
 > `CreateProcessAsUserW` fails with `ERROR_PRIVILEGE_NOT_HELD`/1314 outside a service token, which alone
 > carries `SeAssignPrimaryTokenPrivilege`; `CreateProcessWithTokenW` needs only `SeImpersonatePrivilege`,
 > which admin tokens hold), plus the same Job Object.
+> Run-8/run-9 found the restricted-token launch itself denied (`ERROR_ACCESS_DENIED`) under BOTH logon
+> flags (`LOGON_WITH_PROFILE`, then `LOGON_NETCREDENTIALS_ONLY`), so the profile load is not the only
+> access-checked resource; run-10 adds `CREATE_NO_WINDOW` to the production launch (leading candidate:
+> the window-station/desktop access check under a Low-Integrity child token) and a `diag-launch` helper
+> subcommand whose log-only battery (impersonated image/winsta/desktop probes + six launch variants)
+> isolates which access check denies.
 > Consequences relative to the design below: (a) the WFP egress allowlist is scoped by the sandbox `node.exe`
 > **application ID** (`FWPM_CONDITION_ALE_APP_ID`), not the AppContainer package SID (`ALE_PACKAGE_ID`, which
 > only matches AppContainer processes); (b) there is no AppContainer package grant on the staged copy — the

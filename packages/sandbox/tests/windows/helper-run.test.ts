@@ -402,3 +402,31 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
     }
   }, 60_000);
 });
+
+// Run-8/run-9 left the Option-3 launch failing hr=0x80070005 (ACCESS_DENIED)
+// from CreateProcessWithTokenW for BOTH logon flags, after the restricted
+// token built cleanly. This block runs helper.c's `diag-launch` battery,
+// which decomposes that denial in a single CI run: impersonated access probes
+// (image read+exec, winsta0, desktop) plus six launch variants (plain
+// duplicate / production form ± CREATE_NO_WINDOW / WITH_PROFILE / no-Low /
+// no-admins-deny). It is DIAGNOSTIC: it asserts only that the battery ran to
+// completion, then logs every per-variant outcome to the CI log — the data
+// that picks the fix. It NEVER skips on the lane (itWin contract), and a
+// failing launch arm is data, not a test failure.
+describe('helper run (run-10 restricted-token launch diagnostic battery)', () => {
+  itWin('runs the diag-launch battery and logs every variant outcome', async () => {
+    const node = process.execPath;
+    const r = await runHelperStreaming(['diag-launch', '--node', node]);
+
+    // Structural: the helper accepted the args and the battery ran to
+    // completion. Launch-arm failures are printed results, not exit failures.
+    expect(r.code,
+      `diag-launch did not complete: code=${r.code} signal=${r.signal} stderr=<<<${r.stderr}>>>`)
+      .toBe(0);
+    expect(r.stderr, 'battery start marker missing').toContain('[diag] battery start');
+    expect(r.stderr, 'battery did not run to completion').toContain('[diag] battery complete');
+
+    // Full record to the CI log, greppable by "[diag]".
+    console.error('[diag-launch] battery output:\n' + r.stderr);
+  }, 60_000);
+});
