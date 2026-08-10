@@ -1442,10 +1442,18 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
          * which only SERVICE tokens carry — an (even elevated) interactive
          * admin token fails with ERROR_PRIVILEGE_NOT_HELD (1314).
          * CreateProcessWithTokenW instead requires SE_IMPERSONATE_NAME,
-         * which admin tokens hold by default. LOGON_WITH_PROFILE loads the
-         * token user's profile (already loaded for the CI/host user the
-         * helper runs as; the restricted token keeps the user SID, so the
-         * profile key resolves). */
+         * which admin tokens hold by default.
+         *
+         * WHY LOGON_NETCREDENTIALS_ONLY and NOT LOGON_WITH_PROFILE (run-8 CI
+         * finding, hr=0x80070005): LOGON_WITH_PROFILE loads the token user's
+         * profile hive, which requires WRITE access to the (Medium integrity)
+         * profile directory — the Low-integrity restricted token is blocked
+         * by write-up (NO_WRITE_UP) and the launch fails with ACCESS_DENIED.
+         * The profile is unnecessary here: the child's environment is the
+         * explicit envBlock (not the profile environment), and node needs no
+         * HKCU hive to start. LOGON_NETCREDENTIALS_ONLY skips the profile
+         * load entirely; the token's credentials still apply for network
+         * authentication. */
         fwprintf(stderr, L"[run] launching via CreateProcessWithTokenW\n");
         fflush(stderr);
         /* CreateProcessWithTokenW takes a plain STARTUPINFOW (not the
@@ -1461,7 +1469,7 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
          * STARTF_USESTDHANDLES set, the inheritable pipe ends in hStd* are
          * inherited by the child (they were created inheritable). */
         if (!CreateProcessWithTokenW(hRestricted,  /* hardened restricted token */
-                                  LOGON_WITH_PROFILE,
+                                  LOGON_NETCREDENTIALS_ONLY,
                                   NULL,         /* lpApplicationName — use cmdLine */
                                   cmdLine,      /* lpCommandLine */
                                   CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
