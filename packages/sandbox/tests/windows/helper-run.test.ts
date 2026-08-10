@@ -37,6 +37,17 @@
 // adopted, restore the hard baseline assertion (exit 3 + 'hi') reflecting the
 // fixed behavior. Off Windows (or before the helper exe is built) the whole
 // file skips cleanly via itWin — same as before.
+//
+// UPDATE (Option 3 adopted, Task 39): the remedy the TODO(run-6) awaited is
+// Option 3 — restricted token + Job Object, no LPAC. Run-6's outcome stands
+// as recorded in windows-run6-matrix-report.md: "LPAC token is the necessary
+// trigger for the Node launch crash; the specific internal trigger point is
+// pending crash-stack confirmation." Production node therefore launches via
+// `--restricted-token` (helper.c production mode), and the HARD fail-closed
+// assertions are restored in the SECOND describe block below ("Option 3
+// production regression"). This matrix test itself stays diagnostic — the
+// permanent record of the LPAC crash evidence — and still only asserts that
+// every arm produced an exit.
 import { describe, it, expect } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -215,4 +226,179 @@ describe('helper run (run-6 root-cause matrix)', () => {
     // CI runner. 180s bounds the worst case while a hang still streams live
     // "[run] <stage>" markers before failing.
   }, 180_000);
+});
+
+// ---------------------------------------------------------------------------
+// OPTION-3 PRODUCTION REGRESSION — the TODO(run-6) restoration (Task 39).
+//
+// The matrix above stayed diagnostic-only ("assert only that the matrix ran")
+// while the node launch crash was undiagnosed. Option 3 — restricted token +
+// Job Object, no LPAC — is the adopted remedy and the PRODUCTION launch mode
+// (`--restricted-token`; see job.ts / win-backend.ts). These tests restore
+// the HARD fail-closed assertions the run-6 relaxation replaced: they launch
+// node under the exact production configuration and assert the behavior that
+// was unassertable while node crashed under LPAC.
+//
+// Restricted-token contract asserted here (helper.c Step A' / Task 36):
+// CreateRestrictedToken with DISABLE_MAX_PRIVILEGE (only
+// SeChangeNotifyPrivilege survives), local Administrators deny-only, Low
+// integrity (S-1-16-4096), plus the unchanged Job Object carrying the
+// JOB_OBJECT_LIMIT_JOB_MEMORY commit cap (--mem-mb).
+//
+// NO grant-acl in these tests: the restricted token derives from the
+// helper's own user token, so the child reads the staged bootstrap/CA and
+// the node dir via normal DACLs. grant-acl is an AppContainer concept; the
+// production path has no ACL-grant step (Task 38), and pre-granting here
+// would mask a real readability finding. If the child cannot read something
+// on the lane, that surfaces loudly — exactly the point.
+//
+// Same lane contract as the matrix: itWin-gated (skips cleanly off-Windows
+// or before the helper exe is built), NEVER skips on the Windows lane.
+describe('helper run (Option 3: restricted-token + Job, production regression)', () => {
+  itWin('runs node under restricted-token + Job (Option 3 production)', async () => {
+    // THE core Option-3 regression: the production launch shape — node under
+    // the CreateRestrictedToken-hardened token + the Job Object — must run
+    // the child to completion. This is the assertion that was impossible
+    // under LPAC and proves the adopted remedy.
+    const node = process.execPath;
+    const stage = mkdtempSync(path.join(tmpdir(), 'oct-helper-rt1-'));
+    try {
+      const bootstrap = path.join(stage, 'bootstrap.cjs');
+      const ca = path.join(stage, 'ca.pem');
+      writeFileSync(bootstrap, '// empty bootstrap for Option-3 core regression\n');
+      writeFileSync(ca, '');
+
+      const r = await runHelperStreaming([
+        'run',
+        '--restricted-token',
+        '--job', 'OctJob-rt1',
+        '--mem-mb', '512',
+        '--pkg', 'AgentOctopus.Sandbox.rt1',
+        '--proxy', '127.0.0.1:1',
+        '--ca', ca,
+        '--bootstrap', bootstrap,
+        '--node', node,
+        '--',
+        '-e', "process.stdout.write('hi');process.exit(3)",
+      ]);
+
+      // Guard that the production path was actually selected: cmd_run emits
+      // this marker only when --restricted-token is set.
+      expect(r.stderr, 'helper did not report the Option-3 production mode')
+        .toContain('[run] mode: restricted-token (Option 3, production)');
+      // HARD: node ran to completion under the restricted token + Job.
+      expect(r.code,
+        `expected child exit 3, got code=${r.code} signal=${r.signal} stderr=<<<${r.stderr}>>>`)
+        .toBe(3);
+      expect(r.stdout, 'child stdout is missing hi').toContain('hi');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  itWin('restricted token is actually hardened (privileges stripped, low integrity)', async () => {
+    // Restricted-token EFFECTIVENESS (Task 36 Step A'): the child env block
+    // inherits PATH and the restricted token flows to grandchildren, so the
+    // sandboxed node can spawn whoami and observe ITS OWN token. HARD
+    // asserts: Low integrity present, and the dangerous privileges are GONE
+    // (DISABLE_MAX_PRIVILEGE keeps only SeChangeNotifyPrivilege). The
+    // presence of SeChangeNotifyPrivilege is deliberately NOT hard-asserted
+    // (kept by design; its presence is not a failure mode).
+    const node = process.execPath;
+    const stage = mkdtempSync(path.join(tmpdir(), 'oct-helper-rt2-'));
+    try {
+      const bootstrap = path.join(stage, 'bootstrap.cjs');
+      const ca = path.join(stage, 'ca.pem');
+      writeFileSync(bootstrap, '// empty bootstrap for Option-3 hardening test\n');
+      writeFileSync(ca, '');
+
+      const script =
+        "const{execFileSync}=require('child_process');" +
+        "const g=execFileSync('whoami',['/groups']).toString();" +
+        "const p=execFileSync('whoami',['/priv']).toString();" +
+        "process.stdout.write('GROUPS:'+g+'PRIVS:'+p)";
+
+      const r = await runHelperStreaming([
+        'run',
+        '--restricted-token',
+        '--job', 'OctJob-rt2',
+        '--mem-mb', '512',
+        '--pkg', 'AgentOctopus.Sandbox.rt2',
+        '--proxy', '127.0.0.1:1',
+        '--ca', ca,
+        '--bootstrap', bootstrap,
+        '--node', node,
+        '--',
+        '-e', script,
+      ]);
+
+      // HARD: node AND whoami ran to completion inside the sandbox. If
+      // whoami cannot run under the restricted token this fails loudly —
+      // correct: that is a real finding (Task 41), not something to skip.
+      expect(r.code,
+        `expected exit 0, got code=${r.code} signal=${r.signal} stderr=<<<${r.stderr}>>>`)
+        .toBe(0);
+      expect(r.stdout).toContain('GROUPS:');
+      expect(r.stdout).toContain('PRIVS:');
+
+      // Low integrity: whoami /groups prints "Mandatory Label\Low Mandatory
+      // Level" with SID S-1-16-4096. Accept either rendering.
+      const lowIntegrity = /Low Mandatory Level/i.test(r.stdout) || r.stdout.includes('S-1-16-4096');
+      expect(lowIntegrity,
+        `no Low integrity label in whoami output: <<<${r.stdout}>>>`).toBe(true);
+
+      // Privilege strip: none of the dangerous privileges may be present in
+      // the token whoami reports.
+      expect(r.stdout).not.toContain('SeDebugPrivilege');
+      expect(r.stdout).not.toContain('SeBackupPrivilege');
+      expect(r.stdout).not.toContain('SeRestorePrivilege');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+    // Generous timeout: two whoami spawns inside the sandboxed child on a CI
+    // runner.
+  }, 60_000);
+
+  itWin('Job memory limit blocks an oversized allocation', async () => {
+    // Job-limit EFFECTIVENESS: the Job carries JOB_OBJECT_LIMIT_JOB_MEMORY =
+    // --mem-mb (256MB here) — a cap on the total COMMITTED memory of every
+    // process in the Job. A 1GB zero-filling Buffer.alloc must therefore
+    // FAIL its commit and the child must report ALLOC_BLOCKED. If the lane
+    // shows ALLOC_OK the commit cap is not biting — a real finding; this
+    // assertion is deliberately not weakened to hide it.
+    const node = process.execPath;
+    const stage = mkdtempSync(path.join(tmpdir(), 'oct-helper-rt3-'));
+    try {
+      const bootstrap = path.join(stage, 'bootstrap.cjs');
+      const ca = path.join(stage, 'ca.pem');
+      writeFileSync(bootstrap, '// empty bootstrap for Option-3 job-limit test\n');
+      writeFileSync(ca, '');
+
+      const r = await runHelperStreaming([
+        'run',
+        '--restricted-token',
+        '--job', 'OctJob-rt3',
+        '--mem-mb', '256',
+        '--pkg', 'AgentOctopus.Sandbox.rt3',
+        '--proxy', '127.0.0.1:1',
+        '--ca', ca,
+        '--bootstrap', bootstrap,
+        '--node', node,
+        '--',
+        '-e',
+        "try{const b=Buffer.alloc(1024*1024*1024);process.stdout.write('ALLOC_OK');" +
+        "}catch(e){process.stdout.write('ALLOC_BLOCKED');}",
+      ]);
+
+      // HARD: the child ran to completion AND the Job commit cap prevented
+      // the oversized allocation.
+      expect(r.code,
+        `expected exit 0, got code=${r.code} signal=${r.signal} stderr=<<<${r.stderr}>>>`)
+        .toBe(0);
+      expect(r.stdout).not.toContain('ALLOC_OK');
+      expect(r.stdout).toContain('ALLOC_BLOCKED');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

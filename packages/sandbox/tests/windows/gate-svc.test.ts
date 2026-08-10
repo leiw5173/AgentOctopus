@@ -18,15 +18,13 @@
 import { describe, it, expect } from 'vitest';
 import net from 'node:net';
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PIPE = '\\\\.\\pipe\\octopus-sandbox-gate';
 
-const run = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HELPER_EXE = path.join(HERE, '..', '..', 'prebuilds', 'windows-x64', 'octopus-sandbox-helper.exe');
 
@@ -147,17 +145,19 @@ describe('gate service (OctopusSandboxGate)', () => {
     const jobName = 'OctJob-s1';
     const pkg = 'AgentOctopus.Sandbox.gate1';
 
-    // Stage a real loadable bootstrap + CA and grant the LPAC SIDs read access
-    // (same reasoning as helper-run.test.ts): the LPAC child cannot read
-    // arbitrary temp paths, and cannot read node.exe's install dir by default.
+    // Stage a real loadable bootstrap + CA. OPTION 3: the long-lived child
+    // below runs under the PRODUCTION restricted-token + Job mode, so there
+    // is NO grant-acl step here — the restricted token derives from the
+    // helper's own user token and reads the staged copy + node dir via
+    // normal DACLs. grant-acl is an AppContainer concept; Task 38 removed it
+    // from the production win-backend path, and this fixture must not
+    // reintroduce it (pre-granting would mask a real readability finding).
     const node = process.execPath;
     const stage = mkdtempSync(path.join(tmpdir(), 'oct-gate-svc-'));
     const bootstrap = path.join(stage, 'bootstrap.cjs');
     const ca = path.join(stage, 'ca.pem');
     writeFileSync(bootstrap, '// empty bootstrap for gate-svc live-job test\n');
     writeFileSync(ca, '');
-    await run(HELPER_EXE, ['grant-acl', '--pkg', pkg, '--path', stage]);
-    await run(HELPER_EXE, ['grant-acl', '--pkg', pkg, '--path', path.dirname(node)]).catch(() => {});
 
     // Launch the long-lived child with spawn() so its stdout/stderr STREAM live
     // into the test as chunks arrive (execFile's callback only fires on child
@@ -169,6 +169,10 @@ describe('gate service (OctopusSandboxGate)', () => {
     // hung earlier. unref() so the test process is not held.
     const child = spawn(HELPER_EXE, [
       'run',
+      // OPTION 3 PRODUCTION MODE: the long-lived child runs under the
+      // restricted token + Job (no LPAC), which is how win-backend launches
+      // node — and under which node is expected to SURVIVE.
+      '--restricted-token',
       '--job', jobName,
       '--mem-mb', '256',
       '--pkg', pkg,
@@ -208,28 +212,25 @@ describe('gate service (OctopusSandboxGate)', () => {
     child.unref();
 
     // Give the helper a moment to create the Job, assign the child, and resume
-    // it. 1500ms is generous for process+job setup on a CI runner. If the
-    // helper already exited early, report it now so a failed-alive-assertion is
-    // attributable to "Job never created" rather than "remove-gate allowed".
+    // it. 1500ms is generous for process+job setup on a CI runner. Under
+    // Option 3 an early exit here is UNEXPECTED (node is supposed to run
+    // under the restricted token + Job); report it immediately so a failed
+    // alive-refusal below is attributable to "Job never populated" rather
+    // than "remove-gate allowed".
     await new Promise((r) => setTimeout(r, 1500));
     if (exitRef.current !== null) {
-      console.error('[gate-svc] WARNING: helper exited before install-gate;',
+      console.error('[gate-svc] UNEXPECTED: helper exited before install-gate;',
         'OctJob-s1 may never have been populated. exit=', JSON.stringify(exitRef.current));
     }
 
-    // RUN-6 DIAGNOSTIC: node.exe currently fast-fails (0x80000003) under the
-    // full LPAC+Job sandbox (see helper-run.test.ts's matrix). The long-lived
-    // child above (`setTimeout(...,300000)`) therefore crashes immediately, the
-    // Job drains, and the service (correctly, fail-safe) sees OctJob-s1 as
-    // dead — so remove-gate is NOT refused, and the run-1..5 alive-Job
-    // assertion (`expect(rem.ok).toBe(false)`) cannot hold while node is
-    // broken. We detect that state via the child's early exit and, when the
-    // child did NOT survive, treat the alive-refusal sub-assertion as N/A
-    // (log it, don't assert it) while still asserting the parts that ARE
-    // meaningful this run: install-gate succeeds and remove-gate on a drained
-    // Job succeeds. When the child DOES survive (node fixed), the real
-    // fail-closed alive-Job refusal is asserted as before. The test never
-    // SKIPs (the lane's zero-skip gate) and never asserts the unfixed crash.
+    // OPTION-3 CONTRACT: the long-lived child runs under the restricted
+    // token + Job (no LPAC), so it is EXPECTED to survive the settle window —
+    // the LPAC-era launch crash does not apply to this path. Survival is what
+    // makes the alive-Job refusal below genuinely assertable again (it was
+    // degraded to a run-6 diagnostic while node crashed under LPAC). If the
+    // child did NOT survive, that is an unexpected Option-3 failure — a
+    // Task-41 finding — and this test fails loudly instead of routing around
+    // it. The test never SKIPs (the lane's zero-skip gate).
     const childSurvived = exitRef.current === null;
 
     try {
@@ -256,16 +257,18 @@ describe('gate service (OctopusSandboxGate)', () => {
         '(childSurvived=', childSurvived, ')');
       if (childSurvived) {
         // Node ran: the Job is genuinely populated, so the fail-closed
-        // refusal MUST hold.
+        // refusal MUST hold. This is the hard assertion Option 3 restores.
         expect(rem.ok).toBe(false);
       } else {
-        // RUN-6 KNOWN STATE: node crashed under LPAC+Job, so the Job drained
-        // before this RPC and the service correctly removed the gate. Log the
-        // observed outcome for the matrix narrative without asserting the
-        // (currently unreachable) refusal. TODO(run-6): this branch becomes
-        // dead once node runs under the chosen remedy.
-        console.error('[gate-svc] node child did not survive (known LPAC crash);',
-          'alive-Job refusal not assertable this run. observed ok=', rem.ok);
+        // UNEXPECTED under Option 3: node is expected to SURVIVE under the
+        // restricted token + Job. In run-6 this branch was the known LPAC
+        // crash state and merely logged; under the production mode it
+        // indicates a genuine failure (the Job drained before this RPC,
+        // making the refusal unassertable). Fail loudly for Task 41.
+        throw new Error(
+          '[gate-svc] long-lived node child did not survive under restricted-token + Job; ' +
+          `alive-Job refusal not assertable. exit=${JSON.stringify(exitRef.current)} ` +
+          `stdout=<<<${childStdout}>>> stderr=<<<${childStderr}>>>`);
       }
     } finally {
       // Kill the long-lived child so the Job drains, then removal must succeed.
@@ -278,28 +281,19 @@ describe('gate service (OctopusSandboxGate)', () => {
     // After the child dies the Job is empty/gone; remove-gate now succeeds.
     // Poll briefly — KILL_ON_JOB_CLOSE unwind is not instantaneous.
     //
-    // RUN-6 DIAGNOSTIC: this post-drain removal is only meaningful when the
-    // alive-refusal above actually held (childSurvived) — i.e. the first
-    // remove-gate was refused (ok:false) so the lease/gate is still present to
-    // be removed here. When node crashed (the known current state) the FIRST
-    // remove-gate already succeeded and dropped the lease, so a second call
-    // correctly returns ok:false (ERROR_NOT_FOUND — "no lease, nothing we
-    // installed"). Assert the success branch only when the refusal held; in
-    // the crash path the meaningful assertions (install ok, first remove
-    // behavior) already ran above, so we just log here.
-    if (childSurvived) {
-      let removed: any = null;
-      for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 250));
-        removed = await rpc({ op: 'remove-gate', sessionId });
-        if (removed.ok === true) break;
-      }
-      console.error('[gate-svc] remove-gate after Job drained ->', JSON.stringify(removed));
-      expect(removed.ok).toBe(true);
-    } else {
-      console.error('[gate-svc] node-crash path: gate already removed by the first',
-        'remove-gate; post-drain removal assertion skipped (would be ERROR_NOT_FOUND).');
+    // Reachable only when the alive-refusal above held: the else branch
+    // throws, so the crash-path caveat from run-6 (first remove-gate already
+    // dropped the lease) no longer needs a branch. This asserts the
+    // complement of the fail-closed invariant: once the Job has drained, the
+    // gate IS removed (ok:true).
+    let removed: any = null;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      removed = await rpc({ op: 'remove-gate', sessionId });
+      if (removed.ok === true) break;
     }
+    console.error('[gate-svc] remove-gate after Job drained ->', JSON.stringify(removed));
+    expect(removed.ok).toBe(true);
     // 60s timeout: the settle (1.5s) + drain poll (up to 5s) + RPC round-trips
     // must not false-timeout on a slow CI runner, and a hung helper streams its
     // stage markers live before the timeout fires.
