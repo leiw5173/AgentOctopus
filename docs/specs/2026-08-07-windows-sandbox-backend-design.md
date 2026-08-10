@@ -5,6 +5,20 @@
 **Status:** Draft v2.1.1 — third design review incorporated (see *Review changes applied*)
 **Isolation target:** `restricted` (explicitly NOT `full`)
 
+> **Implementation note (post-design pivot — Option 3).** During implementation the LPAC/AppContainer
+> token proved incompatible with the Node runtime: a controlled single-variable matrix established that the
+> LPAC token is the **necessary trigger** of the Node launch crash (`0x80000003` / `STATUS_BREAKPOINT`); the
+> specific internal trigger point is pending crash-stack confirmation. The node execution path was therefore
+> pivoted **off LPAC** to **Option 3 — a `CreateRestrictedToken`-hardened token** (privileges stripped,
+> Administrators deny-only, Low Integrity) launched via `CreateProcessAsUserW`, plus the same Job Object.
+> Consequences relative to the design below: (a) the WFP egress allowlist is scoped by the sandbox `node.exe`
+> **application ID** (`FWPM_CONDITION_ALE_APP_ID`), not the AppContainer package SID (`ALE_PACKAGE_ID`, which
+> only matches AppContainer processes); (b) there is no AppContainer package grant on the staged copy — the
+> restricted token reads it through its normal Low-Integrity DACL view; (c) the LPAC path is retained only as a
+> diagnostic / future-compat probe, not the execution path. This is **restricted process isolation, not
+> AppContainer capability isolation.** The LPAC description below is the original design; the current mechanism
+> is documented in `docs/core-concepts/sandbox.md`.
+
 ## Overview
 
 Add a native Windows sandbox backend (`WinSandboxBackend`) so AgentOctopus can execute
@@ -235,6 +249,7 @@ host Win32 filesystem namespace, and isolation comes from token + DACL. There is
 step is removed.
 
 **Delivery model (Decision 3 — per-session copy only):**
+
 1. Stage a per-session copy of the verified snapshot + CA bundle into a session directory.
 2. Re-verify the copy against `expectedSnapshotDigest` before use (defends against a
    time-of-check/time-of-use mutation between the runner's verify and the copy).
@@ -382,6 +397,7 @@ Setting `HTTP_PROXY` alone does NOT make Node 22's built-in `fetch` use a proxy.
 existing backends, convergence is delivered through
 `NODE_OPTIONS=--require <verified bootstrap.cjs>` (see `images/runtime/bootstrap.cjs`), which
 the trusted `windowsRuntime` supplies. The helper injects:
+
 - `NODE_OPTIONS=--require <bootstrapPath>` (verified, trusted absolute path),
 - the CA bundle env (`caBundlePath`),
 - `HTTP_PROXY`/`HTTPS_PROXY` = `http://127.0.0.1:<proxyPort>`, `NO_PROXY` empty.
@@ -435,6 +451,7 @@ A new `windows-restricted` lane on `windows-latest` (hosted). The WFP gate insta
 elevation, so the lane runs the companion-service install step with the runner's available
 elevation (hosted `windows-latest` runners provide an admin context); the sandboxed skill
 execution itself is unprivileged:
+
 - Builds the helper + runtime via `scripts/build-win-helper.mjs` and verifies all artifacts
   (helper, windowsRuntime, bootstrap, undici) independently.
 - Installs the companion service, then runs the WinSandboxBackend behavioral suite (see
@@ -469,6 +486,7 @@ execution itself is unprivileged:
 ## Security properties (explicit scope)
 
 **Provided (v1 has no degraded mode — these hold whenever the backend is selected):**
+
 - Resource bounding (memory, CPU time, process count) via Job Object.
 - File/registry/process/window isolation via LPAC DACL + Low Integrity Level, with
   `ALL APPLICATION PACKAGES` opted out.
@@ -487,6 +505,7 @@ service is installed (a one-time elevated step). Without it there is no Windows 
 unprivileged "loopback-reachable" fallback in v1 (Decision 4).
 
 **Explicitly NOT provided (honest `restricted` scope):**
+
 - No kernel-memory or side-channel isolation (not a VM).
 - No defense against a malicious skill exploiting a Windows kernel vulnerability.
 - No `full` isolation claim, ever, on Windows — the lane asserts `restricted` and the
