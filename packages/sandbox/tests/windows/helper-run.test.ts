@@ -440,17 +440,36 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
 describe('helper run (run-10 restricted-token launch diagnostic battery)', () => {
   itWin('runs the diag-launch battery and logs every variant outcome', async () => {
     const node = process.execPath;
-    const r = await runHelperStreaming(['diag-launch', '--node', node]);
+    // RUN-13: stage a node.exe COPY for the battery. The production freeze
+    // happens against the session-private COPY (which the Low token can open);
+    // the toolchain node.exe is unopenable by the Low token (path-based
+    // denial), so a runtime resume-probe against it would only reproduce the
+    // create-time err=5, not the runtime freeze. The label battery still
+    // stages its own internal copy, so passing the copy here keeps both the
+    // create-arms AND the new resume-arms on a Low-openable target.
+    const stage = mkdtempSync(path.join(tmpdir(), 'oct-diag-'));
+    try {
+      const nodeCopy = stageNodeCopy(node, stage);
+      const r = await runHelperStreaming(['diag-launch', '--node', nodeCopy]);
 
-    // Structural: the helper accepted the args and the battery ran to
-    // completion. Launch-arm failures are printed results, not exit failures.
-    expect(r.code,
-      `diag-launch did not complete: code=${r.code} signal=${r.signal} stderr=<<<${r.stderr}>>>`)
-      .toBe(0);
-    expect(r.stderr, 'battery start marker missing').toContain('[diag] battery start');
-    expect(r.stderr, 'battery did not run to completion').toContain('[diag] battery complete');
+      // Structural: the helper accepted the args and the battery ran to
+      // completion. Launch-arm failures are printed results, not exit failures.
+      expect(r.code,
+        `diag-launch did not complete: code=${r.code} signal=${r.signal} stderr=<<<${r.stderr}>>>`)
+        .toBe(0);
+      expect(r.stderr, 'battery start marker missing').toContain('[diag] battery start');
+      expect(r.stderr, 'battery did not run to completion').toContain('[diag] battery complete');
+      // RUN-13: the resume-based runtime matrix must have run (it is what can
+      // see the Low-token runtime freeze the create-only arms are blind to).
+      expect(r.stderr, 'runtime battery start marker missing')
+        .toContain('[diag] runtime battery start');
+      expect(r.stderr, 'runtime battery did not complete')
+        .toContain('[diag] runtime battery complete');
 
-    // Full record to the CI log, greppable by "[diag]".
-    console.error('[diag-launch] battery output:\n' + r.stderr);
+      // Full record to the CI log, greppable by "[diag]".
+      console.error('[diag-launch] battery output:\n' + r.stderr);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
   }, 60_000);
 });

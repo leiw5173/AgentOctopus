@@ -2896,6 +2896,201 @@ static void diag_try_launch(const WCHAR *tag, HANDLE token, DWORD logonFlags,
     fflush(stderr);
 }
 
+/* RUN-13 RUNTIME PROBE. The create-only battery above (diag_try_launch) is
+ * blind to a RUNTIME freeze: it creates the child suspended and terminates it
+ * before resume, so it can only observe the CreateProcessWithTokenW access
+ * check — never whether the child actually RUNS. Run-13 showed exactly that
+ * gap: the Low-integrity restricted-token child RESUMED and stayed alive but
+ * produced no stdout and never exited (no "[run] child exited" / "pipe eof"
+ * markers), while the Medium restricted token (matrix noLpac arm) ran node
+ * clean with the SAME pipes + console. So the freeze is a Low-integrity
+ * RUNTIME property, not a creation-time access check.
+ *
+ * This probe closes the gap: it launches node under `token` with PIPED
+ * stdout (STARTF_USESTDHANDLES -> an inheritable anonymous-pipe write end),
+ * RESUMES it, then waits up to `timeoutMs` for exit. After the wait it
+ * classifies and terminates:
+ *   RAN     — the child exited on its own within the timeout (and we report
+ *             whether it wrote any stdout bytes). This is the healthy case.
+ *   FROZEN  — the child was STILL ALIVE after the timeout with ZERO stdout
+ *             bytes: resumed but never produced output and never exited (the
+ *             run-13 production symptom).
+ *   CRASHED — exited but with a non-zero/abnormal code and no stdout.
+ * It writes NOTHING to the child's stdin and does not need one — node is
+ * given `-e "process.stdout.write('diag-ok');process.exit(3)"` so a healthy
+ * start prints a marker and exits 3.
+ *
+ * The pipe ends are created WITHOUT inheritable-by-default on the read end
+ * and with an inheritable write end for the child, mirroring the production
+ * relay's handle-inheritance shape (but a plain anonymous pipe is enough —
+ * the freeze reproduces regardless of named-vs-anonymous pipe). */
+#define OCT_DIAG_RESUME_TIMEOUT_MS 6000u
+#define OCT_DIAG_RESUME_BUF        512u
+
+static void diag_try_launch_resume(const WCHAR *tag, HANDLE token,
+                                   DWORD logonFlags, DWORD extraCreateFlags,
+                                   const WCHAR *nodePath) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    SECURITY_ATTRIBUTES pipeSa;
+    HANDLE readEnd = NULL;
+    HANDLE writeEnd = NULL;
+    WCHAR cmdLine[OCT_DIAG_CMDLINE_MAX];
+    char buf[OCT_DIAG_RESUME_BUF];
+    DWORD totalRead = 0;
+    DWORD waitRes;
+    DWORD exitCode = 0;
+    DWORD err = 0;
+    int rc = 0;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    /* Anonymous pipe: write end inheritable (child stdout), read end not. */
+    pipeSa.nLength = sizeof(pipeSa);
+    pipeSa.lpSecurityDescriptor = NULL;
+    pipeSa.bInheritHandle = TRUE;
+    if (!CreatePipe(&readEnd, &writeEnd, &pipeSa, 0)) {
+        fwprintf(stderr, L"[diag] %ls: CreatePipe failed err=%lu\n", tag,
+                 (unsigned long)GetLastError());
+        fflush(stderr);
+        return;
+    }
+    /* The read end must NOT be inherited by the child (only the write end),
+     * or the pipe never reaches EOF. */
+    SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = NULL;
+    si.hStdOutput = writeEnd;
+    si.hStdError = writeEnd;
+
+    rc = swprintf_s(cmdLine, ARRAYSIZE(cmdLine),
+                    L"\"%ls\" -e \"process.stdout.write('diag-ok');process.exit(3)\"",
+                    nodePath);
+    if (rc < 0) {
+        fwprintf(stderr, L"[diag] %ls: cmdline build failed\n", tag);
+        CloseHandle(readEnd);
+        CloseHandle(writeEnd);
+        fflush(stderr);
+        return;
+    }
+
+    if (!CreateProcessWithTokenW(token, logonFlags, NULL, cmdLine,
+                                 CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
+                                 extraCreateFlags,
+                                 NULL, NULL, &si, &pi)) {
+        err = GetLastError();
+        fwprintf(stderr, L"[diag] %ls: launch FAIL hr=0x%08lx (err=%lu)\n", tag,
+                 (unsigned long)HRESULT_FROM_WIN32(err), (unsigned long)err);
+        CloseHandle(readEnd);
+        CloseHandle(writeEnd);
+        fflush(stderr);
+        return;
+    }
+
+    /* The child holds its own copy of the write end now; close ours so EOF
+     * propagates when the child exits, then RESUME — this is what the
+     * create-only battery never did. */
+    CloseHandle(writeEnd);
+    writeEnd = NULL;
+    ResumeThread(pi.hThread);
+
+    waitRes = WaitForSingleObject(pi.hProcess, OCT_DIAG_RESUME_TIMEOUT_MS);
+
+    /* Drain whatever stdout the child produced (non-blocking best-effort). */
+    for (;;) {
+        DWORD avail = 0;
+        DWORD got = 0;
+        if (!PeekNamedPipe(readEnd, NULL, 0, NULL, &avail, NULL) || avail == 0) break;
+        if (!ReadFile(readEnd, buf, (DWORD)sizeof(buf), &got, NULL) || got == 0) break;
+        totalRead += got;
+        if (totalRead > 64u * 1024u) break; /* plenty for classification */
+    }
+
+    if (waitRes == WAIT_OBJECT_0) {
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        if (totalRead > 0) {
+            fwprintf(stderr,
+                     L"[diag] %ls: RAN exit=%lu stdoutBytes=%lu\n", tag,
+                     (unsigned long)exitCode, (unsigned long)totalRead);
+        } else {
+            fwprintf(stderr,
+                     L"[diag] %ls: CRASHED exit=%lu stdoutBytes=0\n", tag,
+                     (unsigned long)exitCode);
+        }
+    } else {
+        /* Still alive after the timeout. */
+        fwprintf(stderr,
+                 L"[diag] %ls: FROZEN (alive>%lums) stdoutBytes=%lu\n", tag,
+                 (unsigned long)OCT_DIAG_RESUME_TIMEOUT_MS,
+                 (unsigned long)totalRead);
+        TerminateProcess(pi.hProcess, 99);
+        WaitForSingleObject(pi.hProcess, 3000);
+    }
+
+    CloseHandle(readEnd);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    fflush(stderr);
+}
+
+/* RUN-13 runtime matrix: resume a node child under each token form and report
+ * RAN / FROZEN / CRASHED. This separates the two candidate freeze triggers the
+ * create-only battery cannot: Low integrity vs DISABLE_MAX_PRIVILEGE.
+ *   RT-G  plain duplicate (Medium, full priv)         -> control, expect RAN
+ *   RT-D  medium + denyadmins (DISABLE_MAX_PRIVILEGE)  -> priv-strip only
+ *   RT-E  low-only (full privileges, Low integrity)    -> integrity only
+ *   RT-A  low + denyadmins (the production token)      -> both, expect FROZEN
+ * Whichever of RT-D / RT-E freezes (or both) names the necessary condition. */
+static void diag_run_runtime_battery(const WCHAR *nodePath) {
+    HANDLE t = NULL;
+    HRESULT hr = S_OK;
+
+    fwprintf(stderr, L"[diag] runtime battery start (resume-based)\n");
+    fflush(stderr);
+
+    hr = diag_make_token(0, 0, 0, 0, &t); /* plain duplicate */
+    if (SUCCEEDED(hr)) {
+        diag_try_launch_resume(L"RT-G plain-duplicate", t,
+                               LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] RT-G token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    hr = diag_make_token(1, 0, 1, 0, &t); /* medium + denyadmins */
+    if (SUCCEEDED(hr)) {
+        diag_try_launch_resume(L"RT-D medium+denyadmins", t,
+                               LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] RT-D token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    hr = diag_make_token(1, 1, 0, 0, &t); /* low-only */
+    if (SUCCEEDED(hr)) {
+        diag_try_launch_resume(L"RT-E low-only", t,
+                               LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] RT-E token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    hr = diag_make_token(1, 1, 1, 0, &t); /* low + denyadmins (production) */
+    if (SUCCEEDED(hr)) {
+        diag_try_launch_resume(L"RT-A low+denyadmins (production)", t,
+                               LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+        CloseHandle(t);
+    } else {
+        fwprintf(stderr, L"[diag] RT-A token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    fwprintf(stderr, L"[diag] runtime battery complete\n");
+    fflush(stderr);
+}
+
 static void diag_run_battery(const WCHAR *nodePath) {
     HANDLE t = NULL;
     HRESULT hr = S_OK;
@@ -3178,6 +3373,10 @@ static int cmd_diag_launch(int argc, wchar_t **argv, int startIdx) {
 
     diag_run_battery(nodePath);
     diag_run_label_battery(nodePath);
+    /* RUN-13: resume-based runtime matrix — the create-only batteries above
+     * cannot see the production Low-token freeze; this one resumes the child
+     * and reports RAN / FROZEN / CRASHED per token form. */
+    diag_run_runtime_battery(nodePath);
 
     fwprintf(stderr, L"[diag] battery complete\n");
     fflush(stderr);
