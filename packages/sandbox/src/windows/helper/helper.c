@@ -53,6 +53,8 @@
  *                      SetTokenInformation); the Option-3 launch itself uses
  *                      CreateProcessWithTokenW (kernel32)
  *   onecoreuap.lib  -- DeriveCapabilitySidsFromName (KernelBase.dll)
+ *   user32.lib      -- diag-launch window-station/desktop probes
+ *                      (OpenWindowStationW / OpenDesktopW; not a default lib)
  */
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -106,6 +108,11 @@
 #pragma comment(lib, "userenv.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "onecoreuap.lib")
+/* user32.lib -- the run-10 diag-launch probes OpenWindowStationW /
+ * OpenDesktopW / CloseWindowStation / CloseDesktop. user32 is NOT in the
+ * cl/link default library set (only kernel32 is), so it must be requested
+ * explicitly. Diagnostic-only surface, but a link failure fails the lane. */
+#pragma comment(lib, "user32.lib")
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
@@ -2644,13 +2651,15 @@ static int cmd_teardown(int argc, wchar_t **argv, int startIdx) {
 #define OCT_DIAG_PATH_MAX    1024
 #define OCT_DIAG_CMDLINE_MAX 2048
 
-/* Build one battery token. Flags: restrict=0 returns a plain duplicate of
- * our own token (the G baseline, no CreateRestrictedToken); restrict=1
- * applies DISABLE_MAX_PRIVILEGE (+ optional admins deny-only + optional Low
- * integrity). impersonationForm=1 returns an impersonation-level duplicate
- * (for SetThreadToken) instead of the primary. Fail-closed: any step's
- * failure frees everything and returns the HRESULT. */
-static HRESULT diag_make_token(int restrict, int lowIntegrity, int denyAdmins,
+/* Build one battery token. Flags: applyRestrict=0 returns a plain duplicate
+ * of our own token (the G baseline, no CreateRestrictedToken);
+ * applyRestrict=1 applies DISABLE_MAX_PRIVILEGE (+ optional admins deny-only
+ * + optional Low integrity). impersonationForm=1 returns an
+ * impersonation-level duplicate (for SetThreadToken) instead of the primary.
+ * Fail-closed: any step's failure frees everything and returns the HRESULT.
+ * (The parameter is named applyRestrict, not restrict: `restrict` is a
+ * reserved keyword under /std:c17.) */
+static HRESULT diag_make_token(int applyRestrict, int lowIntegrity, int denyAdmins,
                                int impersonationForm, HANDLE *outToken) {
     HANDLE hToken = NULL;
     HANDLE hPrimary = NULL;
@@ -2675,7 +2684,7 @@ static HRESULT diag_make_token(int restrict, int lowIntegrity, int denyAdmins,
         goto done;
     }
 
-    if (!restrict) {
+    if (!applyRestrict) {
         /* G baseline: an unrestricted copy of our own token. */
         if (impersonationForm) {
             if (!DuplicateTokenEx(hPrimary, TOKEN_ALL_ACCESS, NULL,
