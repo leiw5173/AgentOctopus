@@ -619,7 +619,7 @@ jobs:
           echo 'managed=true' >> "$GITHUB_OUTPUT"
       - name: Download reviewed Linux runtime artifacts from the same-run producer (fallback)
         if: steps.restore-runner.outputs.managed != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linux-os-runtime-artifacts
           path: packages/sandbox/runtime
@@ -735,7 +735,7 @@ jobs:
         run: pnpm --filter @agentoctopus/sandbox-vm-native build
       - name: Download linux-x64 VM TCB from the producer
         if: steps.kvm-probe.outputs.kvm == 'available'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vm-tcb-linux-x64
           path: /tmp/vm-tcb-linux-x64-dl
@@ -930,7 +930,7 @@ jobs:
       # (guest arch = host arch under libkrun/HVF). The mac-side helper +
       # libkrun/libkrunfw are built locally next (those scripts work on macOS).
       - name: Download the linux-arm64 guest rootfs from the Linux producer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vm-rootfs-linux-arm64
           path: /tmp/vm-rootfs-linux-arm64-dl
