@@ -19,6 +19,21 @@
  * `grant-acl`/`sid` helper subcommands + acl.ts/sid.ts wrappers survive only
  * as the diagnostic selftest baseline).
  *
+ * RUN-11 LAUNCH LOCATION (CI 31359902308): the Low-integrity child token
+ * cannot even OPEN the host toolchain node.exe (e.g. under C:\hostedtoolcache)
+ * — the battery's image probes fail err=5 for the Low token at that path,
+ * though the SAME file copied under the session's temp dir reads+executes
+ * fine (arms H/F). Denial is therefore PATH-based (some parent-directory
+ * policy on the toolchain chain blocks the Low label), not the file's DACL
+ * or label (the original carries NO_EXPLICIT_LABEL). Production consequently
+ * launches node from a SESSION-PRIVATE copy staged into the runner's
+ * sessionDir (Step 4c): the copy inherits the default Medium mandatory
+ * label, which lets the Low child read+execute it while NO_WRITE_UP still
+ * blocks the child from rewriting its own interpreter. The same copy path
+ * is the WFP APP_ID key, so the egress gate matches the process actually
+ * launched. The host toolchain node.exe is never launched directly under
+ * the restricted token.
+ *
  * The heavy lifting (Job Object, restricted-token launch, WFP gate, spawn,
  * teardown) is delegated to the native helper exe + the privileged companion
  * service; this TS class owns orchestration, lifecycle, and the
@@ -48,6 +63,7 @@
 
 import os from 'node:os';
 import path from 'node:path';
+import { cp, mkdir } from 'node:fs/promises';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -116,6 +132,28 @@ async function probeNodePath(manifestPath: string): Promise<string | undefined> 
   }
 }
 
+/**
+ * RUN-11 default Step-4c collaborator: copy the trusted closure's node.exe
+ * into the per-session sessionDir and return the copy path. The copy —
+ * not the host toolchain node.exe — is what the restricted-token child
+ * launches, because the Low-integrity token cannot open the toolchain path
+ * (CI 31359902308 arms H/F). `mkdir` creates the sessionDir only if the
+ * snapshot staging has not already (it has — same dir); any failure throws,
+ * and prepare() is fail-closed. The copy deliberately keeps the DEFAULT
+ * mandatory label (Medium): readable+executable by the Low child, and
+ * NO_WRITE_UP blocks the child from rewriting its own interpreter — the
+ * stronger posture of the two arms the battery proved.
+ */
+export async function stageLaunchNode(
+  sessionDir: string,
+  sourceNodePath: string,
+): Promise<string> {
+  const dest = path.join(sessionDir, 'node.exe');
+  await mkdir(sessionDir, { recursive: true });
+  await cp(sourceNodePath, dest);
+  return dest;
+}
+
 // ---------------------------------------------------------------------------
 // DI seam — injectable collaborators (never consulted for behavior)
 // ---------------------------------------------------------------------------
@@ -136,6 +174,14 @@ export interface WinBackendDeps {
   gateAvailable?: () => Promise<boolean>;
   /** Stage the per-session snapshot+CA copy + re-verify the digest (spec §3). */
   stageCopy?: typeof stageVerifiedCopy;
+  /**
+   * Stage the launchable node.exe (Step 4c): copy the trusted closure's
+   * node.exe into the sessionDir and return the copy path. Run-11 finding —
+   * the Low-integrity restricted token cannot open the host toolchain
+   * node.exe, so the child launches from a session-private copy. The default
+   * is `stageLaunchNode`; tests inject a fake on non-Windows hosts.
+   */
+  stageLaunchNode?: typeof stageLaunchNode;
   /** Install the per-session WFP gate keyed on the node.exe APP_ID path. */
   installGate?: typeof installGate;
   /** Launch the sandboxed child via the helper `run` subcommand. */
@@ -176,6 +222,8 @@ export class WinSandboxBackend implements SandboxBackend {
   private pkgMoniker: string | undefined;
   private jobName: string | undefined;
   private copyDir: string | undefined;
+  /** Session-private node.exe copy the child launches from (run-11 Step 4c). */
+  private launchNodePath: string | undefined;
   private gateInstalled = false;
   private cleaned = false;
   /**
@@ -395,19 +443,32 @@ export class WinSandboxBackend implements SandboxBackend {
       // a least-privilege Users/Everyone read grant on the staged dir — do NOT
       // pre-build it here.
 
-      // Step 6: install the per-session WFP allowlist keyed on the sandbox
-      // node.exe APP_ID path (Option 3) + proxy endpoint (§4c). proxyV6Loopback
-      // is computed from whether the proxy actually listens on ::1 — the
-      // service must not guess. The APP_ID path is the trusted closure's
-      // node.exe (windowsRuntime.nodePath): it MUST be a real, existing DOS
-      // path or the service's FwpmGetAppIdFromFileName0 rejects the install
-      // (fail-closed).
+      // Step 4c (run-11): stage the session-private node.exe COPY the child
+      // launches from. The host toolchain node.exe (e.g. under
+      // C:\hostedtoolcache) is UNOPENABLE by the Low-integrity restricted
+      // token (image probes fail err=5 on that path — CI 31359902308); the
+      // same bytes under the session's temp dir open fine. The copy keeps the
+      // default Medium mandatory label: the Low child can read+execute it but
+      // NO_WRITE_UP blocks it from rewriting its own interpreter. Done BEFORE
+      // the gate install so a staging failure never leaves a live gate, and
+      // so the gate's APP_ID can key on the copy.
       const win = opts.runtimeProfile.windowsRuntime!;
+      const stageNode = this.deps.stageLaunchNode ?? stageLaunchNode;
+      this.launchNodePath = await stageNode(this.copyDir, win.nodePath);
+
+      // Step 6: install the per-session WFP allowlist keyed on the sandbox
+      // node.exe COPY's APP_ID path (run-11: the gate must match the image the
+      // child actually executes — the staged copy, never the toolchain path) +
+      // proxy endpoint (§4c). proxyV6Loopback is computed from whether the
+      // proxy actually listens on ::1 — the service must not guess. The APP_ID
+      // path MUST be a real, existing DOS path or the service's
+      // FwpmGetAppIdFromFileName0 rejects the install (fail-closed) — the copy
+      // just staged satisfies this.
       const { host: proxyHost, port: proxyPort } = parseProxyAddr(opts.proxyAddr);
       const install = this.deps.installGate ?? installGate;
       await install({
         sessionId: this.sessionId,
-        appIdPath: win.nodePath,
+        appIdPath: this.launchNodePath,
         proxyHost,
         proxyPort,
         jobName: this.jobName!,
@@ -472,7 +533,10 @@ export class WinSandboxBackend implements SandboxBackend {
         proxy: { host: proxyHost, port: proxyPort },
         caPath: staged.guestCaBundlePath,
         bootstrapPath: win.bootstrapPath,
-        nodePath: win.nodePath,
+        // Run-11: launch the session-private node.exe copy staged in prepare
+        // (Step 4c) — the Low-integrity token cannot open the host toolchain
+        // node.exe; the WFP APP_ID gate is keyed on this same path.
+        nodePath: this.launchNodePath!,
         argv: spec.command,
       },
       oneShotStdin !== undefined ? { stdin: oneShotStdin } : undefined,

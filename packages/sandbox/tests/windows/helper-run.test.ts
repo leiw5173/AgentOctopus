@@ -51,7 +51,7 @@
 import { describe, it, expect } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,6 +68,21 @@ const itWin = (process.platform === 'win32' && existsSync(EXE)) ? it : it.skip;
 // signed 32-bit int (what Node's exit 'code' surfaces) it is -2147483645.
 const isFastFail = (code: number | null): boolean =>
   code === 2147483651 || code === -2147483645;
+
+// Run-11 (CI 31359902308): the Low-integrity restricted token cannot even
+// open the host toolchain node.exe (image probes fail err=5 under
+// C:\hostedtoolcache — path-based denial; the same bytes under the session
+// temp dir open fine). Every direct helper-run Option-3 test therefore
+// stages a node.exe COPY into the test's temp stage dir and passes the copy
+// as --node — mirroring the production fix (win-backend Step 4c stages a
+// session-private copy and keys the WFP gate on it). The copy keeps the
+// default Medium mandatory label: readable+executable by the Low child,
+// NO_WRITE_UP stops the child rewriting its own interpreter.
+function stageNodeCopy(node: string, stage: string): string {
+  const copy = path.join(stage, 'node.exe');
+  copyFileSync(node, copy);
+  return copy;
+}
 
 // Run the helper with spawn() so stdout/stderr STREAM live into the test as
 // chunks arrive (execFile only yields output on child exit, so a hung helper
@@ -267,6 +282,8 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
       const ca = path.join(stage, 'ca.pem');
       writeFileSync(bootstrap, '// empty bootstrap for Option-3 core regression\n');
       writeFileSync(ca, '');
+      // Run-11: launch from a session-private copy, not the toolchain path.
+      const nodeCopy = stageNodeCopy(node, stage);
 
       const r = await runHelperStreaming([
         'run',
@@ -277,7 +294,7 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
         '--proxy', '127.0.0.1:1',
         '--ca', ca,
         '--bootstrap', bootstrap,
-        '--node', node,
+        '--node', nodeCopy,
         '--',
         '-e', "process.stdout.write('hi');process.exit(3)",
       ]);
@@ -311,6 +328,8 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
       const ca = path.join(stage, 'ca.pem');
       writeFileSync(bootstrap, '// empty bootstrap for Option-3 hardening test\n');
       writeFileSync(ca, '');
+      // Run-11: launch from a session-private copy, not the toolchain path.
+      const nodeCopy = stageNodeCopy(node, stage);
 
       const script =
         "const{execFileSync}=require('child_process');" +
@@ -327,7 +346,7 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
         '--proxy', '127.0.0.1:1',
         '--ca', ca,
         '--bootstrap', bootstrap,
-        '--node', node,
+        '--node', nodeCopy,
         '--',
         '-e', script,
       ]);
@@ -373,6 +392,8 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
       const ca = path.join(stage, 'ca.pem');
       writeFileSync(bootstrap, '// empty bootstrap for Option-3 job-limit test\n');
       writeFileSync(ca, '');
+      // Run-11: launch from a session-private copy, not the toolchain path.
+      const nodeCopy = stageNodeCopy(node, stage);
 
       const r = await runHelperStreaming([
         'run',
@@ -383,7 +404,7 @@ describe('helper run (Option 3: restricted-token + Job, production regression)',
         '--proxy', '127.0.0.1:1',
         '--ca', ca,
         '--bootstrap', bootstrap,
-        '--node', node,
+        '--node', nodeCopy,
         '--',
         '-e',
         "try{const b=Buffer.alloc(1024*1024*1024);process.stdout.write('ALLOC_OK');" +

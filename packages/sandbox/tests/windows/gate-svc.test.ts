@@ -17,7 +17,7 @@
 // (a one-time elevated step); when the pipe is absent the tests skip too.
 import { describe, it, expect } from 'vitest';
 import net from 'node:net';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync, copyFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -182,6 +182,11 @@ describe('gate service (OctopusSandboxGate)', () => {
     const ca = path.join(stage, 'ca.pem');
     writeFileSync(bootstrap, '// empty bootstrap for gate-svc live-job test\n');
     writeFileSync(ca, '');
+    // Run-11: the Low-integrity token cannot open the toolchain node.exe
+    // (CI 31359902308), so launch from a session-private copy — and key the
+    // WFP gate's APP_ID on that same copy (the image the child executes).
+    const nodeCopy = path.join(stage, 'node.exe');
+    copyFileSync(node, nodeCopy);
 
     // Launch the long-lived child with spawn() so its stdout/stderr STREAM live
     // into the test as chunks arrive (execFile's callback only fires on child
@@ -203,7 +208,7 @@ describe('gate service (OctopusSandboxGate)', () => {
       '--proxy', '127.0.0.1:1',
       '--ca', ca,
       '--bootstrap', bootstrap,
-      '--node', node,
+      '--node', nodeCopy,
       '--',
       '-e', 'setTimeout(()=>{},300000)',
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -261,10 +266,11 @@ describe('gate service (OctopusSandboxGate)', () => {
       const ins = await rpc({
         op: 'install-gate',
         sessionId,
-        // Option 3: the gate is APP_ID-scoped. The service canonicalizes the
-        // sandbox node.exe DOS path via FwpmGetAppIdFromFileName0, which
-        // requires a real existing node.exe — pass the host's real node path.
-        appIdPath: node,
+        // Option 3 + run-11: the gate is APP_ID-scoped on the sandbox node.exe
+        // COPY — the image the child actually executes (the Low token cannot
+        // open the toolchain path). The service canonicalizes via
+        // FwpmGetAppIdFromFileName0, which requires the file to exist.
+        appIdPath: nodeCopy,
         proxyHost: '127.0.0.1',
         proxyPort: 8080,
         jobName,

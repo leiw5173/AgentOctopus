@@ -25,6 +25,13 @@
 > the window-station/desktop access check under a Low-Integrity child token) and a `diag-launch` helper
 > subcommand whose log-only battery (impersonated image/winsta/desktop probes + six launch variants)
 > isolates which access check denies.
+> Run-10/run-11 resolved it: the battery shows a plain duplicate and a Medium-integrity restricted token
+> both launch fine, while EVERY Low-integrity arm fails AND the Low token cannot even open the host
+> toolchain node.exe (`ERROR_ACCESS_DENIED` on the image probes) — a PATH-based denial (the identical
+> bytes under the session temp dir open fine; the toolchain file carries no explicit label). The
+> production remedy: launch node from a **session-private node.exe copy** staged into the runner's
+> sessionDir (default Medium label — the Low child reads+executes it but `NO_WRITE_UP` blocks
+> self-rewrite), and key the WFP APP_ID gate on that same copy path.
 > Consequences relative to the design below: (a) the WFP egress allowlist is scoped by the sandbox `node.exe`
 > **application ID** (`FWPM_CONDITION_ALE_APP_ID`), not the AppContainer package SID (`ALE_PACKAGE_ID`, which
 > only matches AppContainer processes); (b) there is no AppContainer package grant on the staged copy — the

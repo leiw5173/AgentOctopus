@@ -12,7 +12,7 @@ import { WinSandboxBackend } from '../../src/windows/win-backend.js';
 import { stageVerifiedCopy } from '../../src/windows/stage-copy.js';
 import { spawnHelper } from '../../src/windows/helper-spawn.js';
 import { ContainmentCleanupError } from '../../src/backend.js';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -25,6 +25,10 @@ function okDeps() {
     verifyRuntime: async () => true,
     probeHelper: async () => true,
     gateAvailable: async () => true,
+    // Run-11 Step-4c seam: tests stand in for the session node.exe copy. The
+    // fake mirrors the default's path shape (sessionDir/node.exe) so gate +
+    // launch assertions read the copy path, never the toolchain nodePath.
+    stageLaunchNode: async (sessionDir: string, _src: string) => path.join(sessionDir, 'node.exe'),
   };
 }
 
@@ -200,7 +204,7 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
     ).rejects.toThrow(/guestCaBundlePath mismatch/);
   });
 
-  it('Option 3: installGate is keyed on windowsRuntime.nodePath (appIdPath), never a package SID', async () => {
+  it('Option 3 + run-11: installGate is keyed on the session node.exe COPY (appIdPath), never a package SID or the toolchain path', async () => {
     let captured: unknown;
     const b = new WinSandboxBackend({
       sessionId: 't',
@@ -229,7 +233,11 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
       resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
     } as never);
     const req = captured as Record<string, unknown>;
-    expect(req.appIdPath).toBe('C:\\rt\\node.exe');
+    // guestSkillRoot '/session/skill' -> sessionDir '/session' -> the staged
+    // copy is '/session/node.exe' (fake stageLaunchNode mirrors the default's
+    // shape). The toolchain nodePath 'C:\rt\node.exe' must NOT be the key.
+    expect(req.appIdPath).toBe('/session/node.exe');
+    expect(req.appIdPath).not.toBe('C:\\rt\\node.exe');
     expect(req).not.toHaveProperty('packageSid');
     await b.cleanup();
   });
@@ -267,7 +275,99 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
     } as never);
     await b.run({ command: ['main.js'] } as never);
     expect((capturedArgs as Record<string, unknown>).restrictedToken).toBe(true);
+    // Run-11: the helper launches the session-private node.exe copy, not the
+    // host toolchain nodePath.
+    expect((capturedArgs as Record<string, unknown>).nodePath).toBe('/session/node.exe');
     await b.cleanup();
+  });
+
+  it('run-11: default stageLaunchNode copies the closure node.exe into the sessionDir and prepare keys the gate on the copy', async () => {
+    // Real filesystem, cross-platform: no DI for stageLaunchNode. A source
+    // 'node.exe' with sentinel bytes is staged by the backend's default
+    // collaborator; the gate's appIdPath must be the copy and the copy must
+    // carry the same bytes (integrity of what actually launches).
+    let captured: unknown;
+    const srcDir = mkdtempSync(path.join(tmpdir(), 'oct-rt-'));
+    const sessionRoot = mkdtempSync(path.join(tmpdir(), 'oct-session-'));
+    try {
+      const srcNode = path.join(srcDir, 'node.exe');
+      writeFileSync(srcNode, 'MZ-sentinel');
+      const sessionDir = path.join(sessionRoot, 's');
+      const b = new WinSandboxBackend({
+        sessionId: 't',
+        deps: {
+          platform: 'win32',
+          verifyRuntime: async () => true,
+          probeHelper: async () => true,
+          gateAvailable: async () => true,
+          stageCopy: async () => ({
+            guestSkillRoot: path.join(sessionDir, 'skill'),
+            guestCaBundlePath: path.join(sessionDir, 'ca.pem'),
+          }),
+          installGate: async (req: unknown) => { captured = req; return { filterKeys: ['k'] }; },
+          launchSandboxed: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          teardownSandbox: async () => {},
+          removeGate: async () => {},
+          removeCopyDir: async () => {},
+        } as never,
+      });
+      await b.probe();
+      await b.prepareTopology();
+      await b.prepare({
+        snapshotRoot: '/x',
+        expectedSnapshotDigest: DIGEST,
+        proxyAddr: 'http://127.0.0.1:8080',
+        caBundlePath: '/ca.pem',
+        runtimeProfile: {
+          id: 'r', bins: [], path: '',
+          windowsRuntime: { manifestPath: 'm', nodePath: srcNode, bootstrapPath: 'b' },
+        },
+        guestSkillRoot: path.join(sessionDir, 'skill'),
+        guestCaBundlePath: path.join(sessionDir, 'ca.pem'),
+        resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
+      } as never);
+      const copyPath = path.join(sessionDir, 'node.exe');
+      expect((captured as Record<string, unknown>).appIdPath).toBe(copyPath);
+      expect(existsSync(copyPath)).toBe(true);
+      expect(readFileSync(copyPath, 'utf8')).toBe('MZ-sentinel');
+      await b.cleanup();
+    } finally {
+      rmSync(srcDir, { recursive: true, force: true });
+      rmSync(sessionRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('run-11: prepare fails closed when the node.exe copy cannot be staged', async () => {
+    // If the session-private copy cannot be produced, prepare() must throw
+    // BEFORE the gate install — a gate keyed on nothing, or a launch from the
+    // unreachable toolchain path, would both be silently-wrong states.
+    let gateCalls = 0;
+    const b = new WinSandboxBackend({
+      sessionId: 't',
+      deps: {
+        ...okDeps(),
+        stageCopy: async () => ({ guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem' }),
+        stageLaunchNode: async () => { throw new Error('copy failed'); },
+        installGate: async () => { gateCalls++; return { filterKeys: ['k'] }; },
+      } as never,
+    });
+    await b.probe();
+    await b.prepareTopology();
+    await expect(
+      b.prepare({
+        snapshotRoot: '/x',
+        expectedSnapshotDigest: DIGEST,
+        proxyAddr: 'http://127.0.0.1:8080',
+        caBundlePath: '/ca.pem',
+        runtimeProfile: {
+          id: 'r', bins: [], path: '',
+          windowsRuntime: { manifestPath: 'm', nodePath: 'n', bootstrapPath: 'b' },
+        },
+        guestSkillRoot: '/session/skill', guestCaBundlePath: '/session/ca.pem',
+        resources: { memoryBytes: 1 << 20, cpus: 1, timeoutMs: 1000 },
+      } as never),
+    ).rejects.toThrow(/copy failed/);
+    expect(gateCalls).toBe(0);
   });
 });
 
