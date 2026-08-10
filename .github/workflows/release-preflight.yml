@@ -111,12 +111,12 @@ jobs:
       # prebuilds/linux-x64/...), so both untar into the shared prebuilds/ tree
       # to restore the exact on-disk layout.
       - name: Download qualified darwin-arm64 VM TCB (vm-lane)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vm-tcb-darwin-arm64
           path: /tmp/vm-tcb-darwin-arm64-dl
       - name: Download qualified linux-x64 VM TCB (privileged-linux)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vm-tcb-linux-x64-qualified
           path: /tmp/vm-tcb-linux-x64-qualified-dl
