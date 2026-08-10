@@ -112,6 +112,12 @@ export async function launchSandboxed(
     // Option-3 production mode: launch under a hardened restricted token, no
     // LPAC. Placed immediately before the `--` separator.
     ...(args.restrictedToken ? ['--restricted-token'] : []),
+    // Run-12: create the named Job in the Global object namespace so the
+    // session-0 gate service can open it and refuse remove-gate while the
+    // Job is alive (a session-Local name is invisible to the service, which
+    // would read it as already-dead and allow removal). Production always
+    // sets this; it pairs with the restricted-token production mode.
+    '--global-job',
     '--',
     ...args.argv,
   ];

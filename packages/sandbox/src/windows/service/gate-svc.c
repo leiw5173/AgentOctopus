@@ -1011,13 +1011,33 @@ done:
  *
  * Returns TRUE only when the Job is confirmed dead. Any open/query failure
  * (other than not-found) is treated as NOT dead (fail-closed).
+ *
+ * RUN-12 NAMESPACE: the helper creates the named Job in the GLOBAL object
+ * namespace (CreateJobObjectW "Global\<jobName>", --global-job) so this
+ * session-0 service can see the interactive-session Job. If we opened the
+ * BARE name here, session 0's Local\ namespace would report the helper's Job
+ * as ERROR_FILE_NOT_FOUND -> "dead" -> remove-gate would be allowed while the
+ * child is alive (run-12 CI: `remove-gate while Job alive -> {"ok":true}`).
+ * So this routine prefixes Global\ (unless the caller already supplied a
+ * namespace prefix). The lease stores the bare jobName; the prefix is applied
+ * at open time only.
  */
 static BOOL job_confirmed_dead(PCWSTR jobName) {
     HANDLE job;
     DWORD err;
     BOOL dead = FALSE;
+    WCHAR openName[MAX_PATH];
+    PCWSTR name = jobName;
 
-    job = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, jobName);
+    /* Apply the Global\ prefix unless the name already carries an explicit
+     * object-namespace prefix (contains a backslash). */
+    if (wcschr(jobName, L'\\') == NULL) {
+        if (swprintf_s(openName, ARRAYSIZE(openName), L"Global\\%ls", jobName) >= 0) {
+            name = openName;
+        }
+    }
+
+    job = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, name);
     if (job == NULL) {
         err = GetLastError();
         if (err == ERROR_FILE_NOT_FOUND) {

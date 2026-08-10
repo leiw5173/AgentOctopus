@@ -32,6 +32,13 @@
 > production remedy: launch node from a **session-private node.exe copy** staged into the runner's
 > sessionDir (default Medium label — the Low child reads+executes it but `NO_WRITE_UP` blocks
 > self-rewrite), and key the WFP APP_ID gate on that same copy path.
+> Run-12 hardened it further: (a) `CREATE_NO_WINDOW` was REVERTED — under a Low-integrity token it breaks
+> piped stdio for one-shot children (the child never writes; three 60s timeouts), so the launch keeps a
+> console and relies on the hidden window station instead; (b) the named Job Object is created in the
+> **Global object namespace** (`--global-job` → `CreateJobObjectW("Global\<name>")`) because the companion
+> gate service runs as LocalSystem in session 0 while the helper runs in the interactive session — a
+> session-Local Job name is invisible to the service, which would read it as already-dead and wrongly allow
+> remove-gate while the child is alive. The service prefixes `Global\` on bare Job names when opening them.
 > Consequences relative to the design below: (a) the WFP egress allowlist is scoped by the sandbox `node.exe`
 > **application ID** (`FWPM_CONDITION_ALE_APP_ID`), not the AppContainer package SID (`ALE_PACKAGE_ID`, which
 > only matches AppContainer processes); (b) there is no AppContainer package grant on the staged copy — the

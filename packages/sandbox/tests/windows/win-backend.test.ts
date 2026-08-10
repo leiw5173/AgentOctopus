@@ -234,9 +234,12 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
     } as never);
     const req = captured as Record<string, unknown>;
     // guestSkillRoot '/session/skill' -> sessionDir '/session' -> the staged
-    // copy is '/session/node.exe' (fake stageLaunchNode mirrors the default's
-    // shape). The toolchain nodePath 'C:\rt\node.exe' must NOT be the key.
-    expect(req.appIdPath).toBe('/session/node.exe');
+    // copy is path.join(sessionDir, 'node.exe') (fake stageLaunchNode mirrors
+    // the default's shape). The toolchain nodePath 'C:\rt\node.exe' must NOT
+    // be the key. Derive the expected value via path.join so the assertion
+    // holds on Windows (backslash separators) as well as POSIX — a hardcoded
+    // '/session/node.exe' literal fails on Windows ('\session\node.exe').
+    expect(req.appIdPath).toBe(path.join('/session', 'node.exe'));
     expect(req.appIdPath).not.toBe('C:\\rt\\node.exe');
     expect(req).not.toHaveProperty('packageSid');
     await b.cleanup();
@@ -276,8 +279,8 @@ describe('WinSandboxBackend topology/prepare/spawn', () => {
     await b.run({ command: ['main.js'] } as never);
     expect((capturedArgs as Record<string, unknown>).restrictedToken).toBe(true);
     // Run-11: the helper launches the session-private node.exe copy, not the
-    // host toolchain nodePath.
-    expect((capturedArgs as Record<string, unknown>).nodePath).toBe('/session/node.exe');
+    // host toolchain nodePath. Derive via path.join (Windows uses backslashes).
+    expect((capturedArgs as Record<string, unknown>).nodePath).toBe(path.join('/session', 'node.exe'));
     await b.cleanup();
   });
 

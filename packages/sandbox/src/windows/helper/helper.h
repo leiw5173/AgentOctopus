@@ -149,6 +149,28 @@ typedef struct SANDBOX_LAUNCH_ARGS {
      * relay, environment block, and command-line build are likewise unchanged.
      * --------------------------------------------------------------- */
     int     useRestrictedToken;
+
+    /* ---------------------------------------------------------------
+     * RUN-12 — globalJobName.
+     *
+     * Named Job Objects live in the CALLER'S SESSION object namespace by
+     * default (a name without a prefix is implicitly session-Local). The
+     * companion gate service runs as LocalSystem in SESSION 0, while the
+     * helper (and its Job) run in the interactive session (the hosted
+     * runner's session 2). So when the helper creates "OctJob-X" the service
+     * can NEVER open it: the service's session-0 OpenJobObjectW("OctJob-X")
+     * returns ERROR_FILE_NOT_FOUND, which job_confirmed_dead() (fail-safe)
+     * reads as "Job gone" -> remove-gate would be allowed while the child is
+     * still alive (run-12 CI: `remove-gate while Job alive -> {"ok":true}`).
+     *
+     * When non-zero, the helper creates the Job in the GLOBAL object
+     * namespace instead: CreateJobObjectW(&sa, L"Global\\<jobName>"). A Job
+     * in Global is visible to the session-0 service, which already opens
+     * "Global\\<jobName>" on remove-gate, so the alive-Job refusal actually
+     * engages. Production win-backend passes --global-job on every
+     * restricted-token launch.
+     * --------------------------------------------------------------- */
+    int     globalJobName;
 } SANDBOX_LAUNCH_ARGS;
 
 /*

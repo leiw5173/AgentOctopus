@@ -202,6 +202,12 @@ describe('gate service (OctopusSandboxGate)', () => {
       // restricted token + Job (no LPAC), which is how win-backend launches
       // node — and under which node is expected to SURVIVE.
       '--restricted-token',
+      // Run-12: this test bypasses job.ts (which always appends --global-job),
+      // so pass it explicitly. The gate service runs in session 0 and now opens
+      // the Job as "Global\<name>"; without this flag the helper creates the
+      // Job in its session-Local namespace, the service can't see it, and the
+      // remove-gate-while-alive refusal (job_confirmed_dead) never engages.
+      '--global-job',
       '--job', jobName,
       '--mem-mb', '256',
       '--pkg', pkg,

@@ -1036,6 +1036,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     LPWSTR envBlock = NULL;
     DWORD envBlockBytes = 0;
     SECURITY_ATTRIBUTES jobSa;
+    WCHAR jobNameBuf[MAX_PATH]; /* Global\-prefixed Job name (run-12) */
+    PCWSTR jobCreateName;       /* name handed to CreateJobObjectW */
 
     HRESULT hr = S_OK;
     DWORD err = 0;
@@ -1470,18 +1472,14 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
          * load entirely; the token's credentials still apply for network
          * authentication.
          *
-         * WHY CREATE_NO_WINDOW (run-10 candidate fix): run-9 still failed
-         * hr=0x80070005 under LOGON_NETCREDENTIALS_ONLY, so the profile is
-         * not (the only) access-checked resource. The leading remaining
-         * candidate is the window station / desktop association: with
-         * lpDesktop == NULL the child joins the caller's winsta/desktop and
-         * the access check runs against the CHILD token — a Low-integrity
-         * token is write-up-blocked on the Medium-integrity winsta/desktop.
-         * CREATE_NO_WINDOW removes the console association; the child's
-         * stdio is the relay pipes either way, so it never needed a console.
-         * The `diag-launch` subcommand's battery isolates which factor
-         * denies; if CREATE_NO_WINDOW is not the fix the battery output
-         * points at the next one. */
+         * WHY NOT CREATE_NO_WINDOW (run-12 finding): adding CREATE_NO_WINDOW
+         * made the one-shot child (whose stdout/stderr are the relay pipes)
+         * hang for the full timeout — under the Low-integrity token the
+         * child could not produce pipe output, so the helper's relay loop
+         * never saw EOF and the test timed out. The window-station/desktop
+         * check was NOT the run-9 denial (diag battery arm B with
+         * CREATE_NO_WINDOW still failed), so the flag is reverted. The child
+         * attaches to the helper's (inherited) console state normally. */
         fwprintf(stderr, L"[run] launching via CreateProcessWithTokenW\n");
         fflush(stderr);
         /* CreateProcessWithTokenW takes a plain STARTUPINFOW (not the
@@ -1500,8 +1498,7 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
                                   LOGON_NETCREDENTIALS_ONLY,
                                   NULL,         /* lpApplicationName — use cmdLine */
                                   cmdLine,      /* lpCommandLine */
-                                  CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
-                                  CREATE_NO_WINDOW,
+                                  CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                                   envBlock,
                                   NULL,         /* lpCurrentDirectory — inherit */
                                   &si.StartupInfo,
@@ -1564,7 +1561,29 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     jobSa.lpSecurityDescriptor = NULL;
     jobSa.bInheritHandle = FALSE; /* the untrusted child must NOT inherit the Job handle */
 
-    job = CreateJobObjectW(&jobSa, args->jobName);
+    /* RUN-12: session-0 gate service visibility. A bare Job name is created in
+     * the caller's SESSION (Local\) object namespace — the helper runs in the
+     * interactive session while the gate service runs in session 0, so the
+     * service's OpenJobObjectW("OctJob-X") returned ERROR_FILE_NOT_FOUND and
+     * the fail-safe "Job gone -> allow remove-gate" branch silently defeated
+     * the alive-Job refusal (run-12 CI). When args->globalJobName is set,
+     * create the Job in the GLOBAL object namespace (Global\<name>) so the
+     * service — which opens Global\<name> on remove-gate — can actually see
+     * the live Job and refuse removal while it is populated. */
+    if (args->globalJobName) {
+        if (swprintf_s(jobNameBuf, ARRAYSIZE(jobNameBuf),
+                       L"Global\\%ls", args->jobName) < 0) {
+            hr = E_INVALIDARG; /* job name too long to prefix */
+            goto cleanup;
+        }
+        jobCreateName = jobNameBuf;
+        fwprintf(stderr, L"[run] job created in Global namespace: %ls\n", jobNameBuf);
+        fflush(stderr);
+    } else {
+        jobCreateName = args->jobName;
+    }
+
+    job = CreateJobObjectW(&jobSa, jobCreateName);
     if (job == NULL) {
         err = GetLastError();
         hr = HRESULT_FROM_WIN32(err);
@@ -1893,6 +1912,13 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
         }
         if (wcscmp(f, L"--no-job-mem-limit") == 0) {
             a.noJobMemLimit = 1;
+            continue;
+        }
+        /* RUN-12 PRODUCTION flag: create the named Job in the Global object
+         * namespace (Global\<job>) so the session-0 gate service can open it
+         * and refuse remove-gate while the Job is alive. Set by win-backend. */
+        if (wcscmp(f, L"--global-job") == 0) {
+            a.globalJobName = 1;
             continue;
         }
         if (i + 1 >= argc) { usage_run(); return 2; }
