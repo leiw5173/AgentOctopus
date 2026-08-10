@@ -114,11 +114,14 @@ typedef struct SANDBOX_LAUNCH_ARGS {
      * When non-zero, launch_sandboxed REPLACES the LPAC Step A (the
      * AppContainer SECURITY_CAPABILITIES attribute list) with a hardened
      * CreateRestrictedToken-derived PLAIN token and launches the child via
-     * CreateProcessAsUserW instead of CreateProcessW.
+     * CreateProcessWithTokenW instead of CreateProcessW.
      *
      * Rationale (run-6 matrix conclusion): the LPAC token is the necessary
-     * trigger for the Node launch crash (0x80000003); the specific Node/V8
-     * internal trigger point is pending crash-stack confirmation. Moving the
+     * trigger for the Node launch crash (0x80000003); run-7 identified the
+     * internal trigger point as Node's Winsock init — every LPAC arm prints
+     * "WSAStartup: (10107) A system call has failed." on the child's stderr
+     * immediately before the STATUS_BREAKPOINT fail-fast, and no non-LPAC arm
+     * does (a symbolizable WER dump was not produced). Moving the
      * production node path off LPAC onto a restricted token + Job Object
      * avoids the crash while retaining a strong, explainable isolation
      * boundary.
@@ -173,7 +176,7 @@ typedef struct SANDBOX_LAUNCH_ARGS {
  * step 4 (and the LPAC attribute list in step 1) is REPLACED by building a
  * CreateRestrictedToken-hardened plain token (privileges stripped, the local
  * Administrators alias deny-only, Low integrity) and the child is launched
- * with CreateProcessAsUserW — no EXTENDED_STARTUPINFO_PRESENT and no
+ * with CreateProcessWithTokenW — no EXTENDED_STARTUPINFO_PRESENT and no
  * attribute list. Steps 2/3/5 (Job create/configure, assign-while-suspended,
  * ResumeThread) are UNCHANGED and apply to the restricted-token child
  * identically.

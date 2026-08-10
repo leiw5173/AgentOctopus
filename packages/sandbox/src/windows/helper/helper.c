@@ -42,7 +42,8 @@
  *                      the Option-3 restricted-token calls
  *                      (OpenProcessToken / DuplicateTokenEx /
  *                      CreateRestrictedToken / CreateWellKnownSid /
- *                      SetTokenInformation / CreateProcessAsUserW)
+ *                      SetTokenInformation); the Option-3 launch itself uses
+ *                      CreateProcessWithTokenW (kernel32)
  *   onecoreuap.lib  -- DeriveCapabilitySidsFromName (KernelBase.dll)
  */
 
@@ -1055,7 +1056,7 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
      * OPTION-3 (useRestrictedToken): when args->useRestrictedToken is set the
      * LPAC Step A is skipped EXACTLY as for skipLpac — the restricted token
      * is built instead in Step A' (below) and the child launches via
-     * CreateProcessAsUserW. useRestrictedToken takes precedence: it implies
+     * CreateProcessWithTokenW. useRestrictedToken takes precedence: it implies
      * "no LPAC attribute list."
      * ============================================================== */
 
@@ -1269,7 +1270,9 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
         }
 
         /* 2. Duplicate to a PRIMARY token — CreateRestrictedToken derives
-         * from a primary token, and CreateProcessAsUserW needs one. */
+         * from a primary token; the Option-3 launch (CreateProcessWithTokenW)
+         * accepts primary or impersonation tokens, and the primary form is
+         * the clean one for process creation. */
         if (!DuplicateTokenEx(hToken, TOKEN_ALL_ACCESS, NULL,
                               SecurityImpersonation, TokenPrimary,
                               &hPrimary)) {
@@ -1426,28 +1429,41 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
 
     if (args->useRestrictedToken) {
         /* OPTION-3: launch the child under the hardened restricted token.
-         * CreateProcessAsUserW uses hRestricted as the new process's PRIMARY
+         * CreateProcessWithTokenW uses hRestricted as the new process's
          * token (it does NOT impersonate it). There is NO attribute list
          * (EXTENDED_STARTUPINFO_PRESENT is omitted) because the restricted
          * token replaces the LPAC attribute list. The Job Object steps below
          * (create/configure, assign-while-suspended, ResumeThread) are applied
-         * to this child identically. */
-        fwprintf(stderr, L"[run] launching via CreateProcessAsUserW\n");
+         * to this child identically.
+         *
+         * WHY CreateProcessWithTokenW and NOT CreateProcessAsUserW (run-7 CI
+         * finding, hr=0x80070522): CreateProcessAsUserW requires the caller
+         * to hold SE_ASSIGNPRIMARY_TOKEN_NAME + SE_INCREASE_QUOTA_NAME,
+         * which only SERVICE tokens carry — an (even elevated) interactive
+         * admin token fails with ERROR_PRIVILEGE_NOT_HELD (1314).
+         * CreateProcessWithTokenW instead requires SE_IMPERSONATE_NAME,
+         * which admin tokens hold by default. LOGON_WITH_PROFILE loads the
+         * token user's profile (already loaded for the CI/host user the
+         * helper runs as; the restricted token keeps the user SID, so the
+         * profile key resolves). */
+        fwprintf(stderr, L"[run] launching via CreateProcessWithTokenW\n");
         fflush(stderr);
-        /* CreateProcessAsUserW takes a plain STARTUPINFOW (not the extended
-         * struct); cb must be sizeof(STARTUPINFOW). The EXW-size cb set above
-         * is only correct for CreateProcessW + EXTENDED_STARTUPINFO_PRESENT. */
+        /* CreateProcessWithTokenW takes a plain STARTUPINFOW (not the
+         * extended struct); cb must be sizeof(STARTUPINFOW). The EXW-size cb
+         * set above is only correct for CreateProcessW +
+         * EXTENDED_STARTUPINFO_PRESENT. */
         si.StartupInfo.cb = sizeof(STARTUPINFOW);
         /* Defense-in-depth: clear the attribute list so this no-extended-flag
          * launch can never carry a stale list (attrList is already NULL on the
          * restricted path, since the LPAC Step A was skipped). */
         si.lpAttributeList = NULL;
-        if (!CreateProcessAsUserW(hRestricted,  /* hardened restricted token */
+        /* CreateProcessWithTokenW has no bInheritHandles parameter: with
+         * STARTF_USESTDHANDLES set, the inheritable pipe ends in hStd* are
+         * inherited by the child (they were created inheritable). */
+        if (!CreateProcessWithTokenW(hRestricted,  /* hardened restricted token */
+                                  LOGON_WITH_PROFILE,
                                   NULL,         /* lpApplicationName — use cmdLine */
                                   cmdLine,      /* lpCommandLine */
-                                  NULL,         /* lpProcessAttributes */
-                                  NULL,         /* lpThreadAttributes */
-                                  TRUE,         /* bInheritHandles — inherit the 3 pipe ends */
                                   CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                                   envBlock,
                                   NULL,         /* lpCurrentDirectory — inherit */
