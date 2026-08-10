@@ -10,16 +10,25 @@
  * SERVICE_AUTO_START). It owns the PERSISTENT WFP (Windows Filtering
  * Platform) egress allowlist described in spec §4c: for each sandbox session
  * it installs a private provider + sublayer and four filters scoped to the
- * skill's AppContainer PACKAGE SID that permit only `TCP 127.0.0.1:<proxyPort>`
- * (and `TCP [::1]:<proxyPort>` when the proxy listens on ::1) and block every
- * other connect for that SID (all other V4/V6, all UDP, internet, LAN, and
- * every other loopback port).
+ * skill's node.exe APPLICATION PATH (FWPM_CONDITION_ALE_APP_ID, the
+ * lower-case fully-qualified device path from FwpmGetAppIdFromFileName0) that
+ * permit only `TCP 127.0.0.1:<proxyPort>` (and `TCP [::1]:<proxyPort>` when
+ * the proxy listens on ::1) and block every other connect for that binary
+ * (all other V4/V6, all UDP, internet, LAN, and every other loopback port).
+ *
+ * Option 3 (spec §4c, task 36/37): the node execution path no longer runs
+ * under an AppContainer token (it launches under a CreateRestrictedToken +
+ * Job Object), so FWPM_CONDITION_ALE_PACKAGE_ID would never match. The gate
+ * is therefore scoped to the sandbox-private node.exe path via
+ * FWPM_CONDITION_ALE_APP_ID, which matches the restricted-token child on the
+ * same ALE connect layers and uniquely keys the sandbox binary (the host's
+ * other node.exe has a different path and is unaffected).
  *
  * RPC surface (exactly two operations -- NOT a general WFP write proxy):
- *   install-gate { sessionId, packageSid, proxyHost, proxyPort, jobName }
+ *   install-gate { sessionId, appIdPath, proxyHost, proxyPort, jobName }
  *       -> create the persistent provider (once) + sublayer (once) + the
  *          four persistent filters; record a session lease
- *          { sessionId, packageSid, filterKeys[4], jobName }; return
+ *          { sessionId, appIdPath, filterKeys[4], jobName }; return
  *          { ok:true, filterKeys:[...] }.
  *   remove-gate { sessionId }
  *       -> SERVICE-SIDE verification (spec §4c, do NOT trust the caller):
@@ -45,11 +54,12 @@
  * pulled in via #pragma comment(lib, ...) below. kernel32.lib is implicit.
  * We link:
  *   Fwpuclnt.lib  -- FwpmEngineOpen0 / FwpmProviderAdd0 / FwpmSubLayerAdd0 /
- *                    FwpmFilterAdd0 / FwpmFilterDeleteByKey0
+ *                    FwpmFilterAdd0 / FwpmFilterDeleteByKey0 /
+ *                    FwpmGetAppIdFromFileName0 / FwpmFreeMemory0
  *   advapi32.lib  -- service control (StartServiceCtrlDispatcherW,
  *                    RegisterServiceCtrlHandlerExW, SetServiceStatus),
  *                    ConvertStringSecurityDescriptorToSecurityDescriptorW,
- *                    ConvertStringSidToSidW, registry (lease persistence)
+ *                    registry (lease persistence)
  */
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -62,8 +72,9 @@
  * gates must be self-defined BEFORE any SDK header, because
  * scripts/build-win-helper.mjs passes NO /D (verified -- compileObj/linkExe
  * carry only /nologo /c /W4 /WX /O2 /std:c17 /Fo). FwpmEngineOpen0 and the
- * ALE connect layers are Vista+, and FWPM_CONDITION_ALE_PACKAGE_ID is Win8+,
- * so the Win10 floor is comfortably above every WFP declaration used here.
+ * ALE connect layers are Vista+, and FWPM_CONDITION_ALE_APP_ID /
+ * FwpmGetAppIdFromFileName0 are Vista+, so the Win10 floor is comfortably
+ * above every WFP declaration used here.
  * The #ifndef guards let a future build-script /D override win. */
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00 /* _WIN32_WINNT_WIN10 */
@@ -77,8 +88,7 @@
                          * condition expects); fwpmtypes.h does not pull it in */
 #include <fwpmu.h>     /* WFP 1.0 user-mode API (Fwpm*0, FWPM_*, FWP_*) */
 #include <fwpmtypes.h> /* FWPM_PROVIDER0 / FWPM_SUBLAYER0 / FWPM_FILTER0 */
-#include <sddl.h>      /* ConvertStringSecurityDescriptorToSecurityDescriptorW,
-                        * ConvertStringSidToSidW */
+#include <sddl.h>      /* ConvertStringSecurityDescriptorToSecurityDescriptorW */
 #include <stdio.h>     /* fwprintf */
 #include <stdlib.h>    /* strtoul */
 #include <string.h>    /* memcpy, memcmp, strlen, strstr */
@@ -119,11 +129,13 @@
 #define OCT_RPC_MAX_BYTES   (64u * 1024u)
 #define OCT_RPC_LEN_BYTES   4u
 
-/* Field caps for the parsed install/remove payloads. SIDs, job names, and
- * session ids are short; these caps bound the JSON extractor's copies. A
- * GUID filter key is 38 wide chars ("{...}"). */
+/* Field caps for the parsed install/remove payloads. Job names, session ids,
+ * and host strings are short; these caps bound the JSON extractor's copies. A
+ * GUID filter key is 38 wide chars ("{...}"). The application-id path is a
+ * full DOS path (e.g. "C:\...\node.exe"); OCT_PATH_MAX generously caps it at
+ * 512 (well above the Win32 MAX_PATH of 260 plus long-path headroom). */
 #define OCT_SESSIONID_MAX   128
-#define OCT_SID_MAX         256
+#define OCT_PATH_MAX        512
 #define OCT_JOBNAME_MAX     260
 #define OCT_PROXYHOST_MAX   64
 #define OCT_FILTERKEY_MAX   40
@@ -155,7 +167,7 @@ static const GUID OCT_SUBLAYER_KEY =
  * the LocalSystem write access the service has and is NOT writable by the
  * unprivileged sandbox). One value per sessionId:
  *   value name  = sessionId (sanitized to a safe subset)
- *   value data  = REG_SZ "packageSid|jobName|key0,key1,key2,key3"
+ *   value data  = REG_SZ "appIdPath|jobName|key0,key1,key2,key3"
  * This keeps persistence simple and fail-closed: a lease that cannot be
  * written aborts the install (the gate is rolled back). */
 #define OCT_LEASE_REG_PATH  L"SOFTWARE\\AgentOctopus\\SandboxGate\\Leases"
@@ -344,7 +356,7 @@ static BOOL json_get_bool(const char *json, const char *key, BOOL *out) {
 
 typedef struct OCT_LEASE {
     char  sessionId[OCT_SESSIONID_MAX];
-    char  packageSid[OCT_SID_MAX];   /* ASCII form, e.g. "S-1-15-2-..." */
+    char  appIdPath[OCT_PATH_MAX];   /* ASCII form, e.g. "C:\...\node.exe" */
     char  jobName[OCT_JOBNAME_MAX];  /* ASCII form of the named Job */
     GUID  filterKeys[OCT_FILTER_COUNT];
     DWORD filterCount;               /* 3 when V6 permit is omitted, else 4 */
@@ -394,8 +406,8 @@ static BOOL lease_reg_name(const char *sessionId, WCHAR *out, size_t outCap) {
 }
 
 /* Wide<->ASCII helpers for the narrow fields we round-trip through the
- * registry. Our values are pure ASCII (SIDs, GUIDs, safe names), so a simple
- * per-char widening/narrowing is exact and avoids locale surprises. */
+ * registry. Our values are pure ASCII (DOS paths, GUIDs, safe names), so a
+ * simple per-char widening/narrowing is exact and avoids locale surprises. */
 static void ascii_to_wide(const char *in, WCHAR *out, size_t outCap) {
     size_t i = 0;
     if (outCap == 0) return;
@@ -417,11 +429,11 @@ static void wide_to_ascii(const WCHAR *in, char *out, size_t outCap) {
     out[i] = L'\0';
 }
 
-/* Serialize a lease to "packageSid|jobName|k0,k1,k2,k3" (filterCount GUIDs
+/* Serialize a lease to "appIdPath|jobName|k0,k1,k2,k3" (filterCount GUIDs
  * comma-separated) in a wide buffer for REG_SZ storage. Returns TRUE on
  * success. */
 static BOOL lease_serialize(const OCT_LEASE *lease, WCHAR *out, size_t outCapChars) {
-    WCHAR sidW[OCT_SID_MAX];
+    WCHAR pathW[OCT_PATH_MAX];
     WCHAR jobW[OCT_JOBNAME_MAX];
     WCHAR guidW[OCT_FILTERKEY_MAX];
     size_t used = 0;
@@ -430,10 +442,10 @@ static BOOL lease_serialize(const OCT_LEASE *lease, WCHAR *out, size_t outCapCha
 
     if (lease == NULL || out == NULL || outCapChars == 0) return FALSE;
     out[0] = L'\0';
-    ascii_to_wide(lease->packageSid, sidW, ARRAYSIZE(sidW));
+    ascii_to_wide(lease->appIdPath, pathW, ARRAYSIZE(pathW));
     ascii_to_wide(lease->jobName, jobW, ARRAYSIZE(jobW));
 
-    wrote = swprintf_s(out, outCapChars, L"%s|%s|", sidW, jobW);
+    wrote = swprintf_s(out, outCapChars, L"%s|%s|", pathW, jobW);
     if (wrote < 0) return FALSE;
     used = (size_t)wrote;
 
@@ -474,7 +486,7 @@ static BOOL lease_serialize(const OCT_LEASE *lease, WCHAR *out, size_t outCapCha
 static BOOL lease_persist(const OCT_LEASE *lease) {
     HKEY key = NULL;
     WCHAR name[OCT_SESSIONID_MAX];
-    WCHAR data[OCT_SID_MAX + OCT_JOBNAME_MAX +
+    WCHAR data[OCT_PATH_MAX + OCT_JOBNAME_MAX +
                (OCT_FILTERKEY_MAX * OCT_FILTER_COUNT) + 16];
     LSTATUS st;
     BOOL ok = FALSE;
@@ -648,7 +660,7 @@ static HRESULT wfp_ensure_provider_and_sublayer(HANDLE engine) {
  * action type, the weight, and the derived filter key.
  *
  * conditions: array of FWPM_FILTER_CONDITION0 (already populated, with the
- * package-SID condition first). All conditions must match (AND).
+ * APP_ID condition first). All conditions must match (AND).
  *
  * Returns S_OK when the filter was added (or already existed). A failure
  * HRESULT otherwise; the caller is responsible for rolling back earlier
@@ -713,14 +725,14 @@ static void wfp_rollback_filters(HANDLE engine, const OCT_LEASE *lease,
  * Returns S_OK and fills *lease (with filterCount + filterKeys) on success.
  */
 static HRESULT install_gate(HANDLE engine, const char *sessionId,
-                            const char *packageSid, const char *proxyHost,
+                            const char *appIdPath, const char *proxyHost,
                             unsigned long proxyPort, const char *jobName,
                             BOOL hasV6Loopback, OCT_LEASE *lease) {
-    PSID packageSidBin = NULL;
+    FWP_BYTE_BLOB *appIdBlob = NULL;
     HRESULT hr = S_OK;
     DWORD err = 0;
     DWORD added = 0;
-    WCHAR sidW[OCT_SID_MAX];
+    WCHAR pathW[OCT_PATH_MAX];
     int isLoopbackV4;
     int isLoopbackV6;
 
@@ -731,8 +743,8 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         strlen(sessionId) >= OCT_SESSIONID_MAX) {
         return E_INVALIDARG;
     }
-    if (packageSid == NULL || packageSid[0] == '\0' ||
-        strlen(packageSid) >= OCT_SID_MAX) {
+    if (appIdPath == NULL || appIdPath[0] == '\0' ||
+        strlen(appIdPath) >= OCT_PATH_MAX) {
         return E_INVALIDARG;
     }
     if (jobName == NULL || jobName[0] == '\0' ||
@@ -744,7 +756,7 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
     }
 
     strcpy_s(lease->sessionId, ARRAYSIZE(lease->sessionId), sessionId);
-    strcpy_s(lease->packageSid, ARRAYSIZE(lease->packageSid), packageSid);
+    strcpy_s(lease->appIdPath, ARRAYSIZE(lease->appIdPath), appIdPath);
     strcpy_s(lease->jobName, ARRAYSIZE(lease->jobName), jobName);
 
     /* Decide which loopback permit(s) to install from proxyHost. We accept
@@ -763,11 +775,16 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
      * When proxyHost is ::1 the V6 permit is mandatory. */
     if (isLoopbackV6) hasV6Loopback = TRUE;
 
-    /* Convert the package SID string to a binary SID for the
-     * FWPM_CONDITION_ALE_PACKAGE_ID condition (type FWP_SID). */
-    ascii_to_wide(packageSid, sidW, ARRAYSIZE(sidW));
-    if (!ConvertStringSidToSidW(sidW, &packageSidBin)) {
-        err = GetLastError();
+    /* Canonicalize the sandbox node.exe DOS path into the WFP application-id
+     * blob for the FWPM_CONDITION_ALE_APP_ID condition (type FWP_BYTE_BLOB,
+     * the lower-case fully-qualified device path). FwpmGetAppIdFromFileName0
+     * requires the file to exist on the local machine at install time; on any
+     * failure (missing file / non-canonicalizable path) we return the error
+     * fail-closed and install NO filter. The returned blob is owned by us and
+     * freed with FwpmFreeMemory0 on every exit path below. */
+    ascii_to_wide(appIdPath, pathW, ARRAYSIZE(pathW));
+    err = FwpmGetAppIdFromFileName0(pathW, &appIdBlob);
+    if (err != ERROR_SUCCESS) {
         return HRESULT_FROM_WIN32(err);
     }
 
@@ -775,12 +792,12 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
     if (FAILED(hr)) goto done;
 
     /* ================================================================
-     * Rule 1 -- high-weight PERMIT: package SID AND TCP AND
+     * Rule 1 -- high-weight PERMIT: app-id path AND TCP AND
      *           remote-addr==127.0.0.1 AND remote-port==proxyPort (V4).
      * ================================================================ */
     if (isLoopbackV4) {
         FWPM_FILTER_CONDITION0 cond[4];
-        FWP_CONDITION_VALUE sidVal;
+        FWP_CONDITION_VALUE blobVal;
         FWP_CONDITION_VALUE protoVal;
         FWP_CONDITION_VALUE addrVal;
         FWP_CONDITION_VALUE portVal;
@@ -806,8 +823,11 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         addrVal.type = FWP_UINT32;
         addrVal.uint32 = 0x0100007Fu; /* 127.0.0.1, network byte order */
 
-        sidVal.type = FWP_SID;
-        sidVal.sid = packageSidBin;
+        /* Scoping value: the application-id blob canonicalized above. The
+         * condition matches any connect from the sandbox node.exe binary
+         * (the restricted-token child), regardless of token type. */
+        blobVal.type = FWP_BYTE_BLOB_TYPE;
+        blobVal.byteBlob = appIdBlob;
         protoVal.type = FWP_UINT8;
         protoVal.uint8 = (UINT8)IPPROTO_TCP;
         /* addrVal (FWP_UINT32, network order) is set above where the byte-order
@@ -815,9 +835,9 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         portVal.type = FWP_UINT16;
         portVal.uint16 = (UINT16)proxyPort;
 
-        cond[0].fieldKey = FWPM_CONDITION_ALE_PACKAGE_ID;
+        cond[0].fieldKey = FWPM_CONDITION_ALE_APP_ID;
         cond[0].matchType = FWP_MATCH_EQUAL;
-        cond[0].conditionValue = sidVal;
+        cond[0].conditionValue = blobVal;
         cond[1].fieldKey = FWPM_CONDITION_IP_PROTOCOL;
         cond[1].matchType = FWP_MATCH_EQUAL;
         cond[1].conditionValue = protoVal;
@@ -838,19 +858,19 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
     }
 
     /* ================================================================
-     * Rule 2 -- low-weight BLOCK: all other V4 for this package SID.
+     * Rule 2 -- low-weight BLOCK: all other V4 for this app-id path.
      * ================================================================ */
     {
         FWPM_FILTER_CONDITION0 cond[1];
-        FWP_CONDITION_VALUE sidVal;
+        FWP_CONDITION_VALUE blobVal;
         GUID key;
 
         ZeroMemory(cond, sizeof(cond));
-        sidVal.type = FWP_SID;
-        sidVal.sid = packageSidBin;
-        cond[0].fieldKey = FWPM_CONDITION_ALE_PACKAGE_ID;
+        blobVal.type = FWP_BYTE_BLOB_TYPE;
+        blobVal.byteBlob = appIdBlob;
+        cond[0].fieldKey = FWPM_CONDITION_ALE_APP_ID;
         cond[0].matchType = FWP_MATCH_EQUAL;
-        cond[0].conditionValue = sidVal;
+        cond[0].conditionValue = blobVal;
 
         make_filter_key(sessionId, 1, &key);
         lease->filterKeys[added] = key;
@@ -863,13 +883,13 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
 
     /* ================================================================
      * Rule 3 -- conditional high-weight V6 PERMIT (only when the proxy
-     *           listens on ::1): package SID AND TCP AND remote-addr==::1
+     *           listens on ::1): app-id path AND TCP AND remote-addr==::1
      *           AND remote-port==proxyPort.
      * ================================================================ */
     if (hasV6Loopback) {
         FWPM_FILTER_CONDITION0 cond[4];
         FWP_V6_ADDR_AND_MASK addr6;
-        FWP_CONDITION_VALUE sidVal;
+        FWP_CONDITION_VALUE blobVal;
         FWP_CONDITION_VALUE protoVal;
         FWP_CONDITION_VALUE addrVal;
         FWP_CONDITION_VALUE portVal;
@@ -887,8 +907,8 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         memcpy(addr6.addr, loopback6, 16);
         addr6.prefixLength = 128; /* exact host match */
 
-        sidVal.type = FWP_SID;
-        sidVal.sid = packageSidBin;
+        blobVal.type = FWP_BYTE_BLOB_TYPE;
+        blobVal.byteBlob = appIdBlob;
         protoVal.type = FWP_UINT8;
         protoVal.uint8 = (UINT8)IPPROTO_TCP;
         addrVal.type = FWP_V6_ADDR_MASK;
@@ -896,9 +916,9 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
         portVal.type = FWP_UINT16;
         portVal.uint16 = (UINT16)proxyPort;
 
-        cond[0].fieldKey = FWPM_CONDITION_ALE_PACKAGE_ID;
+        cond[0].fieldKey = FWPM_CONDITION_ALE_APP_ID;
         cond[0].matchType = FWP_MATCH_EQUAL;
-        cond[0].conditionValue = sidVal;
+        cond[0].conditionValue = blobVal;
         cond[1].fieldKey = FWPM_CONDITION_IP_PROTOCOL;
         cond[1].matchType = FWP_MATCH_EQUAL;
         cond[1].conditionValue = protoVal;
@@ -919,20 +939,20 @@ static HRESULT install_gate(HANDLE engine, const char *sessionId,
     }
 
     /* ================================================================
-     * Rule 4 -- low-weight V6 BLOCK: all other V6 for this package SID.
+     * Rule 4 -- low-weight V6 BLOCK: all other V6 for this app-id path.
      *           (If rule 3 was omitted this blocks all V6.)
      * ================================================================ */
     {
         FWPM_FILTER_CONDITION0 cond[1];
-        FWP_CONDITION_VALUE sidVal;
+        FWP_CONDITION_VALUE blobVal;
         GUID key;
 
         ZeroMemory(cond, sizeof(cond));
-        sidVal.type = FWP_SID;
-        sidVal.sid = packageSidBin;
-        cond[0].fieldKey = FWPM_CONDITION_ALE_PACKAGE_ID;
+        blobVal.type = FWP_BYTE_BLOB_TYPE;
+        blobVal.byteBlob = appIdBlob;
+        cond[0].fieldKey = FWPM_CONDITION_ALE_APP_ID;
         cond[0].matchType = FWP_MATCH_EQUAL;
-        cond[0].conditionValue = sidVal;
+        cond[0].conditionValue = blobVal;
 
         make_filter_key(sessionId, 3, &key);
         lease->filterKeys[added] = key;
@@ -955,7 +975,7 @@ rollback:
     lease->filterCount = 0;
 
 done:
-    if (packageSidBin != NULL) LocalFree(packageSidBin);
+    if (appIdBlob != NULL) FwpmFreeMemory0((void **)&appIdBlob);
     return hr;
 }
 
@@ -1026,7 +1046,7 @@ static BOOL job_confirmed_dead(PCWSTR jobName) {
  * remove_gate -- the verified, fail-closed gate removal. Chain (spec §4c):
  *   1. Resolve the lease for sessionId (the service's independent record).
  *   2. OpenJobObjectW(lease.jobName) and confirm dead/empty.
- *   3. (The lease itself IS the recorded package SID + filter keys; a remove
+ *   3. (The lease itself IS the recorded app-id path + filter keys; a remove
  *      request carries only sessionId, so the identity check is "the lease
  *      exists and its Job is dead" -- we delete exactly the lease's recorded
  *      keys, never caller-supplied ones.)
@@ -1189,7 +1209,7 @@ static void leases_reload(void) {
     for (;;) {
         WCHAR valueName[OCT_SESSIONID_MAX];
         DWORD valueNameChars = ARRAYSIZE(valueName);
-        WCHAR data[OCT_SID_MAX + OCT_JOBNAME_MAX +
+        WCHAR data[OCT_PATH_MAX + OCT_JOBNAME_MAX +
                    (OCT_FILTERKEY_MAX * OCT_FILTER_COUNT) + 16];
         DWORD dataBytes = sizeof(data);
         DWORD type = 0;
@@ -1203,7 +1223,7 @@ static void leases_reload(void) {
 
         if (type != REG_SZ) continue;
 
-        /* Split "packageSid|jobName|k0,k1,..." on the two '|' separators. */
+        /* Split "appIdPath|jobName|k0,k1,..." on the two '|' separators. */
         {
             WCHAR *sep1 = wcschr(data, L'|');
             WCHAR *sep2;
@@ -1221,7 +1241,7 @@ static void leases_reload(void) {
             *sep2 = L'\0';
 
             wide_to_ascii(valueName, lease.sessionId, ARRAYSIZE(lease.sessionId));
-            wide_to_ascii(data, lease.packageSid, ARRAYSIZE(lease.packageSid));
+            wide_to_ascii(data, lease.appIdPath, ARRAYSIZE(lease.appIdPath));
             wide_to_ascii(sep1 + 1, lease.jobName, ARRAYSIZE(lease.jobName));
 
             keysStart = sep2 + 1;
@@ -1333,7 +1353,7 @@ static int handle_request(HANDLE engine, const char *body,
 
     if (strcmp(op, "install-gate") == 0) {
         char sessionId[OCT_SESSIONID_MAX];
-        char packageSid[OCT_SID_MAX];
+        char appIdPath[OCT_PATH_MAX];
         char proxyHost[OCT_PROXYHOST_MAX];
         char jobName[OCT_JOBNAME_MAX];
         unsigned long proxyPort = 0;
@@ -1342,7 +1362,7 @@ static int handle_request(HANDLE engine, const char *body,
         HRESULT hr;
 
         if (!json_get_string(body, "sessionId", sessionId, sizeof(sessionId)) ||
-            !json_get_string(body, "packageSid", packageSid, sizeof(packageSid)) ||
+            !json_get_string(body, "appIdPath", appIdPath, sizeof(appIdPath)) ||
             !json_get_string(body, "proxyHost", proxyHost, sizeof(proxyHost)) ||
             !json_get_string(body, "jobName", jobName, sizeof(jobName)) ||
             !json_get_uint(body, "proxyPort", &proxyPort)) {
@@ -1360,7 +1380,7 @@ static int handle_request(HANDLE engine, const char *body,
          * only meaningful for a dual-binding V4 proxy. */
         (void)json_get_bool(body, "proxyV6Loopback", &proxyV6Loopback);
 
-        hr = install_gate(engine, sessionId, packageSid, proxyHost, proxyPort,
+        hr = install_gate(engine, sessionId, appIdPath, proxyHost, proxyPort,
                           jobName, proxyV6Loopback, &lease);
         if (FAILED(hr)) {
             diag(L"install-gate", (DWORD)hr);
