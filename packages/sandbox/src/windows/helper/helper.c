@@ -2646,6 +2646,17 @@ static int cmd_teardown(int argc, wchar_t **argv, int startIdx) {
  * completion -- launch failures are DATA here, not failures. Exit 1 on a
  * structural error (baseline token cannot even be built), 2 on usage.
  * Diagnostic-only: never wired to the production launch path.
+ *
+ * RUN-10 RESULT (CI 31359232747): G plain-duplicate OK; A/B/C/E FAIL;
+ * D (Medium integrity, admins deny-only) OK -> the LOW-INTEGRITY LABEL is
+ * the denying factor, not admins-deny-only, not the winsta/desktop (P2/P3
+ * OK for every identity), and the Low token cannot even open node.exe for
+ * READ|EXECUTE (P1 err=5) while the helper identity can. Run-11 extends
+ * this battery with the label experiment: stage a private copy of node.exe
+ * in the temp dir, probe+launch it unlabeled (arm H), then relabel it to
+ * Low integrity (NO_WRITE_UP) and probe+launch again (arm F). If F passes,
+ * the production remedy is to launch node from a Low-labeled sandbox-private
+ * copy, which the trusted-closure design already implies.
  * ============================================================== */
 
 #define OCT_DIAG_PATH_MAX    1024
@@ -2761,22 +2772,36 @@ done:
 }
 
 /* The three access-check probes under ONE identity (who labels the output:
- * either the helper's own identity or the impersonated restricted token). */
+ * either the helper's own identity or an impersonated restricted token).
+ * P1a/P1b split the image open: read-only vs read+execute — run-10 showed
+ * the Low token fails P1b; the split localizes which access bits deny. */
 static void diag_probe_as(const WCHAR *who, const WCHAR *nodePath) {
     HANDLE hFile = INVALID_HANDLE_VALUE;
     HWINSTA hWinsta = NULL;
     HDESK hDesktop = NULL;
     DWORD err = 0;
 
+    hFile = CreateFileW(nodePath, GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        fwprintf(stderr, L"[diag] %ls P1a image read-only: OK\n", who);
+        CloseHandle(hFile);
+    } else {
+        err = GetLastError();
+        fwprintf(stderr, L"[diag] %ls P1a image read-only: FAIL err=%lu\n",
+                 who, (unsigned long)err);
+    }
+
     hFile = CreateFileW(nodePath, GENERIC_READ | GENERIC_EXECUTE,
                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
-        fwprintf(stderr, L"[diag] %ls P1 image read+exec: OK\n", who);
+        fwprintf(stderr, L"[diag] %ls P1b image read+exec: OK\n", who);
         CloseHandle(hFile);
     } else {
         err = GetLastError();
-        fwprintf(stderr, L"[diag] %ls P1 image read+exec: FAIL err=%lu\n",
+        fwprintf(stderr, L"[diag] %ls P1b image read+exec: FAIL err=%lu\n",
                  who, (unsigned long)err);
     }
 
@@ -2895,9 +2920,174 @@ static void diag_run_battery(const WCHAR *nodePath) {
     fflush(stderr);
 }
 
+/* Print the file's explicit mandatory-integrity label (SID + policy mask),
+ * or NO_EXPLICIT_LABEL when the SACL carries none (unlabeled objects behave
+ * as Medium). LABEL_SECURITY_INFORMATION reads are permitted without
+ * SeSecurityPrivilege; the helper is admin regardless. */
+static void diag_print_file_label(const WCHAR *path) {
+    PSECURITY_DESCRIPTOR psd = NULL;
+    PACL psacl = NULL;
+    BOOL saclPresent = FALSE;
+    BOOL saclDefaulted = FALSE;
+    DWORD err = 0;
+    DWORD i = 0;
+    int found = 0;
+
+    err = GetNamedSecurityInfoW(path, SE_FILE_OBJECT,
+                                LABEL_SECURITY_INFORMATION,
+                                NULL, NULL, NULL, &psacl, &psd);
+    if (err != ERROR_SUCCESS || psd == NULL) {
+        fwprintf(stderr, L"[diag] label query %ls: FAIL err=%lu\n",
+                 path, (unsigned long)err);
+        return;
+    }
+    if (!GetSecurityDescriptorSacl(psd, &saclPresent, &psacl, &saclDefaulted)
+        || !saclPresent || psacl == NULL) {
+        fwprintf(stderr, L"[diag] label %ls: NO_EXPLICIT_LABEL\n", path);
+        LocalFree(psd);
+        return;
+    }
+    for (i = 0; i < psacl->AceCount; i++) {
+        LPVOID pace = NULL;
+        SYSTEM_MANDATORY_LABEL_ACE *pmla = NULL;
+        WCHAR *sidStr = NULL;
+        if (!GetAce(psacl, i, &pace)) continue;
+        if (((PACE_HEADER)pace)->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
+        pmla = (SYSTEM_MANDATORY_LABEL_ACE *)pace;
+        if (ConvertSidToStringSidW((PSID)&pmla->SidStart, &sidStr)) {
+            fwprintf(stderr, L"[diag] label %ls: %ls policy=0x%lx\n",
+                     path, sidStr, (unsigned long)pmla->Mask);
+            LocalFree(sidStr);
+        }
+        found = 1;
+    }
+    if (!found) {
+        fwprintf(stderr, L"[diag] label %ls: SACL without mandatory ACE\n", path);
+    }
+    LocalFree(psd);
+}
+
+/* Set the file's mandatory label to Low (S-1-16-4096) with the standard
+ * NO_WRITE_UP policy. Returns ERROR_SUCCESS or the failing error code. */
+static DWORD diag_set_low_label(const WCHAR *path) {
+    BYTE aclBuf[256];
+    PACL pacl = (PACL)aclBuf;
+    PSID pLowSid = NULL;
+    DWORD err = ERROR_SUCCESS;
+
+    if (!ConvertStringSidToSidW(L"S-1-16-4096", &pLowSid)) {
+        return GetLastError();
+    }
+    if (!InitializeAcl(pacl, (DWORD)sizeof(aclBuf), ACL_REVISION)) {
+        err = GetLastError();
+        LocalFree(pLowSid);
+        return err;
+    }
+    if (!AddMandatoryAce(pacl, ACL_REVISION, 0,
+                         SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, pLowSid)) {
+        err = GetLastError();
+        LocalFree(pLowSid);
+        return err;
+    }
+    err = SetNamedSecurityInfoW((LPWSTR)path, SE_FILE_OBJECT,
+                                LABEL_SECURITY_INFORMATION,
+                                NULL, NULL, NULL, pacl);
+    LocalFree(pLowSid);
+    return err;
+}
+
+/* RUN-11 label experiment. Run-10 proved the Low-integrity label is the
+ * denying factor and that the Low token cannot even open the hostedtoolcache
+ * node.exe for read+execute. This stages a private copy in the temp dir and
+ * tests whether a Low-labeled copy unblocks the Low token:
+ *   - probe the unlabeled copy under the Low token,
+ *   - arm H: launch from the unlabeled copy,
+ *   - relabel the copy Low (NO_WRITE_UP), probe again,
+ *   - arm F: launch from the Low-labeled copy.
+ * The copy is deleted afterwards; a crash cannot leak it (the lane is
+ * ephemeral). */
+static void diag_run_label_battery(const WCHAR *nodePath) {
+    WCHAR tmpDir[MAX_PATH];
+    WCHAR copyPath[OCT_DIAG_PATH_MAX];
+    HANDLE hImp = NULL;
+    HANDLE t = NULL;
+    HRESULT hr = S_OK;
+    DWORD err = 0;
+    DWORD n = 0;
+
+    n = GetTempPathW(ARRAYSIZE(tmpDir), tmpDir);
+    if (n == 0 || n >= ARRAYSIZE(tmpDir)) {
+        fwprintf(stderr, L"[diag] GetTempPathW failed err=%lu\n",
+                 (unsigned long)GetLastError());
+        return;
+    }
+    if (swprintf_s(copyPath, ARRAYSIZE(copyPath), L"%lsoct-diag-node-%lu.exe",
+                   tmpDir, (unsigned long)GetCurrentProcessId()) < 0) {
+        fwprintf(stderr, L"[diag] copy path build failed\n");
+        return;
+    }
+    if (!CopyFileW(nodePath, copyPath, FALSE)) {
+        fwprintf(stderr, L"[diag] CopyFileW failed err=%lu\n",
+                 (unsigned long)GetLastError());
+        return;
+    }
+    fwprintf(stderr, L"[diag] staged copy %ls\n", copyPath);
+    diag_print_file_label(copyPath);
+
+    /* Probe the UNLABELED copy under the Low restricted token. */
+    hr = diag_make_token(1, 1, 1, 1, &hImp);
+    if (SUCCEEDED(hr)) {
+        if (SetThreadToken(NULL, hImp)) {
+            diag_probe_as(L"restricted-low vs UNLABELED-copy", copyPath);
+            RevertToSelf();
+        }
+        CloseHandle(hImp);
+    } else {
+        fwprintf(stderr, L"[diag] label-battery impersonation token failed hr=0x%08lx\n",
+                 (unsigned long)hr);
+    }
+
+    /* H: launch from the unlabeled copy under the Low primary token. */
+    hr = diag_make_token(1, 1, 1, 0, &t);
+    if (SUCCEEDED(hr)) {
+        diag_try_launch(L"H low+denyadmins UNLABELED-copy NETCRED+NO_WINDOW", t,
+                        LOGON_NETCREDENTIALS_ONLY, CREATE_NO_WINDOW, copyPath);
+        CloseHandle(t);
+    }
+
+    /* Relabel the copy Low + NO_WRITE_UP and verify. */
+    err = diag_set_low_label(copyPath);
+    if (err == ERROR_SUCCESS) {
+        fwprintf(stderr, L"[diag] copy relabeled to Low\n");
+    } else {
+        fwprintf(stderr, L"[diag] copy relabel FAILED err=%lu\n", (unsigned long)err);
+    }
+    diag_print_file_label(copyPath);
+
+    /* Probe + arm F: the LOW-labeled copy under the Low restricted token. */
+    hr = diag_make_token(1, 1, 1, 1, &hImp);
+    if (SUCCEEDED(hr)) {
+        if (SetThreadToken(NULL, hImp)) {
+            diag_probe_as(L"restricted-low vs LOW-labeled-copy", copyPath);
+            RevertToSelf();
+        }
+        CloseHandle(hImp);
+    }
+    hr = diag_make_token(1, 1, 1, 0, &t);
+    if (SUCCEEDED(hr)) {
+        diag_try_launch(L"F low+denyadmins LOW-labeled-copy NETCRED+NO_WINDOW", t,
+                        LOGON_NETCREDENTIALS_ONLY, CREATE_NO_WINDOW, copyPath);
+        CloseHandle(t);
+    }
+
+    DeleteFileW(copyPath);
+    fflush(stderr);
+}
+
 static int cmd_diag_launch(int argc, wchar_t **argv, int startIdx) {
     WCHAR nodePath[OCT_DIAG_PATH_MAX];
     HANDLE hProdImp = NULL;
+    HANDLE hMedImp = NULL;
     HRESULT hr = S_OK;
     DWORD sessionId = 0;
     int i = 0;
@@ -2920,10 +3110,29 @@ static int cmd_diag_launch(int argc, wchar_t **argv, int startIdx) {
     }
     fwprintf(stderr, L"[diag] battery start node=%ls sessionId=%lu\n",
              nodePath, (unsigned long)sessionId);
+    diag_print_file_label(nodePath);
     fflush(stderr);
 
     /* Baseline probes under the helper's own identity. */
     diag_probe_as(L"baseline(helper-identity)", nodePath);
+
+    /* Probes under a Medium-integrity restricted token (admins deny-only,
+     * NO Low label). Run-10 arm D launched fine at Medium, so these probes
+     * are expected OK — the control for the Low-integrity gradient. */
+    hr = diag_make_token(1, 0, 1, 1, &hMedImp);
+    if (SUCCEEDED(hr)) {
+        if (SetThreadToken(NULL, hMedImp)) {
+            diag_probe_as(L"restricted(medium+denyadmins-impersonated)", nodePath);
+            RevertToSelf();
+        } else {
+            fwprintf(stderr, L"[diag] SetThreadToken(medium) failed err=%lu\n",
+                     (unsigned long)GetLastError());
+        }
+        CloseHandle(hMedImp);
+    } else {
+        fwprintf(stderr, L"[diag] medium impersonation-token build failed hr=0x%08lx\n",
+                 (unsigned long)hr);
+    }
 
     /* Probes under the production-form restricted token (impersonated). */
     hr = diag_make_token(1, 1, 1, 1, &hProdImp);
@@ -2942,6 +3151,7 @@ static int cmd_diag_launch(int argc, wchar_t **argv, int startIdx) {
     }
 
     diag_run_battery(nodePath);
+    diag_run_label_battery(nodePath);
 
     fwprintf(stderr, L"[diag] battery complete\n");
     fflush(stderr);
