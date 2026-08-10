@@ -245,7 +245,7 @@ describe('gate service (OctopusSandboxGate)', () => {
         proxyPort: 8080,
         jobName,
       });
-      expect(ins.ok).toBe(true);
+      expect(ins.ok, `install-gate response: ${JSON.stringify(ins)}`).toBe(true);
       expect(Array.isArray(ins.filterKeys)).toBe(true);
       expect(ins.filterKeys.length).toBeGreaterThan(0);
 
@@ -314,7 +314,7 @@ describe('gate service (OctopusSandboxGate)', () => {
       proxyPort: 8080,
       jobName: 'OctJob-never-existed',
     });
-    expect(ins.ok).toBe(true);
+    expect(ins.ok, `install-gate response: ${JSON.stringify(ins)}`).toBe(true);
 
     const rem = await rpc({ op: 'remove-gate', sessionId: 's-gone' });
     console.error('[gate-svc] remove-gate nonexistent Job ->', JSON.stringify(rem));

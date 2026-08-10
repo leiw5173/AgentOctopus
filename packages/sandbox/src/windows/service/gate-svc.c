@@ -205,24 +205,27 @@ static void diag(PCWSTR context, DWORD code) {
  * NOT pull in a JSON library; instead we extract scalar values with a strict
  * hand-rolled scanner that:
  *   - finds `"key"` followed by optional whitespace, ':', optional whitespace;
- *   - for a string value, reads the closing quote (honoring backslash escapes
- *         only enough to find the terminator -- we reject any value containing
- *         an escape, since our known values never need one);
+ *   - for a string value, reads to the closing quote, unescaping exactly the
+ *         two escapes a JSON.stringify'd Windows DOS path can produce
+ *         ("\\" -> '\' and "\"" -> '"'); every other escape is rejected
+ *         fail-closed. (Option-3 note: appIdPath is the first field that
+ *         legitimately contains backslashes; the TS client JSON-escapes them,
+ *         so the scanner must unescape them or install-gate fails closed with
+ *         bad-install-args.)
  *   - for a number value (proxyPort), reads [0-9]+ only.
- * Anything nested, oversized, or containing an escape/quote-in-value is
+ * Anything nested, oversized, or containing an unsupported escape is
  * rejected. This is intentionally narrow: the service trusts nothing about
  * the client and refuses anything it cannot parse exactly.
  *
  * json_get_string -- copy the string value of `key` into out (cap outCap
  * chars, NUL-terminated). Returns TRUE on a clean, fully-contained extraction;
  * FALSE if the key is absent, the value is not a plain string, contains an
- * escape, or exceeds outCap-1.
+ * unsupported escape, or exceeds outCap-1.
  */
 static BOOL json_get_string(const char *json, const char *key,
                             char *out, size_t outCap) {
     char needle[64];
     const char *p;
-    const char *v;
     size_t klen;
     size_t n = 0;
 
@@ -249,20 +252,33 @@ static BOOL json_get_string(const char *json, const char *key,
     if (*p != '"') return FALSE;
     p++; /* opening quote of the value */
 
-    v = p;
+    /* Copy the value into out, unescaping the ONLY two escapes a Windows DOS
+     * path (appIdPath) can produce once JSON.stringify'd by the TS client:
+     * "\\" -> '\' and "\"" -> '"'. Every other escape (\n, \uXXXX, ...) is
+     * still rejected outright — the service never guesses a value it cannot
+     * parse exactly. Written char-by-char because unescaping makes the output
+     * shorter than the raw JSON span (no trailing memcpy). */
     while (*p != '\0' && *p != '"') {
-        if (*p == '\\') {
-            /* We reject escapes outright: none of our known values need one,
-             * and accepting them would force a full unescape pass. */
-            return FALSE;
+        char c = *p;
+        if (c == '\\') {
+            char e = *(p + 1);
+            if (e == '\\') {
+                c = '\\';
+                p += 2;
+            } else if (e == '"') {
+                c = '"';
+                p += 2;
+            } else {
+                return FALSE; /* unsupported escape — fail closed */
+            }
+        } else {
+            p++;
         }
-        n++;
-        if (n >= outCap) return FALSE; /* would overflow out */
-        p++;
+        if (n + 1 >= outCap) return FALSE; /* leave room for the NUL */
+        out[n++] = c;
     }
     if (*p != '"') return FALSE; /* unterminated */
 
-    memcpy(out, v, n);
     out[n] = '\0';
     return TRUE;
 }
