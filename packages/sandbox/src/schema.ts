@@ -87,7 +87,7 @@ export const SNAPSHOT_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
  */
 export const SandboxConfigSchema = z
   .object({
-    defaultBackend: z.enum(['auto', 'docker', 'os', 'vm', 'subprocess', 'ssh', 'none']).default('auto'),
+    defaultBackend: z.enum(['auto', 'docker', 'os', 'windows', 'vm', 'subprocess', 'ssh', 'none']).default('auto'),
     minIsolationLevel: z.enum(['full', 'restricted', 'remote-unverified', 'none']).default('full'),
     runtimeProfiles: z
       .record(
@@ -111,6 +111,21 @@ export const SandboxConfigSchema = z
            */
           darwinRuntime: z
             .object({ manifestPath: z.string() })
+            .strict()
+            .optional(),
+          /**
+           * Trusted Windows restricted-runtime identity. `manifestPath` is
+           * the host path of the verified Windows runtime closure manifest
+           * (Node exe + bootstrap.cjs + vendored undici). `.strict()`
+           * rejects unknown nested fields so a typo cannot silently weaken
+           * the gate.
+           */
+          windowsRuntime: z
+            .object({
+              manifestPath: z.string(),
+              nodePath: z.string(),
+              bootstrapPath: z.string(),
+            })
             .strict()
             .optional(),
           vmRuntime: z

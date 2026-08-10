@@ -1483,7 +1483,7 @@ The sandbox security suite lives in `packages/sandbox/tests/security/` (111 test
 pnpm --filter @agentoctopus/sandbox exec vitest run tests/security
 ```
 
-Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lanes run on any host with Docker (and, on Darwin, `sandbox-exec`). The **privileged Linux** lane is CI-owned — it requires a provisioned self-hosted runner with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` and `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`; on a macOS dev host it skips and that skip is NOT coverage.
+Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lanes run on any host with Docker (and, on Darwin, `sandbox-exec`). The **privileged Linux** lane is CI-owned — it requires a provisioned self-hosted runner with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` and `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`; on a macOS dev host it skips and that skip is NOT coverage. The **windows-restricted** lane runs on `windows-latest` (hosted, elevated runner context) — see Phase W below.
 
 ### Rows
 
@@ -1532,6 +1532,44 @@ Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lan
 | S17 | VM L4 adversarial escape matrix (zero-skip, fail-closed) | ✅ (CI, macOS Apple Silicon) |
 | S18 | VM release trust root / signed manifest verification | ✅ (unit) |
 | S19 | VM verified-object binding (realpath exec-path + private copies / fd-pin) | ✅ (unit) |
+
+## Phase W — Windows Restricted Backend
+
+The native Windows backend suite lives in `packages/sandbox/tests/windows/`. It runs for real on the **`windows-restricted` CI lane** (`windows-latest`, hosted — steps execute in an elevated local-admin context) or on any Windows 10/11 host where the helper + trusted runtime are built and the `OctopusSandboxGate` companion service is installed. The lane is committed and fail-closed but has not yet run — it is where the native C code (authored correct-by-construction on macOS, uncompiled on the dev host) gets its first authoritative validation on a real Windows host. Run scoped:
+
+```bash
+pnpm --filter @agentoctopus/sandbox exec vitest run tests/windows
+```
+
+Lane prerequisites (all produced by `node packages/sandbox/scripts/build-win-helper.mjs`, then an elevated service install):
+
+- `packages/sandbox/prebuilds/windows-x64/octopus-sandbox-helper.exe` — the unprivileged helper (probe / sid / grant-acl / run / teardown).
+- `packages/sandbox/prebuilds/windows-x64/octopus-sandbox-gate-svc.exe` — the privileged companion service, registered + started via `sc.exe` as `OctopusSandboxGate` (LocalSystem, auto-start).
+- `packages/sandbox/prebuilds/windows-x64/runtime.manifest.json` — the verified `windowsRuntime` closure (Node exe + bootstrap.cjs + vendored undici).
+
+The native C tests are `win32`-gated (`itWin` gates on `process.platform === 'win32'` plus the helper exe; `itSvc` gates on the live service pipe `\\.\pipe\octopus-sandbox-gate`) and **skip everywhere else** — the TS-logic suites (win-backend lifecycle, stage-copy, wrappers, manifests) run on any host via DI seams. On the CI lane `assert-no-skipped-tests.mjs` fails the job on ANY skip, so a compile error, artifact gap, or failed service install is a visible failure, never silent green.
+
+### Rows
+
+| # | Group | Vitest file | Runner prerequisite | Expected |
+|---|---|---|---|---|
+| W1 | Skill eligibility (`os: [windows]`) | covered by `packages/skills` eligibility tests + `tests/windows/win-backend.test.ts` platform gate | any host (TS logic) | `shouldIncludeSkill()` admits a skill declaring `os: [windows]` only on Windows (exact string — not `win32`); a skill omitting `os` stays eligible. `WinSandboxBackend.probe()` returns `false` on a non-Windows platform with no DI override — fail-closed before touching any artifact. |
+| W2 | Backend lifecycle — probe / prepareTopology / prepare / spawn / run / cleanup | `tests/windows/win-backend.test.ts` | any host (DI seams); real run on the Windows lane | `none` before probe, `restricted` after a successful probe; fails closed when the gate is unavailable / runtime manifest unverifiable / helper self-test fails. `prepareTopology` returns the in-process loopback carrier. `prepare` throws before a successful probe, rejects a malformed `expectedSnapshotDigest`, requires `runtimeProfile.windowsRuntime`, and throws on a staged guestSkillRoot/guestCaBundlePath mismatch. `run()` forwards the one-shot stdin payload to the launcher. Cleanup runs teardown → removeGate → delete-copy in order, throws `ContainmentCleanupError` (memoized) when the Job cannot be confirmed dead and keeps the gate, and treats a post-death removeGate failure as SOFT. |
+| W3 | Trusted runtime manifest + build-time artifact manifests | `tests/windows/runtime-manifest.test.ts`, `tests/windows/tcb-manifest.test.ts`, `tests/windows/build-script.test.ts` | any host (fixture/unit); real artifacts on the Windows lane | At probe time the `windowsRuntime` closure (Node exe + bootstrap.cjs + vendored undici) passes strict sha256 + size verification (no mode check — NTFS has no executable-mode bit); a tampered/missing closure entry fails closed. Separately, `build-win-helper.mjs` is fail-closed (no half-linked fake `.exe`) and writes per-artifact manifests for the helper/service exes at build time — those per-artifact manifests are NOT re-verified by probe() at runtime (they are consumed only by their own unit tests today). |
+| W4 | Helper primitives — SID derivation, probe self-test, sandboxed run, teardown | `tests/windows/helper-sid.test.ts`, `tests/windows/helper-run.test.ts`, `tests/windows/helper-teardown.test.ts` | **Windows host with the helper exe** (`itWin`; skips elsewhere) | `sid` prints a loopback capability SID matching `S-1-15-3-*` (diagnostic). `probe` self-test passes (Job Object + capability-SID derivation + a throwaway AppContainer-profile round-trip as a host-capability check). `run --restricted-token` launches `node -e` inside the Job Object + restricted token and relays stdout + the child's exit code verbatim — it MUST exit 3 and print `hi` (the Option-3 production regression); the child launches a **session-private node.exe copy** (the Low-integrity token cannot open the host toolchain node.exe — the direct helper-run tests stage the copy into their temp stage dir, mirroring win-backend Step 4c), and the suite also asserts the token is genuinely hardened (Low integrity; `SeDebug`/`SeBackup`/`SeRestore` privileges stripped) and that the Job memory cap blocks an oversized allocation. The LPAC matrix arms are kept as diagnostic crash-evidence only (LPAC is the confirmed necessary trigger of the Node launch crash and is not the execution path). A `diag-launch` battery (helper subcommand; log-only, never skips on the lane) decomposes restricted-token launch ACCESS_DENIED: impersonated probes of image/winsta/desktop access, launch variants (plain duplicate, production form ± `CREATE_NO_WINDOW`, `WITH_PROFILE`, no-Low-integrity, no-admins-deny-only), and a label experiment staging a private node.exe copy (unlabeled arm vs Low-labeled arm) against the Low-integrity token. `teardown` removes the per-session copy dir. |
+| W5 | Companion service RPC — install-gate / remove-gate (service-side Job-death verification) | `tests/windows/gate-svc.test.ts` | **Windows host with `OctopusSandboxGate` installed + running** (`itSvc`; skips elsewhere) | `install-gate` returns per-session filter keys; `remove-gate` is REFUSED while the named Job is not confirmed dead (the service resolves the lease + opens the Job itself — spec §4c / Acceptance #9); a malformed or unknown op is refused cleanly (`ok:false`), never a crash. Run-12: the Job is created in the **Global object namespace** (`--global-job` → `CreateJobObjectW("Global\<name>")`) because the gate service runs as LocalSystem in session 0 while the helper runs in the interactive session — a session-Local Job name is invisible to the service, which would read it as already-dead and wrongly allow remove-gate while the child is alive. The test passes `--global-job` explicitly (it bypasses job.ts, which appends it automatically). |
+| W6 | Network allowlist — WFP permit-proxy / block-else | `tests/windows/gate-svc.test.ts` (install path) + `tests/windows/win-backend.test.ts` (prepare passes the sandbox `node.exe` appIdPath + proxy endpoint to installGate) | **Windows host with `OctopusSandboxGate` installed + running** (`itSvc`; skips elsewhere) | Current assertions: `install-gate` returns `ok:true` with a non-empty `filterKeys` array, and the win-backend prepare path hands the service the sandbox `node.exe` `appIdPath` + proxy host/port (+ `proxyV6Loopback` when the proxy dual-binds). The WFP filters are scoped by `FWPM_CONDITION_ALE_APP_ID` (the canonicalized binary path), not an AppContainer package SID. The full §4c rule-set assertion (provider/sublayer/weights, V4/V6 layers, TCP-only, single permitted endpoint — spec Acceptance #8) is NOT yet implemented in any test; it is the intended lane-side assertion to add on the `windows-restricted` lane, not a current one. |
+
+### Pass / Fail Checklist (Phase W)
+
+| # | Test | Pass |
+|---|---|---|
+| W1 | Skill eligibility — `os: [windows]` exact-string gating + non-Windows fail-closed probe | ✅ (unit) |
+| W2 | Backend lifecycle — probe/topology/prepare/spawn/run/cleanup + cleanup-memoization contract | ✅ (unit; DI seams) |
+| W3 | Runtime-closure manifest verification (probe) + build-time per-artifact manifests + fail-closed build script | ✅ (unit) |
+| W4 | Helper primitives — sid / probe / run / teardown on a real Windows host | ⏭️ (lane committed, awaits first run on a real Windows host) |
+| W5 | Companion service RPC — install-gate, remove-gate refused while Job alive, malformed-frame safety | ⏭️ (lane committed, awaits first run on a real Windows host) |
+| W6 | WFP network allowlist — current assertions cover install RPC shape + SID/endpoint plumbing only; the full §4c rule-set assertion (Acceptance #8) is not yet implemented | ⏭️ (lane committed, awaits first run on a real Windows host; rule-set assertion to be added) |
 
 ## Phase E2E — Hermes Layered Telemetry & Debug Endpoint
 

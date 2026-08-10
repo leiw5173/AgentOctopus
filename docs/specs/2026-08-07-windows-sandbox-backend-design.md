@@ -5,6 +5,48 @@
 **Status:** Draft v2.1.1 — third design review incorporated (see *Review changes applied*)
 **Isolation target:** `restricted` (explicitly NOT `full`)
 
+> **Implementation note (post-design pivot — Option 3).** During implementation the LPAC/AppContainer
+> token proved incompatible with the Node runtime: a controlled single-variable matrix established that the
+> LPAC token is the **necessary trigger** of the Node launch crash (`0x80000003` / `STATUS_BREAKPOINT`).
+> Run-7 identified the internal trigger point at subsystem level: every crashing LPAC arm prints
+> `WSAStartup: (10107) A system call has failed.` on the child's stderr immediately before the fail-fast,
+> and no non-LPAC arm does — Node dies in its Winsock initialization under the LPAC token (consistent with
+> the jitless/no-WASM-trap-handler arms changing nothing: the trigger is pre-V8). A symbolizable WER dump
+> was not produced (WerFault did not write one for the AppContainer crash), so the stack itself remains
+> unconfirmed. The node execution path was therefore
+> pivoted **off LPAC** to **Option 3 — a `CreateRestrictedToken`-hardened token** (privileges stripped,
+> Administrators deny-only, Low Integrity) launched via `CreateProcessWithTokenW` (run-7 finding:
+> `CreateProcessAsUserW` fails with `ERROR_PRIVILEGE_NOT_HELD`/1314 outside a service token, which alone
+> carries `SeAssignPrimaryTokenPrivilege`; `CreateProcessWithTokenW` needs only `SeImpersonatePrivilege`,
+> which admin tokens hold), plus the same Job Object.
+> Run-8/run-9 found the restricted-token launch itself denied (`ERROR_ACCESS_DENIED`) under BOTH logon
+> flags (`LOGON_WITH_PROFILE`, then `LOGON_NETCREDENTIALS_ONLY`), so the profile load is not the only
+> access-checked resource; run-10 adds `CREATE_NO_WINDOW` to the production launch (leading candidate:
+> the window-station/desktop access check under a Low-Integrity child token) and a `diag-launch` helper
+> subcommand whose log-only battery (impersonated image/winsta/desktop probes + six launch variants)
+> isolates which access check denies.
+> Run-10/run-11 resolved it: the battery shows a plain duplicate and a Medium-integrity restricted token
+> both launch fine, while EVERY Low-integrity arm fails AND the Low token cannot even open the host
+> toolchain node.exe (`ERROR_ACCESS_DENIED` on the image probes) — a PATH-based denial (the identical
+> bytes under the session temp dir open fine; the toolchain file carries no explicit label). The
+> production remedy: launch node from a **session-private node.exe copy** staged into the runner's
+> sessionDir (default Medium label — the Low child reads+executes it but `NO_WRITE_UP` blocks
+> self-rewrite), and key the WFP APP_ID gate on that same copy path.
+> Run-12 hardened it further: (a) `CREATE_NO_WINDOW` was REVERTED — under a Low-integrity token it breaks
+> piped stdio for one-shot children (the child never writes; three 60s timeouts), so the launch keeps a
+> console and relies on the hidden window station instead; (b) the named Job Object is created in the
+> **Global object namespace** (`--global-job` → `CreateJobObjectW("Global\<name>")`) because the companion
+> gate service runs as LocalSystem in session 0 while the helper runs in the interactive session — a
+> session-Local Job name is invisible to the service, which would read it as already-dead and wrongly allow
+> remove-gate while the child is alive. The service prefixes `Global\` on bare Job names when opening them.
+> Consequences relative to the design below: (a) the WFP egress allowlist is scoped by the sandbox `node.exe`
+> **application ID** (`FWPM_CONDITION_ALE_APP_ID`), not the AppContainer package SID (`ALE_PACKAGE_ID`, which
+> only matches AppContainer processes); (b) there is no AppContainer package grant on the staged copy — the
+> restricted token reads it through its normal Low-Integrity DACL view; (c) the LPAC path is retained only as a
+> diagnostic / future-compat probe, not the execution path. This is **restricted process isolation, not
+> AppContainer capability isolation.** The LPAC description below is the original design; the current mechanism
+> is documented in `docs/core-concepts/sandbox.md`.
+
 ## Overview
 
 Add a native Windows sandbox backend (`WinSandboxBackend`) so AgentOctopus can execute
@@ -235,6 +277,7 @@ host Win32 filesystem namespace, and isolation comes from token + DACL. There is
 step is removed.
 
 **Delivery model (Decision 3 — per-session copy only):**
+
 1. Stage a per-session copy of the verified snapshot + CA bundle into a session directory.
 2. Re-verify the copy against `expectedSnapshotDigest` before use (defends against a
    time-of-check/time-of-use mutation between the runner's verify and the copy).
@@ -382,6 +425,7 @@ Setting `HTTP_PROXY` alone does NOT make Node 22's built-in `fetch` use a proxy.
 existing backends, convergence is delivered through
 `NODE_OPTIONS=--require <verified bootstrap.cjs>` (see `images/runtime/bootstrap.cjs`), which
 the trusted `windowsRuntime` supplies. The helper injects:
+
 - `NODE_OPTIONS=--require <bootstrapPath>` (verified, trusted absolute path),
 - the CA bundle env (`caBundlePath`),
 - `HTTP_PROXY`/`HTTPS_PROXY` = `http://127.0.0.1:<proxyPort>`, `NO_PROXY` empty.
@@ -435,6 +479,7 @@ A new `windows-restricted` lane on `windows-latest` (hosted). The WFP gate insta
 elevation, so the lane runs the companion-service install step with the runner's available
 elevation (hosted `windows-latest` runners provide an admin context); the sandboxed skill
 execution itself is unprivileged:
+
 - Builds the helper + runtime via `scripts/build-win-helper.mjs` and verifies all artifacts
   (helper, windowsRuntime, bootstrap, undici) independently.
 - Installs the companion service, then runs the WinSandboxBackend behavioral suite (see
@@ -469,6 +514,7 @@ execution itself is unprivileged:
 ## Security properties (explicit scope)
 
 **Provided (v1 has no degraded mode — these hold whenever the backend is selected):**
+
 - Resource bounding (memory, CPU time, process count) via Job Object.
 - File/registry/process/window isolation via LPAC DACL + Low Integrity Level, with
   `ALL APPLICATION PACKAGES` opted out.
@@ -487,6 +533,7 @@ service is installed (a one-time elevated step). Without it there is no Windows 
 unprivileged "loopback-reachable" fallback in v1 (Decision 4).
 
 **Explicitly NOT provided (honest `restricted` scope):**
+
 - No kernel-memory or side-channel isolation (not a VM).
 - No defense against a malicious skill exploiting a Windows kernel vulnerability.
 - No `full` isolation claim, ever, on Windows — the lane asserts `restricted` and the
