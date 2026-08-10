@@ -3241,6 +3241,26 @@ static void diag_run_runtime_battery(const WCHAR *nodePath) {
         fwprintf(stderr, L"[diag] RT-A token build failed hr=0x%08lx\n", (unsigned long)hr);
     }
 
+    /* RUN-17 control: full privileges + Low integrity + NO admins-deny (empty
+     * deny-only set). Run-17's RT-KALL (keep ALL privileges + denyadmins +
+     * Low) FROZEN, which eliminated privilege deletion as the trigger — the
+     * remaining candidates inside CreateRestrictedToken are the deny-only
+     * Administrators SID vs the deny-only MECHANISM itself. This arm removes
+     * ONLY the deny-only SID (keeps every privilege + Low integrity):
+     *   RT-NODENY RAN    -> the deny-only Administrators SID is the trigger;
+     *                       replace it with a less-disruptive hardening.
+     *   RT-NODENY FROZEN -> the CreateRestrictedToken deny-only mechanism /
+     *                       restricted-SID composition is the trigger. */
+    hr = diag_make_token_keeppriv(L"*", 1, 0, &t); /* keep all priv, Low, NO denyadmins */
+    if (SUCCEEDED(hr)) {
+        diag_try_launch_resume(L"RT-NODENY keep=ALL low NO-denyadmins", t,
+                               LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+        CloseHandle(t);
+        t = NULL;
+    } else {
+        fwprintf(stderr, L"[diag] RT-NODENY token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
     /* RUN-16 keep-ALL control (sentinel L"*"). All six run-16 keep-one arms
      * FROZE, so no single common privilege is sufficient. This control keeps
      * EVERY privilege (empty delete list) while applying the production
