@@ -107,6 +107,45 @@ typedef struct SANDBOX_LAUNCH_ARGS {
     int     skipJob;
     int     skipLpac;
     int     noJobMemLimit;
+
+    /* ---------------------------------------------------------------
+     * OPTION-3 PRODUCTION PATH — useRestrictedToken.
+     *
+     * When non-zero, launch_sandboxed REPLACES the LPAC Step A (the
+     * AppContainer SECURITY_CAPABILITIES attribute list) with a hardened
+     * CreateRestrictedToken-derived PLAIN token and launches the child via
+     * CreateProcessAsUserW instead of CreateProcessW.
+     *
+     * Rationale (run-6 matrix conclusion): the LPAC token is the necessary
+     * trigger for the Node launch crash (0x80000003); the specific Node/V8
+     * internal trigger point is pending crash-stack confirmation. Moving the
+     * production node path off LPAC onto a restricted token + Job Object
+     * avoids the crash while retaining a strong, explainable isolation
+     * boundary.
+     *
+     * The restricted token is built as follows (see helper.c Step A'):
+     *   - derived from the helper's own primary token (DuplicateTokenEx);
+     *   - CreateRestrictedToken with DISABLE_MAX_PRIVILEGE (strips every
+     *     privilege except SeChangeNotifyPrivilege);
+     *   - a minimal set of high-risk GROUP SIDs made deny-only (currently
+     *     ONLY the local Administrators alias SID, WinBuiltinAdministratorsSid);
+     *   - integrity level lowered to Low (S-1-16-4096,
+     *     SECURITY_MANDATORY_LOW_RID) via SetTokenInformation.
+     * The child keeps its normal user identity (file/registry access via its
+     * user + logon SIDs are preserved) but loses administrative power and all
+     * dangerous privileges.
+     *
+     * Mutual exclusivity: useRestrictedToken replaces the LPAC Step A. When
+     * it is set, NO AppContainer profile / SECURITY_CAPABILITIES /
+     * ALL_APPLICATION_PACKAGES opt-out is applied (regardless of skipLpac).
+     * It is the production mode; the LPAC path and the run-6 --skip-* flags
+     * remain compiled for the diagnostic matrix baseline.
+     *
+     * The Job Object (KILL_ON_JOB_CLOSE + memory + active-process caps) is
+     * UNCHANGED and still applied to the restricted-token child. The stdio
+     * relay, environment block, and command-line build are likewise unchanged.
+     * --------------------------------------------------------------- */
+    int     useRestrictedToken;
 } SANDBOX_LAUNCH_ARGS;
 
 /*
@@ -129,6 +168,15 @@ typedef struct SANDBOX_LAUNCH_ARGS {
  *      attached at process-creation time — see helper.c for why the token
  *      is built before step 1 even though the Job is configured between 1
  *      and 3.)
+ *
+ * OPTION-3 (useRestrictedToken): when args->useRestrictedToken is non-zero,
+ * step 4 (and the LPAC attribute list in step 1) is REPLACED by building a
+ * CreateRestrictedToken-hardened plain token (privileges stripped, the local
+ * Administrators alias deny-only, Low integrity) and the child is launched
+ * with CreateProcessAsUserW — no EXTENDED_STARTUPINFO_PRESENT and no
+ * attribute list. Steps 2/3/5 (Job create/configure, assign-while-suspended,
+ * ResumeThread) are UNCHANGED and apply to the restricted-token child
+ * identically.
  *   5. ONLY on full success of every prior step, ResumeThread(child) — now
  *      the child runs, fully inside the Job. Any failure before this point
  *      MUST TerminateProcess the suspended child, close its handles, free

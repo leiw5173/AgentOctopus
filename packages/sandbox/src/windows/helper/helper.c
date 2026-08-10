@@ -38,7 +38,11 @@
  * lib is pulled in via #pragma comment(lib, ...) below. kernel32.lib is
  * implicit. We link:
  *   userenv.lib     -- CreateAppContainerProfile / DeleteAppContainerProfile
- *   advapi32.lib    -- ConvertSidToStringSidW / ConvertStringSidToSidW
+ *   advapi32.lib    -- ConvertSidToStringSidW / ConvertStringSidToSidW, and
+ *                      the Option-3 restricted-token calls
+ *                      (OpenProcessToken / DuplicateTokenEx /
+ *                      CreateRestrictedToken / CreateWellKnownSid /
+ *                      SetTokenInformation / CreateProcessAsUserW)
  *   onecoreuap.lib  -- DeriveCapabilitySidsFromName (KernelBase.dll)
  */
 
@@ -985,6 +989,17 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     LPPROC_THREAD_ATTRIBUTE_LIST attrList = NULL;
     SIZE_T attrListSize = 0;
 
+    /* ---- Option-3 restricted-token state (allocated, freed on every path).
+     * Only populated when args->useRestrictedToken is set. ---- */
+    HANDLE hToken = NULL;      /* our own process token (TOKEN_DUPLICATE|...) */
+    HANDLE hPrimary = NULL;    /* primary duplicate of hToken */
+    HANDLE hRestricted = NULL; /* CreateRestrictedToken-hardened launch token */
+    PSID pAdminSid = NULL;     /* local Administrators alias (deny-only entry) */
+    PSID pLowIntegritySid = NULL; /* S-1-16-4096 mandatory-label SID */
+    SID_AND_ATTRIBUTES disableSids[1]; /* deny-only GROUP SID set */
+    DWORD disableSidCount = 0;
+    TOKEN_MANDATORY_LABEL tml;
+
     /* ---- process / job state ---- */
     STARTUPINFOEXW si;
     PROCESS_INFORMATION pi;
@@ -1013,6 +1028,8 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     ZeroMemory(&si, sizeof(si));
     ZeroMemory(&pi, sizeof(pi));
     ZeroMemory(&secCaps, sizeof(secCaps));
+    ZeroMemory(&tml, sizeof(tml));
+    ZeroMemory(disableSids, sizeof(disableSids));
     ZeroMemory(&inPipe, sizeof(inPipe));
     ZeroMemory(&outPipe, sizeof(outPipe));
     ZeroMemory(&errPipe, sizeof(errPipe));
@@ -1034,9 +1051,15 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
      * CreateProcessW gets a plain (non-LPAC) token. This is the
      * single-variable "no LPAC" matrix arm; it is diagnostic-only and the
      * production win-backend never sets it.
+     *
+     * OPTION-3 (useRestrictedToken): when args->useRestrictedToken is set the
+     * LPAC Step A is skipped EXACTLY as for skipLpac — the restricted token
+     * is built instead in Step A' (below) and the child launches via
+     * CreateProcessAsUserW. useRestrictedToken takes precedence: it implies
+     * "no LPAC attribute list."
      * ============================================================== */
 
-    if (!args->skipLpac) {
+    if (!args->skipLpac && !args->useRestrictedToken) {
     /* A1. Resolve the package SID for the moniker. Create the profile if it
      * does not exist yet (the real sandbox profile — the TS side may or may
      * not have created it already; CreateAppContainerProfile is idempotent
@@ -1188,13 +1211,124 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     fwprintf(stderr, L"[run] attribute list built\n");
     fflush(stderr);
     } else {
-        /* RUN-6 DIAGNOSTIC (skipLpac): attrList is left NULL and
-         * si.lpAttributeList is never set, so CreateProcessW launches the
-         * child with a PLAIN token — no AppContainer, no capability SIDs,
-         * no ALL_APPLICATION_PACKAGES opt-out. packageSid / capSids /
+        /* RUN-6 DIAGNOSTIC (skipLpac) / OPTION-3 (useRestrictedToken):
+         * attrList is left NULL and si.lpAttributeList is never set, so the
+         * child launches with a PLAIN token — no AppContainer, no capability
+         * SIDs, no ALL_APPLICATION_PACKAGES opt-out. packageSid / capSids /
          * loopbackCapSid / secCapSids all stay NULL and the cleanup block
          * already NULL-guards each free, so skipping Step A is safe. */
-        fwprintf(stderr, L"[run] DIAG skipLpac: LPAC attribute list omitted (plain token)\n");
+        if (args->useRestrictedToken) {
+            fwprintf(stderr, L"[run] LPAC attribute list omitted (restricted-token path)\n");
+        } else {
+            fwprintf(stderr, L"[run] DIAG skipLpac: LPAC attribute list omitted (plain token)\n");
+        }
+        fflush(stderr);
+    }
+
+    /* ==============================================================
+     * Step A' -- OPTION-3: build the hardened restricted token.
+     *
+     * Runs INSTEAD of the LPAC Step A when args->useRestrictedToken is set.
+     * The 6-arm run-6 matrix proved the LPAC token is the NECESSARY trigger
+     * for the node.exe 0x80000003 fast-fail; the specific Node/V8 internal
+     * trigger point is pending crash-stack confirmation. This path moves the
+     * production node launch off LPAC onto a CreateRestrictedToken-hardened
+     * PLAIN token that keeps the user's normal identity (file/registry access
+     * via the user + logon SIDs) but strips admin power and every dangerous
+     * privilege, and lowers the child to Low integrity.
+     *
+     * Hardening applied:
+     *   1. Duplicate our own (admin) token to a primary token.
+     *   2. CreateRestrictedToken with DISABLE_MAX_PRIVILEGE — every privilege
+     *      is removed except SeChangeNotifyPrivilege ("bypass traverse
+     *      checking"), which is required for ordinary file-path access.
+     *   3. A MINIMAL deny-only GROUP SID set: only the local Administrators
+     *      alias (WinBuiltinAdministratorsSid) is disabled. The user's own
+     *      SID and the logon SID are intentionally NOT disabled so node can
+     *      still read its install tree, the staged copy, and HKCU.
+     *   4. Low integrity (S-1-16-4096, SECURITY_MANDATORY_LOW_RID) via
+     *      SetTokenInformation — a strong process-isolation boundary against
+     *      the host's Medium/High processes.
+     *
+     * Any failure here is fail-closed: no partially-hardened token is ever
+     * used for launch. The Job Object (Step C/D) is applied to this child
+     * exactly as for the LPAC path.
+     * ============================================================== */
+    if (args->useRestrictedToken) {
+        /* 1. Open our own process token. Only TOKEN_DUPLICATE | TOKEN_QUERY
+         * are requested: DuplicateTokenEx re-acquires full rights on the
+         * duplicate, and neither CreateRestrictedToken nor the integrity
+         * lowering needs TOKEN_ADJUST_DEFAULT / TOKEN_ADJUST_SESSIONID on the
+         * source token. Least-privilege on the source handle. */
+        if (!OpenProcessToken(GetCurrentProcess(),
+                              TOKEN_DUPLICATE | TOKEN_QUERY,
+                              &hToken)) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err);
+            goto cleanup;
+        }
+
+        /* 2. Duplicate to a PRIMARY token — CreateRestrictedToken derives
+         * from a primary token, and CreateProcessAsUserW needs one. */
+        if (!DuplicateTokenEx(hToken, TOKEN_ALL_ACCESS, NULL,
+                              SecurityImpersonation, TokenPrimary,
+                              &hPrimary)) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err);
+            goto cleanup;
+        }
+
+        /* 3a. Build the deny-only GROUP SID set. MINIMAL and documented:
+         * only the local Administrators alias is made deny-only (attributes
+         * == 0). Stripping admin membership removes administrative power while
+         * the token retains its user identity. We deliberately do NOT disable
+         * the user's own SID or the logon SID — node needs those to read
+         * files and the registry. */
+        {
+            DWORD adminSidSize = (DWORD)SECURITY_MAX_SID_SIZE;
+            pAdminSid = (PSID)LocalAlloc(LMEM_FIXED, adminSidSize);
+            if (pAdminSid == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
+            if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL,
+                                    pAdminSid, &adminSidSize)) {
+                err = GetLastError();
+                hr = HRESULT_FROM_WIN32(err);
+                goto cleanup;
+            }
+        }
+        disableSids[0].Sid = pAdminSid;
+        disableSids[0].Attributes = 0; /* 0 => "disable" (deny-only) */
+        disableSidCount = 1;
+
+        /* 3b. Build the restricted token. DISABLE_MAX_PRIVILEGE strips all
+         * privileges except SeChangeNotifyPrivilege. No SIDs are deleted
+         * (deleteSidCount 0) and no restricted SIDs are added. */
+        if (!CreateRestrictedToken(hPrimary, DISABLE_MAX_PRIVILEGE,
+                                   disableSidCount, disableSids,
+                                   0, NULL,   /* no SIDs deleted */
+                                   0, NULL,   /* no restricted SIDs */
+                                   &hRestricted)) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err);
+            goto cleanup;
+        }
+
+        /* 4. Lower integrity to Low (S-1-16-4096). Build the mandatory-label
+         * SID and set TokenIntegrityLevel with SE_GROUP_INTEGRITY. */
+        if (!ConvertStringSidToSidW(L"S-1-16-4096", &pLowIntegritySid)) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err);
+            goto cleanup;
+        }
+        tml.Label.Sid = pLowIntegritySid;
+        tml.Label.Attributes = SE_GROUP_INTEGRITY;
+        if (!SetTokenInformation(hRestricted, TokenIntegrityLevel,
+                                 &tml, (DWORD)sizeof(tml))) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err);
+            goto cleanup;
+        }
+
+        fwprintf(stderr, L"[run] restricted token built (privileges stripped, admins disabled, low integrity)\n");
         fflush(stderr);
     }
 
@@ -1290,7 +1424,40 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     si.StartupInfo.hStdError = errPipe.childEnd;
     si.lpAttributeList = attrList; /* NULL when skipLpac (no LPAC attrs) */
 
-    if (!CreateProcessW(NULL,           /* lpApplicationName — use cmdLine */
+    if (args->useRestrictedToken) {
+        /* OPTION-3: launch the child under the hardened restricted token.
+         * CreateProcessAsUserW uses hRestricted as the new process's PRIMARY
+         * token (it does NOT impersonate it). There is NO attribute list
+         * (EXTENDED_STARTUPINFO_PRESENT is omitted) because the restricted
+         * token replaces the LPAC attribute list. The Job Object steps below
+         * (create/configure, assign-while-suspended, ResumeThread) are applied
+         * to this child identically. */
+        fwprintf(stderr, L"[run] launching via CreateProcessAsUserW\n");
+        fflush(stderr);
+        /* CreateProcessAsUserW takes a plain STARTUPINFOW (not the extended
+         * struct); cb must be sizeof(STARTUPINFOW). The EXW-size cb set above
+         * is only correct for CreateProcessW + EXTENDED_STARTUPINFO_PRESENT. */
+        si.StartupInfo.cb = sizeof(STARTUPINFOW);
+        /* Defense-in-depth: clear the attribute list so this no-extended-flag
+         * launch can never carry a stale list (attrList is already NULL on the
+         * restricted path, since the LPAC Step A was skipped). */
+        si.lpAttributeList = NULL;
+        if (!CreateProcessAsUserW(hRestricted,  /* hardened restricted token */
+                                  NULL,         /* lpApplicationName — use cmdLine */
+                                  cmdLine,      /* lpCommandLine */
+                                  NULL,         /* lpProcessAttributes */
+                                  NULL,         /* lpThreadAttributes */
+                                  TRUE,         /* bInheritHandles — inherit the 3 pipe ends */
+                                  CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                                  envBlock,
+                                  NULL,         /* lpCurrentDirectory — inherit */
+                                  &si.StartupInfo,
+                                  &pi)) {
+            err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err);
+            goto cleanup;
+        }
+    } else if (!CreateProcessW(NULL,           /* lpApplicationName — use cmdLine */
                         cmdLine,        /* lpCommandLine */
                         NULL,           /* lpProcessAttributes */
                         NULL,           /* lpThreadAttributes */
@@ -1543,6 +1710,16 @@ cleanup:
         LocalFree(capSids);
     }
     if (packageSid != NULL) FreeSid(packageSid);
+
+    /* Option-3 restricted-token state: close every token handle and free
+     * every SID, each NULL-guarded, on every exit path (success and all
+     * failure paths alike). */
+    if (hRestricted != NULL) CloseHandle(hRestricted);
+    if (hPrimary != NULL) CloseHandle(hPrimary);
+    if (hToken != NULL) CloseHandle(hToken);
+    if (pAdminSid != NULL) LocalFree(pAdminSid);
+    if (pLowIntegritySid != NULL) LocalFree(pLowIntegritySid);
+
     if (cmdLine != NULL) LocalFree(cmdLine);
     if (envBlock != NULL) LocalFree(envBlock);
 
@@ -1588,6 +1765,14 @@ static void usage_run(void) {
         L"      --pkg <moniker> --proxy <host:port> --ca <path> --bootstrap <path>\n"
         L"      --node <nodePath>   (selftest launches the helper exe itself as the\n"
         L"      LPAC child via run-probe-child; --node is accepted but unused)\n"
+        L"  PRODUCTION MODE (Option 3 — the node launch path; replaces the LPAC\n"
+        L"  token with a CreateRestrictedToken-hardened plain token + Job):\n"
+        L"      --restricted-token  launch node under a restricted token (privileges\n"
+        L"                          stripped, local Administrators deny-only, Low\n"
+        L"                          integrity) + the Job Object. REPLACES the LPAC\n"
+        L"                          Step A; wins over the LPAC path when both apply.\n"
+        L"                          The LPAC path and the --skip-* flags below are\n"
+        L"                          diagnostic-only.\n"
         L"  RUN-6 DIAGNOSTIC-ONLY flags (not part of the production launch\n"
         L"  contract; each removes ONE sandbox layer for the node/V8 root-cause\n"
         L"  matrix; must be removed/guarded before release):\n"
@@ -1631,6 +1816,14 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
         /* Flag with no argument. */
         if (wcscmp(f, L"--selftest") == 0) {
             a.selfTest = 1;
+            continue;
+        }
+        /* OPTION-3 PRODUCTION MODE: launch node under a CreateRestrictedToken
+         * -hardened plain token + Job Object instead of the LPAC token. This
+         * is the production path; it replaces the LPAC Step A (restricted
+         * token WINS over the LPAC attribute list when both would apply). */
+        if (wcscmp(f, L"--restricted-token") == 0) {
+            a.useRestrictedToken = 1;
             continue;
         }
         /* RUN-6 DIAGNOSTIC-ONLY flags (see helper.h): each removes exactly
@@ -1691,6 +1884,13 @@ static int cmd_run(int argc, wchar_t **argv, int startIdx) {
      * block-buffered and a hang would swallow the markers). */
     fwprintf(stderr, L"[run] parsed args\n");
     fflush(stderr);
+    /* OPTION-3 PRODUCTION MODE marker: emitted on its own line so the CI log
+     * shows the production restricted-token path was selected (distinct from
+     * the run-6 diagnostic toggles below). */
+    if (a.useRestrictedToken) {
+        fwprintf(stderr, L"[run] mode: restricted-token (Option 3, production)\n");
+        fflush(stderr);
+    }
     /* RUN-6 DIAGNOSTIC: echo the active matrix toggles so each matrix arm's
      * CI log line is self-describing (which single variable was removed). */
     if (a.skipJob || a.skipLpac || a.noJobMemLimit) {
