@@ -2797,6 +2797,146 @@ done:
     return hr;
 }
 
+/* RUN-14 keep-privilege token builder. Run-14's 2x2 proved DISABLE_MAX_PRIVILEGE
+ * (strip-all-but-SeChangeNotifyPrivilege) is the freeze trigger. To find WHICH
+ * privilege node needs, this builds a Low-integrity + admins-deny-only
+ * restricted token (the production hardening) but KEEPS one named privilege:
+ * it enumerates the source token's privileges and passes every privilege
+ * EXCEPT keepPrivilegeName to CreateRestrictedToken's PrivilegesToDelete list
+ * (WITHOUT DISABLE_MAX_PRIVILEGE, so the kept privilege survives). The
+ * deny-only Administrators SID + Low integrity are applied identically to the
+ * production path. keepPrivilegeName is the SE_*_NAME string (e.g.
+ * SE_INC_WORKING_SET_NAME); pass NULL to keep none (== production freeze).
+ *
+ * CreateRestrictedToken has no keep-list, so the inverse (delete all-but-one)
+ * is how a single kept privilege is expressed. The deleted set is the token's
+ * own privilege list minus the kept one — privileges not present are simply
+ * absent, so no work is needed for them. */
+static HRESULT diag_make_token_keeppriv(const WCHAR *keepPrivilegeName,
+                                        int lowIntegrity, int denyAdmins,
+                                        HANDLE *outToken) {
+    HANDLE hToken = NULL;
+    HANDLE hPrimary = NULL;
+    HANDLE hRestricted = NULL;
+    PSID pAdminSid = NULL;
+    PSID pLowSid = NULL;
+    SID_AND_ATTRIBUTES disableSids[1];
+    DWORD disableSidCount = 0;
+    TOKEN_MANDATORY_LABEL tml;
+    DWORD adminSidSize = 0;
+    HRESULT hr = S_OK;
+    /* Privilege enumeration buffer. */
+    PTOKEN_PRIVILEGES privs = NULL;
+    DWORD privsLen = 0;
+    PLUID_AND_ATTRIBUTES deleteList = NULL;
+    DWORD deleteCount = 0;
+    DWORD i = 0;
+    LUID keepLuid;
+    BOOL haveKeepLuid = FALSE;
+
+    ZeroMemory(&keepLuid, sizeof(keepLuid));
+
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_DUPLICATE | TOKEN_QUERY, &hToken)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+    if (!DuplicateTokenEx(hToken, TOKEN_ALL_ACCESS, NULL,
+                          SecurityImpersonation, TokenPrimary, &hPrimary)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+
+    /* Resolve the kept privilege name to a LUID (if one was given). */
+    if (keepPrivilegeName != NULL) {
+        if (!LookupPrivilegeValueW(NULL, keepPrivilegeName, &keepLuid)) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+        haveKeepLuid = TRUE;
+    }
+
+    /* Enumerate the source token's privileges. First call sizes the buffer. */
+    GetTokenInformation(hPrimary, TokenPrivileges, NULL, 0, &privsLen);
+    if (privsLen == 0) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+    privs = (PTOKEN_PRIVILEGES)LocalAlloc(LMEM_FIXED, privsLen);
+    if (privs == NULL) { hr = E_OUTOFMEMORY; goto done; }
+    if (!GetTokenInformation(hPrimary, TokenPrivileges, privs, privsLen, &privsLen)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+
+    /* Build the delete list: every privilege except the kept one. */
+    deleteList = (PLUID_AND_ATTRIBUTES)LocalAlloc(LMEM_FIXED,
+        privs->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES));
+    if (deleteList == NULL) { hr = E_OUTOFMEMORY; goto done; }
+    for (i = 0; i < privs->PrivilegeCount; i++) {
+        LUID thisLuid = privs->Privileges[i].Luid;
+        if (haveKeepLuid &&
+            thisLuid.LowPart == keepLuid.LowPart &&
+            thisLuid.HighPart == keepLuid.HighPart) {
+            continue; /* keep this one */
+        }
+        deleteList[deleteCount] = privs->Privileges[i];
+        deleteCount++;
+    }
+
+    if (denyAdmins) {
+        adminSidSize = (DWORD)SECURITY_MAX_SID_SIZE;
+        pAdminSid = (PSID)LocalAlloc(LMEM_FIXED, adminSidSize);
+        if (pAdminSid == NULL) { hr = E_OUTOFMEMORY; goto done; }
+        if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL,
+                                pAdminSid, &adminSidSize)) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+        disableSids[0].Sid = pAdminSid;
+        disableSids[0].Attributes = 0; /* deny-only */
+        disableSidCount = 1;
+    }
+
+    /* NO DISABLE_MAX_PRIVILEGE here: we delete explicitly so the kept
+     * privilege survives. */
+    if (!CreateRestrictedToken(hPrimary, 0,
+                               disableSidCount, disableSids,
+                               deleteCount, deleteList,
+                               0, NULL, &hRestricted)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        goto done;
+    }
+
+    if (lowIntegrity) {
+        if (!ConvertStringSidToSidW(L"S-1-16-4096", &pLowSid)) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+        ZeroMemory(&tml, sizeof(tml));
+        tml.Label.Sid = pLowSid;
+        tml.Label.Attributes = SE_GROUP_INTEGRITY;
+        if (!SetTokenInformation(hRestricted, TokenIntegrityLevel,
+                                 &tml, (DWORD)sizeof(tml))) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto done;
+        }
+    }
+
+    *outToken = hRestricted;
+    hRestricted = NULL;
+
+done:
+    if (hToken) CloseHandle(hToken);
+    if (hPrimary) CloseHandle(hPrimary);
+    if (hRestricted) CloseHandle(hRestricted);
+    if (pAdminSid) LocalFree(pAdminSid);
+    if (pLowSid) LocalFree(pLowSid);
+    if (privs) LocalFree(privs);
+    if (deleteList) LocalFree(deleteList);
+    return hr;
+}
+
 /* The three access-check probes under ONE identity (who labels the output:
  * either the helper's own identity or an impersonated restricted token).
  * P1a/P1b split the image open: read-only vs read+execute — run-10 showed
@@ -2905,6 +3045,17 @@ static void diag_try_launch(const WCHAR *tag, HANDLE token, DWORD logonFlags,
  * markers), while the Medium restricted token (matrix noLpac arm) ran node
  * clean with the SAME pipes + console. So the freeze is a Low-integrity
  * RUNTIME property, not a creation-time access check.
+ *
+ * RUN-14 RESULT (the 2x2 below isolated the trigger): the freeze is caused by
+ * DISABLE_MAX_PRIVILEGE, NOT Low integrity.
+ *   RT-G plain duplicate (full priv, Medium)        -> RAN
+ *   RT-D medium+denyadmins (DISABLE_MAX_PRIVILEGE)  -> FROZEN
+ *   RT-E low-only (full priv, Low)                  -> RAN
+ *   RT-A low+denyadmins (production, both)          -> FROZEN
+ * Low integrity is irrelevant to the freeze (RT-E runs clean); stripping
+ * every privilege but SeChangeNotifyPrivilege is what freezes node. So the
+ * production token must KEEP whichever privilege(s) node needs to start.
+ * The keep-one arms below (RT-K*) bisect which privilege that is.
  *
  * This probe closes the gap: it launches node under `token` with PIPED
  * stdout (STARTF_USESTDHANDLES -> an inheritable anonymous-pipe write end),
@@ -3085,6 +3236,41 @@ static void diag_run_runtime_battery(const WCHAR *nodePath) {
         CloseHandle(t);
     } else {
         fwprintf(stderr, L"[diag] RT-A token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    /* RUN-14 keep-one arms. RT-D FROZEN + RT-E RAN proved DISABLE_MAX_PRIVILEGE
+     * is the trigger, so the production token must KEEP whichever privilege(s)
+     * node needs. Each RT-K* arm is the full production hardening (Low +
+     * denyadmins) but keeps exactly ONE named privilege; the arm that flips
+     * FROZEN -> RAN names a sufficient privilege. Candidates are the privileges
+     * node/V8/CRT are known to touch at startup. */
+    {
+        static const WCHAR *const keepCandidates[] = {
+            SE_INC_WORKING_SET_NAME,     /* SeIncreaseWorkingSetPrivilege */
+            SE_DEBUG_NAME,               /* SeDebugPrivilege */
+            SE_LOCK_MEMORY_NAME,         /* SeLockMemoryPrivilege */
+            SE_INC_BASE_PRIORITY_NAME,   /* SeIncreaseBasePriorityPrivilege */
+            SE_SYSTEM_PROFILE_NAME,      /* SeSystemProfilePrivilege */
+            SE_INCREASE_QUOTA_NAME,      /* SeIncreaseQuotaPrivilege */
+        };
+        size_t k = 0;
+        for (k = 0; k < ARRAYSIZE(keepCandidates); k++) {
+            WCHAR tag[128];
+            if (swprintf_s(tag, ARRAYSIZE(tag), L"RT-K keep=%ls",
+                           keepCandidates[k]) < 0) {
+                continue;
+            }
+            hr = diag_make_token_keeppriv(keepCandidates[k], 1, 1, &t);
+            if (SUCCEEDED(hr)) {
+                diag_try_launch_resume(tag, t,
+                                       LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+                CloseHandle(t);
+                t = NULL;
+            } else {
+                fwprintf(stderr, L"[diag] %ls token build failed hr=0x%08lx\n",
+                         tag, (unsigned long)hr);
+            }
+        }
     }
 
     fwprintf(stderr, L"[diag] runtime battery complete\n");
