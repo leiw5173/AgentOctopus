@@ -1010,9 +1010,9 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
     HANDLE hToken = NULL;      /* our own process token (TOKEN_DUPLICATE|...) */
     HANDLE hPrimary = NULL;    /* primary duplicate of hToken */
     HANDLE hRestricted = NULL; /* CreateRestrictedToken-hardened launch token */
-    PSID pAdminSid = NULL;     /* local Administrators alias (deny-only entry) */
+    PSID pAdminSid = NULL;     /* RUN-18: unused — no deny-only SIDs (kept for the free path) */
     PSID pLowIntegritySid = NULL; /* S-1-16-4096 mandatory-label SID */
-    SID_AND_ATTRIBUTES disableSids[1]; /* deny-only GROUP SID set */
+    SID_AND_ATTRIBUTES disableSids[1]; /* RUN-18: empty — no deny-only GROUP SIDs */
     DWORD disableSidCount = 0;
     TOKEN_MANDATORY_LABEL tml;
 
@@ -1260,9 +1260,14 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
      *   2. CreateRestrictedToken with DISABLE_MAX_PRIVILEGE — every privilege
      *      is removed except SeChangeNotifyPrivilege ("bypass traverse
      *      checking"), which is required for ordinary file-path access.
-     *   3. A MINIMAL deny-only GROUP SID set: only the local Administrators
-     *      alias (WinBuiltinAdministratorsSid) is disabled. The user's own
-     *      SID and the logon SID are intentionally NOT disabled so node can
+     *   3. NO deny-only group SIDs. RUN-18 ROOT CAUSE: a deny-only
+     *      Administrators SID freezes node at startup (the admin runner's
+     *      Administrators group owns objects node must open; deny-only turns
+     *      those opens into ACCESS_DENIED and node blocks). It was also
+     *      redundant on this lane — DISABLE_MAX_PRIVILEGE already strips the
+     *      dangerous privileges, and the boundary is Low integrity + the Job +
+     *      the WFP egress allowlist, not admin-group denial. The user's own
+     *      SID and the logon SID are intentionally left enabled so node can
      *      still read its install tree, the staged copy, and HKCU.
      *   4. Low integrity (S-1-16-4096, SECURITY_MANDATORY_LOW_RID) via
      *      SetTokenInformation — a strong process-isolation boundary against
@@ -1298,30 +1303,30 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
             goto cleanup;
         }
 
-        /* 3a. Build the deny-only GROUP SID set. MINIMAL and documented:
-         * only the local Administrators alias is made deny-only (attributes
-         * == 0). Stripping admin membership removes administrative power while
-         * the token retains its user identity. We deliberately do NOT disable
-         * the user's own SID or the logon SID — node needs those to read
-         * files and the registry. */
-        {
-            DWORD adminSidSize = (DWORD)SECURITY_MAX_SID_SIZE;
-            pAdminSid = (PSID)LocalAlloc(LMEM_FIXED, adminSidSize);
-            if (pAdminSid == NULL) { hr = E_OUTOFMEMORY; goto cleanup; }
-            if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL,
-                                    pAdminSid, &adminSidSize)) {
-                err = GetLastError();
-                hr = HRESULT_FROM_WIN32(err);
-                goto cleanup;
-            }
-        }
-        disableSids[0].Sid = pAdminSid;
-        disableSids[0].Attributes = 0; /* 0 => "disable" (deny-only) */
-        disableSidCount = 1;
+        /* 3. Build the restricted token. DISABLE_MAX_PRIVILEGE strips all
+         * privileges except SeChangeNotifyPrivilege. No SIDs are deleted, no
+         * restricted SIDs are added, and — RUN-18 ROOT CAUSE — NO group SID is
+         * made deny-only.
+         *
+         * RUN-18 RESUME-BATTERY ROOT CAUSE (the Option-3 node freeze): a
+         * deny-only Administrators SID freezes node at STARTUP. The resume-based
+         * battery (diag_run_runtime_battery) isolated it exactly:
+         *   RT-G plain duplicate                 RAN   (control)
+         *   RT-D medium + denyadmins + restr     FROZEN
+         *   RT-E low-only (full priv, Low)       RAN   <- Low integrity innocent
+         *   RT-KALL keep=ALL + denyadmins + Low  FROZEN <- privilege deletion innocent
+         *   RT-NODENY keep=ALL + Low, NO denyadmins RAN <- the deny-only SID is the trigger
+         * The CI runner is an ADMINISTRATOR, so the source token's Administrators
+         * group owns / controls objects node's startup must reach (console,
+         * window station, ALPC ports); making that group deny-only turns those
+         * opens into ACCESS_DENIED and node blocks. The deny-only SID was also
+         * redundant hardening on this lane: DISABLE_MAX_PRIVILEGE already strips
+         * every dangerous privilege (SeDebug/SeBackup/SeRestore/SeTakeOwnership/
+         * ...), and the runner is a single-purpose VM — the real boundary is the
+         * Low integrity level (no write-up) + the Job Object + the WFP egress
+         * allowlist, not admin-group denial. So the deny-only set is EMPTY. */
+        disableSidCount = 0; /* RUN-18: no deny-only group SIDs (see above) */
 
-        /* 3b. Build the restricted token. DISABLE_MAX_PRIVILEGE strips all
-         * privileges except SeChangeNotifyPrivilege. No SIDs are deleted
-         * (deleteSidCount 0) and no restricted SIDs are added. */
         if (!CreateRestrictedToken(hPrimary, DISABLE_MAX_PRIVILEGE,
                                    disableSidCount, disableSids,
                                    0, NULL,   /* no SIDs deleted */
@@ -1348,7 +1353,7 @@ HRESULT launch_sandboxed(const SANDBOX_LAUNCH_ARGS *args, DWORD *outExitCode) {
             goto cleanup;
         }
 
-        fwprintf(stderr, L"[run] restricted token built (privileges stripped, admins disabled, low integrity)\n");
+        fwprintf(stderr, L"[run] restricted token built (privileges stripped, low integrity, no deny-only SIDs)\n");
         fflush(stderr);
     }
 

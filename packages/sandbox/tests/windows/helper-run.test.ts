@@ -256,9 +256,14 @@ describe('helper run (run-6 root-cause matrix)', () => {
 //
 // Restricted-token contract asserted here (helper.c Step A' / Task 36):
 // CreateRestrictedToken with DISABLE_MAX_PRIVILEGE (only
-// SeChangeNotifyPrivilege survives), local Administrators deny-only, Low
-// integrity (S-1-16-4096), plus the unchanged Job Object carrying the
-// JOB_OBJECT_LIMIT_JOB_MEMORY commit cap (--mem-mb).
+// SeChangeNotifyPrivilege survives) + Low integrity (S-1-16-4096), plus the
+// unchanged Job Object carrying the JOB_OBJECT_LIMIT_JOB_MEMORY commit cap
+// (--mem-mb). RUN-18: NO deny-only Administrators SID — the resume battery
+// (diag-launch runtime arms) proved a deny-only admins SID freezes node at
+// startup (the admin runner's Administrators group owns objects node must
+// open), and it is redundant hardening on this lane: DISABLE_MAX_PRIVILEGE
+// already strips the dangerous privileges, and the boundary is Low integrity
+// (no write-up) + the Job + the WFP egress allowlist, not admin-group denial.
 //
 // NO grant-acl in these tests: the restricted token derives from the
 // helper's own user token, so the child reads the staged bootstrap/CA and

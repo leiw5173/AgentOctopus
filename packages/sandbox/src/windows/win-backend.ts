@@ -10,7 +10,7 @@
  *
  * PRODUCTION ISOLATION MODEL (Option 3): the skill's node.exe is launched by
  * the native helper under a CreateRestrictedToken-hardened token (privileges
- * stripped, Administrators deny-only, Low integrity) inside a Job Object — NO
+ * stripped, Low integrity, NO deny-only SIDs — run-18) inside a Job Object — NO
  * AppContainer profile, NO LPAC token. Network egress is scoped by the
  * companion service's persistent WFP allowlist keyed on
  * `FWPM_CONDITION_ALE_APP_ID` — the sandbox node.exe DOS path — NOT the

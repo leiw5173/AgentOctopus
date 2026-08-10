@@ -10,10 +10,12 @@
  * LPAC), relays stdio, and exits with the child's exit code.
  *
  * PRODUCTION MODE (Option 3): pass `restrictedToken: true`. The helper then
- * builds a hardened restricted token (privileges stripped, Administrators
- * deny-only, Low integrity) and launches via CreateProcessAsUserW — NO LPAC
- * profile, NO AppContainer token. The legacy LPAC path is DIAGNOSTIC-ONLY
- * (the LPAC selftest baseline); production always uses restricted-token.
+ * builds a hardened restricted token (privileges stripped, Low integrity, NO
+ * deny-only SIDs — run-18: a deny-only Administrators SID freezes node at
+ * startup and is redundant on the lane) and launches via CreateProcessWithTokenW
+ * — NO LPAC profile, NO AppContainer token. The legacy LPAC path is
+ * DIAGNOSTIC-ONLY (the LPAC selftest baseline); production always uses
+ * restricted-token.
  * `pkgMoniker` is still passed (the helper requires it for the LPAC diagnostic
  * baseline + selftest), but the restricted-token path ignores the LPAC profile
  * creation.
