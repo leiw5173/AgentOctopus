@@ -68,6 +68,20 @@ export interface InstallGateRequest {
 
 const MAX_RPC_BYTES = 64 * 1024;
 
+/**
+ * Transient connect-retry policy. The gate service is a single-instance
+ * named-pipe server: between two clients there is a brief window where no
+ * pipe instance exists (disconnect → next CreateNamedPipe), and a concurrent
+ * client that hits it gets ENOENT even though the service is up and about
+ * to listen again. Retry ONLY connect-time failures (never after the request
+ * frame was written — a post-write retry could double-deliver install-gate),
+ * bounded and short. A genuinely absent service still exhausts the retries
+ * and fails closed exactly as before.
+ */
+const CONNECT_RETRY_CODES = new Set(['ENOENT', 'EACCES', 'EBUSY', 'EAGAIN']);
+const MAX_CONNECT_ATTEMPTS = 4;
+const CONNECT_RETRY_DELAY_MS = 150;
+
 interface GateResponse {
   ok?: unknown;
   filterKeys?: unknown;
@@ -91,62 +105,82 @@ async function gateRpc(body: Record<string, unknown>, opts?: GateClientOptions):
   payload.copy(frame, 4);
 
   return new Promise<GateResponse>((resolve, reject) => {
-    const socket = new Socket();
     const chunks: Buffer[] = [];
     let settled = false;
-
-    const fail = (msg: string) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      reject(new WindowsSandboxError(msg));
-    };
+    let activeSocket: Socket | null = null;
 
     const timer = setTimeout(() => {
       fail(`gate service pipe ${pipePath} timed out after ${timeoutMs}ms`);
     }, timeoutMs);
 
-    socket.on('error', (err) => {
-      clearTimeout(timer);
-      fail(`cannot reach gate service pipe ${pipePath}: ${err.message}`);
-    });
-
-    socket.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-      const buf = Buffer.concat(chunks);
-      if (buf.length < 4) return;
-      const len = buf.readUInt32LE(0);
-      if (len > MAX_RPC_BYTES) {
-        clearTimeout(timer);
-        fail(`gate service response too large: ${len} bytes`);
-        return;
-      }
-      if (buf.length < 4 + len) return;
-      clearTimeout(timer);
-      const text = buf.subarray(4, 4 + len).toString('utf8');
-      socket.end();
-      let parsed: GateResponse;
-      try {
-        parsed = JSON.parse(text) as GateResponse;
-      } catch {
-        fail(`gate service returned invalid JSON: ${JSON.stringify(text)}`);
-        return;
-      }
+    const fail = (msg: string) => {
       if (settled) return;
       settled = true;
-      resolve(parsed);
-    });
+      clearTimeout(timer);
+      if (activeSocket) activeSocket.destroy();
+      reject(new WindowsSandboxError(msg));
+    };
 
-    socket.on('close', () => {
-      if (!settled) {
+    const attemptConnect = (attempt: number) => {
+      if (settled) return;
+      const socket = new Socket();
+      activeSocket = socket;
+      let connected = false;
+
+      socket.on('error', (err: NodeJS.ErrnoException) => {
+        if (socket !== activeSocket) return; /* superseded retry socket */
+        /* Connect-time-only transient retry (see CONNECT_RETRY_CODES):
+         * before `connected` no request frame was written, so a retry can
+         * never double-deliver install-gate. */
+        if (!connected && attempt < MAX_CONNECT_ATTEMPTS &&
+            CONNECT_RETRY_CODES.has(err.code ?? '')) {
+          socket.destroy();
+          setTimeout(() => attemptConnect(attempt + 1), CONNECT_RETRY_DELAY_MS);
+          return;
+        }
+        fail(`cannot reach gate service pipe ${pipePath}: ${err.message}`);
+      });
+
+      socket.on('data', (chunk: Buffer) => {
+        if (socket !== activeSocket) return;
+        chunks.push(chunk);
+        const buf = Buffer.concat(chunks);
+        if (buf.length < 4) return;
+        const len = buf.readUInt32LE(0);
+        if (len > MAX_RPC_BYTES) {
+          fail(`gate service response too large: ${len} bytes`);
+          return;
+        }
+        if (buf.length < 4 + len) return;
         clearTimeout(timer);
-        fail(`gate service pipe ${pipePath} closed before a full response frame arrived`);
-      }
-    });
+        const text = buf.subarray(4, 4 + len).toString('utf8');
+        socket.end();
+        let parsed: GateResponse;
+        try {
+          parsed = JSON.parse(text) as GateResponse;
+        } catch {
+          fail(`gate service returned invalid JSON: ${JSON.stringify(text)}`);
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        resolve(parsed);
+      });
 
-    socket.connect(pipePath, () => {
-      socket.write(frame);
-    });
+      socket.on('close', () => {
+        if (socket !== activeSocket) return; /* superseded retry socket */
+        if (!settled) {
+          fail(`gate service pipe ${pipePath} closed before a full response frame arrived`);
+        }
+      });
+
+      socket.connect(pipePath, () => {
+        connected = true;
+        socket.write(frame);
+      });
+    };
+
+    attemptConnect(1);
   });
 }
 

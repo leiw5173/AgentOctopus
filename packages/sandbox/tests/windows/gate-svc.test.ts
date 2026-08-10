@@ -48,48 +48,72 @@ const MAX_RPC_BYTES = 64 * 1024;
 
 function rpc(msg: object): Promise<any> {
   return new Promise((resolve, reject) => {
-    const c = net.connect(PIPE);
     const buf = Buffer.from(JSON.stringify(msg), 'utf8');
     const len = Buffer.alloc(4);
     len.writeUInt32LE(buf.length, 0);
     const chunks: Buffer[] = [];
     let settled = false;
+    let active: net.Socket | null = null;
     const done = (fn: () => void) => {
       if (settled) return;
       settled = true;
       fn();
     };
-    c.on('connect', () => {
-      c.write(Buffer.concat([len, buf]));
-    });
-    c.on('data', (d) => {
-      chunks.push(d);
-      const acc = Buffer.concat(chunks);
-      if (acc.length < 4) return;
-      const bodyLen = acc.readUInt32LE(0);
-      if (bodyLen > MAX_RPC_BYTES) {
-        done(() => reject(new Error(`oversized response frame: ${bodyLen}`)));
-        return;
-      }
-      if (acc.length < 4 + bodyLen) return;
-      const body = acc.subarray(4, 4 + bodyLen);
-      done(() => {
-        try {
-          resolve(JSON.parse(body.toString('utf8')));
-        } catch (e) {
-          reject(e);
-        }
+    // The gate service is a single-instance named-pipe server: a concurrent
+    // client (the win-backend probe runs in parallel on another vitest
+    // worker) can hit the brief between-clients window where no pipe
+    // instance exists and receive ENOENT although the service IS up. Retry
+    // connect-time failures only (pre-connect: the request frame was never
+    // written, so no double-deliver), bounded and short — mirrors the
+    // production gate-client retry policy.
+    const RETRY_CODES = new Set(['ENOENT', 'EACCES', 'EBUSY', 'EAGAIN']);
+    const attempt = (n: number) => {
+      if (settled) return;
+      const c = net.connect(PIPE);
+      active = c;
+      let connected = false;
+      c.on('connect', () => {
+        connected = true;
+        c.write(Buffer.concat([len, buf]));
       });
-    });
-    // If the server closes (or errors) before a full frame arrived, that is a
-    // transport failure — reject so the caller can assert on it. After a full
-    // frame we are already settled, so a late close/error is ignored.
-    c.on('end', () => {
-      done(() => reject(new Error('gate pipe closed before a full response frame')));
-    });
-    c.on('error', (e) => {
-      done(() => reject(e));
-    });
+      c.on('data', (d) => {
+        if (c !== active) return;
+        chunks.push(d);
+        const acc = Buffer.concat(chunks);
+        if (acc.length < 4) return;
+        const bodyLen = acc.readUInt32LE(0);
+        if (bodyLen > MAX_RPC_BYTES) {
+          done(() => reject(new Error(`oversized response frame: ${bodyLen}`)));
+          return;
+        }
+        if (acc.length < 4 + bodyLen) return;
+        const body = acc.subarray(4, 4 + bodyLen);
+        done(() => {
+          try {
+            resolve(JSON.parse(body.toString('utf8')));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      });
+      // If the server closes (or errors) before a full frame arrived, that is a
+      // transport failure — reject so the caller can assert on it. After a full
+      // frame we are already settled, so a late close/error is ignored.
+      c.on('end', () => {
+        if (c !== active) return; /* superseded retry socket */
+        done(() => reject(new Error('gate pipe closed before a full response frame')));
+      });
+      c.on('error', (e: NodeJS.ErrnoException) => {
+        if (c !== active) return; /* superseded retry socket */
+        if (!connected && n < 4 && RETRY_CODES.has(e.code ?? '')) {
+          c.destroy();
+          setTimeout(() => attempt(n + 1), 150);
+          return;
+        }
+        done(() => reject(e));
+      });
+    };
+    attempt(1);
   });
 }
 
