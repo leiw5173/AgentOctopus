@@ -2847,8 +2847,11 @@ static HRESULT diag_make_token_keeppriv(const WCHAR *keepPrivilegeName,
         goto done;
     }
 
-    /* Resolve the kept privilege name to a LUID (if one was given). */
-    if (keepPrivilegeName != NULL) {
+    /* Resolve the kept privilege name to a LUID (if one was given).
+     * Sentinel L"*" = keep ALL privileges (empty delete list) — the control
+     * arm that separates "privilege deletion is the trigger" from "a group
+     * SID / the CreateRestrictedToken transform is the trigger". */
+    if (keepPrivilegeName != NULL && wcscmp(keepPrivilegeName, L"*") != 0) {
         if (!LookupPrivilegeValueW(NULL, keepPrivilegeName, &keepLuid)) {
             hr = HRESULT_FROM_WIN32(GetLastError());
             goto done;
@@ -3236,6 +3239,25 @@ static void diag_run_runtime_battery(const WCHAR *nodePath) {
         CloseHandle(t);
     } else {
         fwprintf(stderr, L"[diag] RT-A token build failed hr=0x%08lx\n", (unsigned long)hr);
+    }
+
+    /* RUN-16 keep-ALL control (sentinel L"*"). All six run-16 keep-one arms
+     * FROZE, so no single common privilege is sufficient. This control keeps
+     * EVERY privilege (empty delete list) while applying the production
+     * Low-integrity + admins-deny-only hardening via CreateRestrictedToken:
+     *   - if RT-KALL RAN   -> privilege DELETION is the trigger; node needs
+     *     some privilege (or several) — bisect further with keep-subsets.
+     *   - if RT-KALL FROZEN -> the CreateRestrictedToken transform / a group
+     *     SID is the trigger (not privileges); next bisect the deny-only SID
+     *     set and the integrity/group composition. */
+    hr = diag_make_token_keeppriv(L"*", 1, 1, &t);
+    if (SUCCEEDED(hr)) {
+        diag_try_launch_resume(L"RT-KALL keep=ALL (low+denyadmins)", t,
+                               LOGON_NETCREDENTIALS_ONLY, 0, nodePath);
+        CloseHandle(t);
+        t = NULL;
+    } else {
+        fwprintf(stderr, L"[diag] RT-KALL token build failed hr=0x%08lx\n", (unsigned long)hr);
     }
 
     /* RUN-14 keep-one arms. RT-D FROZEN + RT-E RAN proved DISABLE_MAX_PRIVILEGE
