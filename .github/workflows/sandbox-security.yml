@@ -147,7 +147,7 @@ jobs:
           for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
             test -f "packages/sandbox/runtime/$file" || { echo "ERROR: missing artifact packages/sandbox/runtime/$file" >&2; exit 1; }
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-os-runtime-artifacts
           path: |
@@ -259,13 +259,13 @@ jobs:
             -C packages/sandbox-vm-native/prebuilds linux-x64
           tar -cf vm-rootfs-linux-arm64.tar \
             -C packages/sandbox-vm-native/prebuilds linux-arm64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vm-tcb-linux-x64
           path: vm-tcb-linux-x64.tar
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vm-rootfs-linux-arm64
           path: vm-rootfs-linux-arm64.tar
@@ -771,7 +771,7 @@ jobs:
             -C packages/sandbox-vm-native/prebuilds linux-x64
       - name: Upload qualified linux-x64 VM TCB
         if: steps.kvm-probe.outputs.kvm == 'available'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vm-tcb-linux-x64-qualified
           path: vm-tcb-linux-x64-qualified.tar
@@ -1069,7 +1069,7 @@ jobs:
           set -euo pipefail
           tar -cf vm-tcb-darwin-arm64.tar \
             -C packages/sandbox-vm-native/prebuilds darwin-arm64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vm-tcb-darwin-arm64
           path: vm-tcb-darwin-arm64.tar
