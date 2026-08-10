@@ -3245,13 +3245,16 @@ static void diag_run_runtime_battery(const WCHAR *nodePath) {
      * FROZEN -> RAN names a sufficient privilege. Candidates are the privileges
      * node/V8/CRT are known to touch at startup. */
     {
+        /* NOTE: the SE_*_NAME macros are ANSI char[] under this build (the
+         * helper compiles without UNICODE mapping for them), so use explicit
+         * wide literals here to match the const WCHAR* array element type. */
         static const WCHAR *const keepCandidates[] = {
-            SE_INC_WORKING_SET_NAME,     /* SeIncreaseWorkingSetPrivilege */
-            SE_DEBUG_NAME,               /* SeDebugPrivilege */
-            SE_LOCK_MEMORY_NAME,         /* SeLockMemoryPrivilege */
-            SE_INC_BASE_PRIORITY_NAME,   /* SeIncreaseBasePriorityPrivilege */
-            SE_SYSTEM_PROFILE_NAME,      /* SeSystemProfilePrivilege */
-            SE_INCREASE_QUOTA_NAME,      /* SeIncreaseQuotaPrivilege */
+            L"SeIncreaseWorkingSetPrivilege",   /* SE_INC_WORKING_SET_NAME */
+            L"SeDebugPrivilege",                /* SE_DEBUG_NAME */
+            L"SeLockMemoryPrivilege",           /* SE_LOCK_MEMORY_NAME */
+            L"SeIncreaseBasePriorityPrivilege", /* SE_INC_BASE_PRIORITY_NAME */
+            L"SeSystemProfilePrivilege",        /* SE_SYSTEM_PROFILE_NAME */
+            L"SeIncreaseQuotaPrivilege",        /* SE_INCREASE_QUOTA_NAME */
         };
         size_t k = 0;
         for (k = 0; k < ARRAYSIZE(keepCandidates); k++) {
