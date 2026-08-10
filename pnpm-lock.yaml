@@ -201,8 +201,8 @@ importers:
         specifier: ^0.6.3
         version: 0.6.3
       openai:
-        specifier: ^7.2.0
-        version: 7.2.0(ws@8.21.0)(zod@4.4.3)
+        specifier: ^7.4.0
+        version: 7.4.0(ws@8.21.0)(zod@4.4.3)
       vectra:
         specifier: ^0.15.0
         version: 0.15.0(ws@8.21.0)(zod@4.4.3)
@@ -3674,8 +3674,8 @@ packages:
       zod:
         optional: true
 
-  openai@7.2.0:
-    resolution: {integrity: sha512-/P0jZP2WDSwSuiilTTcU4mkepzdSAiRrnTK2e9pk9KOzBoE3L9aHz2oIyIXqGbqnnMsGC0Izr223MOUhG2JuvQ==}
+  openai@7.4.0:
+    resolution: {integrity: sha512-+C9Muit5x8j9R8ej8ZzVgKcrVDtqFqTy9gxFdov0EItLgU68zrJtF9ZeT0cyqJQW9S3PCJkdFgADtRGquRBtew==}
     engines: {node: '>=22.0.0'}
     peerDependencies:
       '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
@@ -7873,7 +7873,7 @@ snapshots:
       ws: 8.21.0
       zod: 4.4.3
 
-  openai@7.2.0(ws@8.21.0)(zod@4.4.3):
+  openai@7.4.0(ws@8.21.0)(zod@4.4.3):
     optionalDependencies:
       ws: 8.21.0
       zod: 4.4.3
