@@ -310,8 +310,37 @@ describe('gate service (OctopusSandboxGate)', () => {
       // Kill the long-lived child so the Job drains, then removal must succeed.
       // KILL_ON_JOB_CLOSE guarantees the child dies with the Job; killing the
       // helper tears down the whole tree. Best-effort: the lane is ephemeral.
+      //
+      // RUN-19: now that node genuinely SURVIVES under the restricted token
+      // (the run-18 deny-only-SID fix), the running node.exe holds a Windows
+      // file lock, so rmSync must wait for the process to actually die —
+      // child.kill() is async and KILL_ON_JOB_CLOSE unwind is not
+      // instantaneous. On the old crash path the child was already dead so
+      // rmSync never raced the lock. Wait for close (or a bounded timeout)
+      // before removing the stage dir, else unlink(node.exe) throws EPERM.
       try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      rmSync(stage, { recursive: true, force: true });
+      if (exitRef.current === null) {
+        await Promise.race([
+          new Promise((r) => child.once('close', r)),
+          new Promise((r) => setTimeout(r, 5000)),
+        ]);
+      }
+      // The kill target is the HELPER; the grandchild node.exe (which holds
+      // the file lock) is reaped by KILL_ON_JOB_CLOSE only after the helper's
+      // Job-handle close unwinds, which can lag the helper's close event.
+      // Retry the rm on EPERM/EBUSY until the lock releases (bounded).
+      let rmErr: unknown = null;
+      for (let i = 0; i < 20; i++) {
+        try {
+          rmSync(stage, { recursive: true, force: true });
+          rmErr = null;
+          break;
+        } catch (e) {
+          rmErr = e;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+      if (rmErr) throw rmErr;
     }
 
     // After the child dies the Job is empty/gone; remove-gate now succeeds.
