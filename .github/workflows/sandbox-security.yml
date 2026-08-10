@@ -880,6 +880,166 @@ jobs:
               Write-Error "ERROR: build-win-helper did not produce $f — full build is required on this lane (compile-only smoke is not enough)."
             }
           }
+      # ====================================================================
+      # DIAGNOSTIC (run 7) — LPAC node-crash dump capture. ADDITIVE ONLY.
+      # ====================================================================
+      # Run 6 established that node.exe fast-fails 0x80000003 under the LPAC
+      # token regardless of Job/memlimit/jitless/wasm-trap — LPAC is the
+      # NECESSARY trigger. This step captures ONE first-chance exception dump
+      # of the crashing LPAC node child so we can read the faulting module +
+      # top frames and record the exact trigger point. It does NOT re-decide
+      # the route (Option 3 = Job + restricted token, no LPAC, is a separate
+      # follow-up) and does NOT touch the production launch path.
+      #
+      # Mechanism: WER LocalDumps. We point HKLM\...\Windows Error Reporting\
+      # LocalDumps at a temp DumpFolder (DumpType=2 full, so the .dmp carries
+      # the full V8 reservation metadata + thread contexts), ACL-grant WRITE
+      # on that folder to the AppContainer package + loopback capability SIDs
+      # (WER writes the dump in the crashing token's context, and the LPAC
+      # access check is the intersection of user/group AND AppContainer SIDs,
+      # so the AppContainer SIDs need write — grant-acl only grants
+      # READ+EXECUTE, hence icacls here), launch node under the FULL LPAC+Job
+      # baseline via the helper `run` subcommand, wait for WerFault to flush,
+      # then (best-effort, cdb is pre-installed on windows-latest) print the
+      # exception record + top frames and upload the .dmp as an artifact.
+      #
+      # continue-on-error: a dump-capture failure (no symbols, WerFault slow,
+      # cdb absent) must NEVER break the fail-closed lane — the real tests run
+      # in the next step regardless. The step is time-boxed (~90s worst case).
+      - name: DIAGNOSTIC (run 7) — capture LPAC node-crash dump via WER LocalDumps
+        id: lpac-dump
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # Deliberately NO `$ErrorActionPreference='Stop'`: every sub-stage is
+          # best-effort; a failure is logged, never thrown (continue-on-error
+          # is the real guard, this just keeps the log readable).
+          $helper = (Resolve-Path 'packages/sandbox/prebuilds/windows-x64/octopus-sandbox-helper.exe').Path
+          $node   = (Get-Command node.exe).Source
+          $pkg    = 'AgentOctopus.Sandbox.dump7'
+          $dumpDir = Join-Path $env:RUNNER_TEMP 'oct-lpac-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDir | Out-Null
+
+          # 1. Enable WER LocalDumps -> our temp folder. DumpType 2 = full dump
+          #    (captures the V8 pointer-compression cage / thread contexts that a
+          #    mini-dump would omit). DumpCount 5 caps disk use. HKLM write needs
+          #    admin — the hosted windows-latest step runs as a local admin.
+          $ld = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $ld -Force | Out-Null
+          New-ItemProperty -Path $ld -Name 'DumpFolder' -Value $dumpDir -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $ld -Name 'DumpType'   -Value 2 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $ld -Name 'DumpCount'  -Value 5 -PropertyType DWord -Force | Out-Null
+          Write-Output "[dump] LocalDumps enabled: DumpFolder=$dumpDir DumpType=2 DumpCount=5"
+
+          # 2. Grant WRITE on the dump folder to the AppContainer SIDs. The helper
+          #    `sid` subcommand returns the LOOPBACK capability SID (S-1-15-3-...);
+          #    the package SID is the same SID with SubAuthority[0] 3 -> 2. Both go
+          #    into the crashing token, so grant both (OI)(CI)(M) = modify, inherit.
+          $loopbackSid = (& $helper 'sid' $pkg | Out-String).Trim()
+          Write-Output "[dump] loopback capability SID = $loopbackSid"
+          $pkgSid = $null
+          if ($loopbackSid -match '^S-1-15-3-') {
+            $pkgSid = $loopbackSid -replace '^S-1-15-3-', 'S-1-15-2-'
+          }
+          foreach ($sid in @($loopbackSid, $pkgSid)) {
+            if ([string]::IsNullOrWhiteSpace($sid)) { continue }
+            # icacls SID form: *<SID>. Best-effort — a grant failure surfaces as
+            # an empty dump folder, which the collect stage reports clearly.
+            & icacls.exe $dumpDir /grant "*${sid}:(OI)(CI)(M)" /T 2>&1 | Out-Null
+            Write-Output "[dump] icacls grant (M) -> $sid (exit $LASTEXITCODE)"
+          }
+          # Also grant the well-known ALL APPLICATION_PACKAGES group (S-1-15-2-1)
+          # — LPAC tokens opt out of it, but granting costs nothing and covers the
+          # case where WerFault writes as a non-LPAC context.
+          & icacls.exe $dumpDir /grant '*S-1-15-2-1:(OI)(CI)(M)' /T 2>&1 | Out-Null
+
+          # 3. Stage a loadable bootstrap + CA (build_child_environment injects
+          #    NODE_OPTIONS="--require <bootstrap>") and grant-acl READ+EXECUTE on
+          #    the dirs the LPAC child must touch (stage + node install + helper).
+          $stage = Join-Path $env:RUNNER_TEMP 'oct-lpac-dump-stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $bootstrap = Join-Path $stage 'bootstrap.cjs'
+          $ca        = Join-Path $stage 'ca.pem'
+          Set-Content -Path $bootstrap -Value '// empty bootstrap for run-7 dump capture' -Encoding ascii
+          Set-Content -Path $ca -Value '' -Encoding ascii
+          foreach ($d in @($stage, (Split-Path $node), (Split-Path $helper))) {
+            & $helper 'grant-acl' '--pkg' $pkg '--path' $d 2>&1 | Out-Null
+            Write-Output "[dump] grant-acl $d (exit $LASTEXITCODE)"
+          }
+
+          # 4. Launch node under the FULL LPAC+Job baseline (the known-crashing
+          #    config). node -e writes nothing and would exit 3 on success; we
+          #    expect it to fast-fail 0x80000003. Capture the helper exit for the
+          #    log; do NOT throw on non-zero (the crash IS the expected outcome).
+          Write-Output '[dump] launching node under LPAC+Job (expect 0x80000003)...'
+          & $helper 'run' `
+            '--job' 'OctJob-dump7' '--mem-mb' '256' '--pkg' $pkg `
+            '--proxy' '127.0.0.1:1' '--ca' $ca '--bootstrap' $bootstrap `
+            '--node' $node '--' '-e' "process.stdout.write('hi');process.exit(3)" 2>&1 |
+            ForEach-Object { Write-Output "[helper] $_" }
+          $helperExit = $LASTEXITCODE
+          $hexExit = '0x{0:X8}' -f ($helperExit -band 0xFFFFFFFF)
+          Write-Output "[dump] helper exit code = $helperExit ($hexExit)"
+
+          # 5. Wait for WerFault to write the dump (async; full dumps of a ~1TB-
+          #    reservation process are sparse but can take a few seconds). Poll up
+          #    to 45s for a .dmp to appear and stabilize (size stops growing).
+          $deadline = (Get-Date).AddSeconds(45)
+          $dump = $null
+          do {
+            $dump = Get-ChildItem -Path $dumpDir -Filter '*.dmp' -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($dump) {
+              $sz1 = $dump.Length; Start-Sleep -Milliseconds 800
+              $dump.Refresh()
+              if ($dump.Length -eq $sz1 -and $sz1 -gt 0) { break }  # stable
+            }
+            Start-Sleep -Milliseconds 700
+          } while ((Get-Date) -lt $deadline)
+
+          Write-Output '[dump] --- DumpFolder contents ---'
+          Get-ChildItem -Path $dumpDir -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Output ("[dump]   {0}  {1} bytes" -f $_.Name, $_.Length) }
+
+          if (-not $dump) {
+            Write-Output '[dump] NO .dmp produced. WerFault may not have fired for the AppContainer crash, or the folder was not writable by the LPAC token. The lane continues (this step is diagnostic-only).'
+            # Leave an empty marker so the artifact-upload step has something to
+            # glob and reports not-found cleanly rather than erroring.
+            Set-Content -Path (Join-Path $dumpDir 'NO_DUMP_CAPTURED.txt') -Value "no .dmp; helper exit=$helperExit ($hexExit)" -Encoding ascii
+            exit 0
+          }
+          Write-Output ("[dump] captured: {0} ({1} bytes)" -f $dump.FullName, $dump.Length)
+
+          # 6. Best-effort symbolization. cdb.exe ships with the Windows SDK
+          #    Debugging Tools pre-installed on windows-latest. Point _NT_SYMBOL_PATH
+          #    at the Microsoft public symbol server so ntdll/kernel32/v8 frames
+          #    resolve; a symbol outage degrades to unsymbolized frames (still a
+          #    win — the exception code + faulting module survive). `!analyze -v`
+          #    prints the exception record; `kc` gives the compact call stack.
+          $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          if (Test-Path $cdb) {
+            $env:_NT_SYMBOL_PATH = "SRV*$(Join-Path $env:RUNNER_TEMP 'sym')*https://msdl.microsoft.com/download/symbols"
+            Write-Output '[dump] --- cdb !analyze -v ---'
+            & $cdb -z $dump.FullName -c '!analyze -v; .ecxr; kc; lmvm node; q' 2>&1 |
+              ForEach-Object { Write-Output "[cdb] $_" }
+          } else {
+            Write-Output "[dump] cdb.exe not found at $cdb — skipping analysis (the .dmp is still uploaded for offline analysis)."
+          }
+          exit 0
+      # Upload whatever the capture produced (a full .dmp on success, or the
+      # NO_DUMP_CAPTURED marker on failure). if-no-files-found:warn keeps a
+      # total capture failure from erroring; retention 14d for offline triage.
+      # if: always() so the dump is uploaded even though the capture step is
+      # continue-on-error; has no effect on the fail-closed suite result.
+      - name: Upload LPAC crash dump artifact (run 7 diagnostic)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-lpac-node-crash-dump
+          path: ${{ runner.temp }}/oct-lpac-dumps/
+          if-no-files-found: warn
+          retention-days: 14
       # Install + start the companion gate service (elevated). The exe has NO
       # self-install mode (only `(no args)` = SCM service entry, and
       # `--run-foreground` = console debug), so register it via sc.exe as a
