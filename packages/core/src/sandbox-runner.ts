@@ -16,8 +16,9 @@
  *   → proxyLauncher.launch({ policy, secrets, workDir }, carrier)
  *   → verifySnapshot(snapshotRoot, identity.digest) [immediately before prepare]
  *   → backend.prepare({ ...policy, snapshotRoot, proxyAddr, caBundlePath,
- *                        runtimeProfile, guestSkillRoot:'/skill',
- *                        guestCaBundlePath:'/etc/skill-ca/ca.pem' })
+ *                        runtimeProfile, guestSkillRoot, guestCaBundlePath })
+ *     (guest paths are per-backend: docker/linux/vm keep the Linux literals
+ *      '/skill' / '/etc/skill-ca/ca.pem'; windows gets staged-copy paths)
  *   → rewrite command/cwd/env to guest paths
  *   → backend.run or backend.spawn
  *   → deterministic reverse cleanup
@@ -387,6 +388,7 @@ function resolveRuntimeProfile(
       dockerImage: p.dockerImage,
       osRuntime: p.osRuntime,
       darwinRuntime: p.darwinRuntime,
+      windowsRuntime: p.windowsRuntime,
     };
   }
 
@@ -399,6 +401,7 @@ function resolveRuntimeProfile(
         dockerImage: p.dockerImage,
         osRuntime: p.osRuntime,
         darwinRuntime: p.darwinRuntime,
+        windowsRuntime: p.windowsRuntime,
       };
     }
   }
@@ -421,6 +424,8 @@ function resolveRuntimeProfile(
  *   - os / Linux full  → requires osRuntime; rejects darwinRuntime-only
  *   - os / Darwin restricted → requires darwinRuntime; rejects dockerImage-only
  *     and osRuntime-only
+ *   - windows restricted → requires windowsRuntime; rejects dockerImage-only,
+ *     osRuntime-only, and darwinRuntime-only
  *
  * A mixed profile (carrying several identity blocks) satisfies each backend
  * via the field relevant to that backend, so the same trusted profile can
@@ -452,6 +457,13 @@ function assertRuntimeProfileMatchesBackend(
     }
     // Linux full lane.
     if (!runtimeProfile.osRuntime) throw mismatch('osRuntime');
+    return;
+  }
+  if (backend.kind === 'windows') {
+    // Windows restricted lane: the verified Windows runtime closure (Node exe
+    // + bootstrap.cjs + vendored undici) is the ONLY acceptable identity;
+    // dockerImage/osRuntime/darwinRuntime do not apply.
+    if (!runtimeProfile.windowsRuntime) throw mismatch('windowsRuntime');
     return;
   }
   // subprocess / ssh / none: no runtime-identity gate (unchanged behavior).
@@ -922,6 +934,21 @@ export class SandboxRunner {
       // runner built and verified: the backend asserts its FORMAT (see
       // SNAPSHOT_DIGEST_RE); the full re-verify stays here in the runner as
       // the last-filesystem-op before prepare (step 10).
+      //
+      // Guest paths are per-backend (spec §3, Task 12): docker/linux/vm keep
+      // the Linux literals '/skill' and '/etc/skill-ca/ca.pem' (unchanged);
+      // windows gets the staged-copy paths — the per-session directory the
+      // verified snapshot + CA are copied into before the skill's LPAC SIDs
+      // are granted READ access. The staged copy dir is a child of the
+      // session dir so cleanup removes it wholesale.
+      const isWindows = backend.kind === 'windows';
+      const guestSkillRoot = isWindows
+        ? path.join(sessionDir, 'skill')
+        : '/skill';
+      const guestCaBundlePath = isWindows
+        ? path.join(sessionDir, 'ca.pem')
+        : '/etc/skill-ca/ca.pem';
+
       const prepareOpts: BackendPrepareOptions = {
         ...policy,
         snapshotRoot,
@@ -929,8 +956,8 @@ export class SandboxRunner {
         proxyAddr: handle.reachableAddr,
         caBundlePath: handle.caBundlePath,
         runtimeProfile,
-        guestSkillRoot: '/skill',
-        guestCaBundlePath: '/etc/skill-ca/ca.pem',
+        guestSkillRoot,
+        guestCaBundlePath,
       };
       await backend.prepare(prepareOpts);
 

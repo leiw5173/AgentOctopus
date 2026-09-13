@@ -62,6 +62,24 @@ See [Configuration](../getting-started/configuration.md) for all available setti
 - No user data is persisted beyond session memory (30 min TTL)
 - Rate limiting is configurable per tier
 
+## Windows sandbox companion service
+
+The native Windows backend (`WinSandboxBackend`) relies on a **privileged companion service**, `OctopusSandboxGate`, installed once with elevation:
+
+- Runs as a Windows service (`LocalSystem`, `SERVICE_AUTO_START`) from a build-produced exe (`octopus-sandbox-gate-svc.exe`). The build script (`build-win-helper.mjs`) writes a per-artifact manifest for the helper and service exes, but `probe()` does not re-verify those manifests at runtime — only the `windowsRuntime` closure (Node exe + `bootstrap.cjs` + vendored undici) is manifest-verified (sha256 + size) at probe time.
+- Owns every write to the per-session **WFP (Windows Filtering Platform) egress allowlist** — the persistent provider/sublayer/filters that scope a sandboxed skill to `TCP 127.0.0.1:<proxyPort>` (and `TCP [::1]:<proxyPort>` when the proxy dual-binds) and block all other connects for the sandbox `node.exe` application ID. WFP filter add/remove requires administrator rights (`FWPM_ACTRL_ADD` + `FWPM_ACTRL_ADD_LINK`), which is why this component exists; the sandboxed skill execution itself is unprivileged.
+- Exposes a strictly-ACL'd named-pipe RPC at `\\.\pipe\octopus-sandbox-gate` (DACL allows only Builtin Administrators, LocalSystem, and the interactive user) with **exactly two operations** — `install-gate` and `remove-gate`. It is not a general WFP write proxy; any other op is refused.
+- **Service-side verification on remove.** On `remove-gate` the service does not trust the caller: it resolves the recorded session lease, opens the named Job Object itself, confirms the Job is dead/empty (`ActiveProcesses == 0`), verifies the recorded filter keys match the lease, and refuses the deletion otherwise — the gate stays (fail-closed). A service crash can only leave a fail-closed *block* filter; the startup sweep reclaims filters whose Jobs are already dead.
+
+**Honest scope.** The Windows backend provides **`restricted` isolation — not kernel isolation and never `full`**:
+
+- It is **not a VM**: no kernel-memory or side-channel isolation, and no defense against a malicious skill exploiting a Windows kernel vulnerability.
+- It is **restricted process isolation, not AppContainer capability isolation**: the network boundary is the WFP allowlist (scoped to the sandbox `node.exe` application ID); the filesystem/registry boundary is a `CreateRestrictedToken`-hardened token at Low Integrity Level (privileges stripped, Administrators deny-only); resource bounding and teardown come from the Job Object (`KILL_ON_JOB_CLOSE`). The LPAC/AppContainer token is not used on the execution path — it is the confirmed necessary trigger of the Node launch crash (the crash surfaces as a Winsock initialization failure, `WSAStartup` error 10107, immediately before the `STATUS_BREAKPOINT` fail-fast), so Node cannot run under it.
+- It is selectable only via the explicit opt-in `defaultBackend:'windows'` + `minIsolationLevel:'restricted'`. Under `auto`, or with a `full` floor, it is never picked — a missing full backend fails closed with `NoFullBackendError`.
+- If the companion service is absent or unresponsive, `probe()` returns `false` and the backend is simply unavailable — there is no unprivileged degraded mode that would widen network access.
+
+Operators should treat the companion service as part of the host's trusted computing base: it is privileged, always-on, and — while its exe carries a build-time manifest — that manifest is not re-verified at probe time (only the runtime closure is), so a compromised service widens the host attack surface. Install it only on hosts where Windows sandboxing is actually needed.
+
 ## VM release trust root
 
 The native VM backend (`@agentoctopus/sandbox-vm-native`) ships a **signed

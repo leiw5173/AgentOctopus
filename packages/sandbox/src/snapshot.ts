@@ -89,6 +89,27 @@ function canonicalDigest(entries: ManifestEntry[]): string {
   return 'sha256:' + sha256(JSON.stringify(sorted));
 }
 
+/**
+ * Map a canonical snapshot digest (`sha256:<64 hex>`) to the directory name
+ * used for its on-disk snapshot root. The colon is legal on POSIX but ILLEGAL
+ * in a Windows file/dir name (NTFS reserves `:` for the drive/ADS separator),
+ * so `path.join(storeDir, digest)` fails with ENOENT on win32.
+ *
+ * The mapping is a pure 1:1 substitution (`:` -> `-`, the only Windows-illegal
+ * char a canonical digest can contain): `sha256:<hex>` -> `sha256-<hex>`. It is
+ * deterministic and collision-free (two distinct digests never share a dir
+ * name). ONLY the filesystem path is sanitized — the digest string itself
+ * (`identity.digest`, `snapshotRef`, the value verifySnapshot compares) keeps
+ * its canonical `sha256:` form everywhere else.
+ *
+ * Note: pre-existing colon-named snapshot dirs on POSIX stores are NOT migrated
+ * (the store is a local content cache, rebuilt on miss), so a mixed store simply
+ * rebuilds under the dash name on first re-use.
+ */
+export function digestToDirName(digest: string): string {
+  return digest.replace(/:/g, '-');
+}
+
 async function copyTree(srcDir: string, destDir: string): Promise<void> {
   await fsp.mkdir(destDir, { recursive: true });
   const children = await fsp.readdir(srcDir, { withFileTypes: true });
@@ -141,7 +162,7 @@ export async function buildSnapshot(opts: {
   const entries: ManifestEntry[] = [];
   await walk(sourceDir, '', entries);
   const digest = canonicalDigest(entries.filter(e => e.path !== ''));
-  const snapshotRoot = path.join(storeDir, digest);
+  const snapshotRoot = path.join(storeDir, digestToDirName(digest));
 
   if (!fs.existsSync(snapshotRoot)) {
     const staging = snapshotRoot + '.tmp-' + process.pid;
