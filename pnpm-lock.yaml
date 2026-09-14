@@ -140,7 +140,7 @@ importers:
         version: link:../sandbox
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
-        version: 1.30.0(zod@4.4.3)
+        version: 1.30.0(zod@4.6.2)
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
@@ -202,13 +202,13 @@ importers:
         version: 0.6.3
       openai:
         specifier: ^7.4.0
-        version: 7.4.0(ws@8.21.0)(zod@4.4.3)
+        version: 7.4.0(ws@8.21.0)(zod@4.6.2)
       vectra:
         specifier: ^0.15.0
-        version: 0.15.0(ws@8.21.0)(zod@4.4.3)
+        version: 0.15.0(ws@8.21.0)(zod@4.6.2)
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.2
+        version: 4.6.2
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
@@ -291,8 +291,8 @@ importers:
         specifier: ^4.0.3
         version: 4.0.3
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.2
+        version: 4.6.2
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
@@ -313,8 +313,8 @@ importers:
         specifier: ^7.0.16
         version: 7.4.10
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.2
+        version: 4.6.2
     devDependencies:
       '@types/node':
         specifier: ^26.0.1
@@ -363,8 +363,8 @@ importers:
         specifier: ^4.0.3
         version: 4.0.3
       zod:
-        specifier: ^4.4.3
-        version: 4.4.3
+        specifier: ^4.6.2
+        version: 4.6.2
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
@@ -3158,6 +3158,7 @@ packages:
 
   koffi@3.1.4:
     resolution: {integrity: sha512-KHX39XIg7afe8ds+0MHPoLiKR9dCzsVK4oAmBUSaeJlcX0xur22f15C2DILbZ6GJ9eyqC+e6Sb1cTG7M17z+Tg==}
+    deprecated: Unstable Windows builds
 
   language-subtag-registry@0.3.23:
     resolution: {integrity: sha512-0K65Lea881pHotoGEa5gDlMxt3pctLi2RplBb7Ezh4rRdLEOtgi7n4EwK9lamnUCkKBqaeKRVebTq6BAxSkpXQ==}
@@ -4451,8 +4452,8 @@ packages:
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
 
-  zod@4.4.3:
-    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+  zod@4.6.2:
+    resolution: {integrity: sha512-lh5RCAGFa1Cm2hjtNwLQhSs/AsqdWnTQaBER9fEwN/88pSh7KOtJavtBx/0VlkN/uFd61SwYmljLMDAsHlvzBQ==}
 
 snapshots:
 
@@ -5290,7 +5291,7 @@ snapshots:
 
   '@mixmark-io/domino@2.2.0': {}
 
-  '@modelcontextprotocol/sdk@1.30.0(zod@4.4.3)':
+  '@modelcontextprotocol/sdk@1.30.0(zod@4.6.2)':
     dependencies:
       '@hono/node-server': 2.0.12(hono@4.12.33)
       ajv: 8.20.0
@@ -5307,8 +5308,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.4.3
-      zod-to-json-schema: 3.25.2(zod@4.4.3)
+      zod: 4.6.2
+      zod-to-json-schema: 3.25.2(zod@4.6.2)
     transitivePeerDependencies:
       - supports-color
 
@@ -6637,8 +6638,8 @@ snapshots:
       '@babel/parser': 7.29.2
       eslint: 10.8.0(jiti@2.7.0)
       hermes-parser: 0.25.1
-      zod: 4.4.3
-      zod-validation-error: 4.0.2(zod@4.4.3)
+      zod: 4.6.2
+      zod-validation-error: 4.0.2(zod@4.6.2)
     transitivePeerDependencies:
       - supports-color
 
@@ -7626,15 +7627,15 @@ snapshots:
     dependencies:
       mimic-function: 5.0.1
 
-  openai@6.49.0(ws@8.21.0)(zod@4.4.3):
+  openai@6.49.0(ws@8.21.0)(zod@4.6.2):
     optionalDependencies:
       ws: 8.21.0
-      zod: 4.4.3
+      zod: 4.6.2
 
-  openai@7.4.0(ws@8.21.0)(zod@4.4.3):
+  openai@7.4.0(ws@8.21.0)(zod@4.6.2):
     optionalDependencies:
       ws: 8.21.0
-      zod: 4.4.3
+      zod: 4.6.2
 
   optionator@0.9.4:
     dependencies:
@@ -8442,7 +8443,7 @@ snapshots:
 
   vary@1.1.2: {}
 
-  vectra@0.15.0(ws@8.21.0)(zod@4.4.3):
+  vectra@0.15.0(ws@8.21.0)(zod@4.6.2):
     dependencies:
       '@grpc/grpc-js': 1.14.4
       '@grpc/proto-loader': 0.8.1
@@ -8451,7 +8452,7 @@ snapshots:
       dotenv: 17.4.2
       gpt-tokenizer: 3.4.0
       json-colorizer: 3.0.1
-      openai: 6.49.0(ws@8.21.0)(zod@4.4.3)
+      openai: 6.49.0(ws@8.21.0)(zod@4.6.2)
       turndown: 7.2.4
       uuid: 13.0.2
       wink-bm25-text-search: 3.1.2
@@ -8681,12 +8682,12 @@ snapshots:
 
   yoctocolors@2.1.2: {}
 
-  zod-to-json-schema@3.25.2(zod@4.4.3):
+  zod-to-json-schema@3.25.2(zod@4.6.2):
     dependencies:
-      zod: 4.4.3
+      zod: 4.6.2
 
-  zod-validation-error@4.0.2(zod@4.4.3):
+  zod-validation-error@4.0.2(zod@4.6.2):
     dependencies:
-      zod: 4.4.3
+      zod: 4.6.2
 
-  zod@4.4.3: {}
+  zod@4.6.2: {}
