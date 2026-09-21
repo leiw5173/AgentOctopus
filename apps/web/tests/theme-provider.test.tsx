@@ -8,7 +8,7 @@ function ThemeLabel() {
 }
 
 describe('theme provider', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); });
 
   it('prerenders the light snapshot even when the browser prefers dark', () => {
     vi.stubGlobal('window', { matchMedia: () => ({ matches: true }) });
