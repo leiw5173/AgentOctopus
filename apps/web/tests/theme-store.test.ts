@@ -6,7 +6,7 @@ import {
 } from '../src/app/theme-store.js';
 
 describe('system theme', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); });
 
   it('renders light on the server even without browser APIs', () => {
     expect(getServerThemeSnapshot()).toBe(false);
