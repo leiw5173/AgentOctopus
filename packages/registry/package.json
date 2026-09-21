@@ -19,7 +19,7 @@
   "dependencies": {
     "@agentoctopus/sandbox": "workspace:*",
     "@agentoctopus/skills": "workspace:*",
-    "zod": "^4.4.3",
+    "zod": "^4.6.5",
     "gray-matter": "^4.0.3",
     "glob": "^13.0.6"
   },
