@@ -15,6 +15,8 @@ Set `deploy.mode` to `"cloud"` in `~/.agentoctopus/octopus.json`:
 }
 ```
 
+The web UI, including the marketplace, follows the browser's light/dark system setting by default. The chat page's theme button overrides that setting for the current page session; reloading returns to the system preference.
+
 ## Local mode
 
 Runs the gateway only. Optionally syncs skills from a cloud instance on startup.
