@@ -160,6 +160,8 @@ later phases never trust an on-disk path again:
   (regression-tested); a rootfs swapped *before* resolution still fails
   closed on the from-fd digest check.
 
+The `security-gate` requires the Linux artifact producer and HVF probe to succeed directly. It accepts a skipped privileged Linux job only for a fork PR (the trust boundary), and a skipped VM lane only when the successful probe reports HVF unavailable. A failed producer that skips its dependent Linux/VM jobs cannot yield a green aggregate gate. These skip-policy cases are exercised by `tests/security/security-gate-workflow.test.mjs`; full isolation qualification still requires the real CI runners.
+
 Release infrastructure:
 
 - CI signs with the secret `OCTOPUS_VM_RELEASE_PRIVATE_KEY` (a base64 32-byte

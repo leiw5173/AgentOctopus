@@ -24,7 +24,7 @@
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^17.4.2",
     "ollama": "^0.6.3",
-    "openai": "^7.2.0",
+    "openai": "^7.4.0",
     "vectra": "^0.15.0",
     "zod": "^4.4.3"
   },

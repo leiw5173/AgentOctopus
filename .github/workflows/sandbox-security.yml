@@ -147,7 +147,7 @@ jobs:
           for file in linux-node22.rootfs.tar.zst linux-node22.manifest.json os-helper os-helper.manifest.json; do
             test -f "packages/sandbox/runtime/$file" || { echo "ERROR: missing artifact packages/sandbox/runtime/$file" >&2; exit 1; }
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-os-runtime-artifacts
           path: |
@@ -259,13 +259,13 @@ jobs:
             -C packages/sandbox-vm-native/prebuilds linux-x64
           tar -cf vm-rootfs-linux-arm64.tar \
             -C packages/sandbox-vm-native/prebuilds linux-arm64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vm-tcb-linux-x64
           path: vm-tcb-linux-x64.tar
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vm-rootfs-linux-arm64
           path: vm-rootfs-linux-arm64.tar
@@ -619,7 +619,7 @@ jobs:
           echo 'managed=true' >> "$GITHUB_OUTPUT"
       - name: Download reviewed Linux runtime artifacts from the same-run producer (fallback)
         if: steps.restore-runner.outputs.managed != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linux-os-runtime-artifacts
           path: packages/sandbox/runtime
@@ -735,7 +735,7 @@ jobs:
         run: pnpm --filter @agentoctopus/sandbox-vm-native build
       - name: Download linux-x64 VM TCB from the producer
         if: steps.kvm-probe.outputs.kvm == 'available'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vm-tcb-linux-x64
           path: /tmp/vm-tcb-linux-x64-dl
@@ -771,7 +771,7 @@ jobs:
             -C packages/sandbox-vm-native/prebuilds linux-x64
       - name: Upload qualified linux-x64 VM TCB
         if: steps.kvm-probe.outputs.kvm == 'available'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vm-tcb-linux-x64-qualified
           path: vm-tcb-linux-x64-qualified.tar
@@ -1034,7 +1034,7 @@ jobs:
       - name: Upload LPAC crash dump artifact (run 7 diagnostic)
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-lpac-node-crash-dump
           path: ${{ runner.temp }}/oct-lpac-dumps/
@@ -1201,7 +1201,7 @@ jobs:
       # (guest arch = host arch under libkrun/HVF). The mac-side helper +
       # libkrun/libkrunfw are built locally next (those scripts work on macOS).
       - name: Download the linux-arm64 guest rootfs from the Linux producer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: vm-rootfs-linux-arm64
           path: /tmp/vm-rootfs-linux-arm64-dl
@@ -1340,7 +1340,7 @@ jobs:
           set -euo pipefail
           tar -cf vm-tcb-darwin-arm64.tar \
             -C packages/sandbox-vm-native/prebuilds darwin-arm64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vm-tcb-darwin-arm64
           path: vm-tcb-darwin-arm64.tar
@@ -1350,7 +1350,7 @@ jobs:
   security-gate:
     name: security-gate
     if: always()
-    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted, windows-restricted, vm-lane]
+    needs: [hosted-docker-proxy, produce-linux-artifacts, privileged-linux, macos-restricted, windows-restricted, vm-hvf-probe, vm-lane]
     runs-on: ubuntu-latest
     steps:
       - name: Require every security lane
@@ -1360,23 +1360,28 @@ jobs:
           LINUX_RESULT: ${{ needs.privileged-linux.result }}
           MACOS_RESULT: ${{ needs.macos-restricted.result }}
           WINDOWS_RESULT: ${{ needs.windows-restricted.result }}
+          HVF_PROBE_RESULT: ${{ needs.vm-hvf-probe.result }}
+          HVF_AVAILABLE: ${{ needs.vm-hvf-probe.outputs.hvf }}
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           VM_RESULT: ${{ needs.vm-lane.result }}
         run: |
           test "$HOSTED_RESULT" = success
-          # The producer may be skipped only when the privileged lane itself
-          # is skipped (fork PRs); otherwise it must succeed — the privileged
-          # lane's fallback restore consumes its artifact.
-          if [ "$LINUX_RESULT" != skipped ]; then
-            test "$PRODUCER_RESULT" = success
-          fi
-          # privileged-linux is skipped only for fork pull requests (trust
-          # boundary gate); push/workflow_dispatch/workflow_call runs must
-          # execute and succeed.
-          if [ "$LINUX_RESULT" != success ] && [ "$LINUX_RESULT" != skipped ]; then
+          # The producer runs even on fork PRs. A failed producer also skips
+          # its dependent Linux and VM lanes, so it must always succeed.
+          test "$PRODUCER_RESULT" = success
+          # Only fork PRs may skip the privileged runner (trust boundary).
+          # A same-repo skip caused by a failed dependency is never accepted.
+          if [ "$LINUX_RESULT" = skipped ]; then
+            if [ "$FORK_PR" != true ]; then
+              echo "ERROR: privileged-linux skipped outside a fork PR" >&2
+              exit 1
+            fi
+          elif [ "$LINUX_RESULT" != success ]; then
             echo "ERROR: privileged-linux must succeed or be skipped on fork PRs (got: $LINUX_RESULT)" >&2
             exit 1
           fi
           test "$MACOS_RESULT" = success
+          test "$HVF_PROBE_RESULT" = success
           # windows-restricted is a hosted RESTRICTED lane that must always
           # succeed — it has no fork-guard skip and no environment-specific
           # qualification skip (unlike privileged-linux / vm-lane). It is the
@@ -1391,6 +1396,10 @@ jobs:
           # every other outcome — real VM failure, cancellation, or an
           # UNEXPECTED skip — fail-closed. When skipped, say so plainly.
           if [ "$VM_RESULT" = "skipped" ]; then
+            if [ "$HVF_AVAILABLE" != unavailable ]; then
+              echo "ERROR: vm-lane skipped without a confirmed unavailable hypervisor (probe: $HVF_AVAILABLE)" >&2
+              exit 1
+            fi
             echo "NOTE: VM qualification not executed on this runner (Hypervisor.framework unavailable — nested-virt hosted macOS). G1/G2 must run on a physical Apple Silicon runner before release."
           elif [ "$VM_RESULT" != "success" ]; then
             echo "ERROR: vm-lane must succeed or be skipped only for the nested-virt limitation (got: $VM_RESULT)" >&2

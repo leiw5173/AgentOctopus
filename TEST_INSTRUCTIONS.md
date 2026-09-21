@@ -123,15 +123,17 @@ node -e "const d=JSON.parse(require('fs').readFileSync(require('path').join(requ
 pnpm test
 ```
 
-**Expected:** All 312 tests pass across 8 packages with no failures. Key packages:
+**Expected:** On a macOS dev host, 1,215 pass and 97 platform-gated skip across 9 workspaces (1,312 cases); no failures. Key packages:
 ```
-packages/skills    — 123 tests ✅
-packages/registry  — 47 tests  ✅
-packages/adapters  — 3 tests   ✅
-packages/core      — 65 tests  ✅
-apps/cli           — 57 tests  ✅
-apps/web           — 6 tests   ✅
-packages/gateway   — 11 tests  ✅
+packages/skills             — 147 pass ✅
+packages/registry           — 49 pass  ✅
+packages/adapters           — 31 pass  ✅
+packages/core               — 293 pass, 3 skip  ✅
+packages/sandbox            — 492 pass, 82 skip ✅
+packages/sandbox-vm-native  — 106 pass, 12 skip ✅
+packages/gateway            — 30 pass  ✅
+apps/cli                    — 57 pass  ✅
+apps/web                    — 10 pass  ✅
 ```
 
 ---
@@ -297,6 +299,16 @@ Open `http://localhost:3000` in a browser.
 3. Shift+Enter in the textarea → inserts newline (does NOT send)
 
 Done
+
+---
+
+### 2.9 System theme synchronization
+
+```bash
+pnpm --filter web exec vitest run tests/theme-store.test.ts
+```
+
+**Expected:** Three store tests pass: a stable hydration snapshot, browser `prefers-color-scheme` updates, and listener cleanup. Run `pnpm --filter web test` for the fourth theme test, which confirms the root provider prerenders safely. In the browser, verify the chat theme button changes the actual page colors in both system-light and system-dark settings, and directly opening `/marketplace` follows the system setting.
 
 ---
 
@@ -482,6 +494,7 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 | 2.6 | `POST /api/feedback` thumbs down | ✅ |
 | 2.7 | `POST /api/feedback` 404 on unknown skill | ✅ |
 | 2.8 | Web UI loads, example pills work, feedback buttons work | ✅ |
+| 2.9 | System theme sync and manual override | ✅ |
 | 3.1 | Agent gateway starts on port 3002 | ✅ |
 | 3.2 | `GET /agent/health` returns `skills: ~4000+` | ✅ |
 | 3.3 | `POST /agent/ask` returns sessionId | ✅ |
@@ -1477,13 +1490,13 @@ curl -s -X POST http://localhost:3000/api/ask \
 
 ## Phase S — Sandbox Security Matrix
 
-The sandbox security suite lives in `packages/sandbox/tests/security/` (111 tests total). Run scoped:
+The sandbox security suite lives in `packages/sandbox/tests/security/` (139 Vitest cases across 15 files; includes 6 security-gate skip-policy regressions). Run scoped:
 
 ```bash
 pnpm --filter @agentoctopus/sandbox exec vitest run tests/security
 ```
 
-Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lanes run on any host with Docker (and, on Darwin, `sandbox-exec`). The **privileged Linux** lane is CI-owned — it requires a provisioned self-hosted runner with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` and `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`; on a macOS dev host it skips and that skip is NOT coverage. The **windows-restricted** lane runs on `windows-latest` (hosted, elevated runner context) — see Phase W below.
+Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lanes run on any host with Docker (and, on Darwin, `sandbox-exec`). The **privileged Linux** lane is CI-owned — it requires a provisioned self-hosted runner labeled `[self-hosted,linux,x64,sandbox-privileged-win]` with `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` and `OCTOPUS_REQUIRE_PRIVILEGED_LINUX=1`; on a macOS dev host it skips and that skip is NOT coverage. The **windows-restricted** lane runs on `windows-latest` (hosted, elevated runner context) — see Phase W below.
 
 ### Rows
 
@@ -1509,6 +1522,14 @@ Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lan
 | S18 | VM release trust root + signed release manifest | `tests/vm/release-key.test.ts` (sandbox), `tests/sign-release-manifest.test.ts` (sandbox-vm-native) | hosted (unit) | Compiled-in Ed25519 public key is a valid SPKI and is consulted by `verifyOuterReleaseManifest` (foreign signature / tampered body → `bad-signature`, fail-closed); base64-seed and PKCS8-PEM forms of the CI signing secret derive the identical public key. A PRESENT-but-unverifiable manifest (bad signature, missing committed key, OR a signed body that does not bind to the loaded gate manifest — canonical-digest equality is checked after verification) makes `probe()` return `available:false` + `releaseManifest:'signature-invalid'`; a HALF pair (only one of `.json`/`.sig` present — e.g. a deleted `.sig`) fails closed unconditionally; an ABSENT pair fails closed when the engine is built with `requireReleaseSignature` (production assembly) and degrades softly to `'missing'` only on dev/CI harnesses without the flag. |
 | S19 | VM verified-object binding (exec-path + object binding) | `tests/engine.test.ts` (sandbox-vm-native — "post-probe object binding (R5)", "probe() BLK feature check"), `tests/private-tcb-loader.test.ts` (sandbox-vm-native — real ELF loader, Linux+cc), `tests/sandbox-vm-assembly.test.ts` (core — builder divergence) | hosted (unit) | `probe()` is the ONLY reader/verifier of `gate-manifest.json` (signature-bound) and the TCB manifest (single-read). **Exec-path binding (F1):** before any exec, `probe()` realpath-enforces `opts.helperPath` === the `verifyVmTcb()`-verified helper — a divergent configured path fails closed and the BLK probe never runs. Assembly realpath-enforces `builderBinaryPath` === `artifactsDir/vm-image-builder` (else `unavailable`), and the builder port executes the engine's probe-verified path via a lazy resolver (`getVerifiedImageBuilderPath()`), never an independently configured path. **Object binding (F2):** `probe()` FIRST copies the four verified artifacts into an engine-private 0700 dir (hash-as-copied from a single O_NOFOLLOW fd vs the verified manifest) and recreates the versioned SONAME shims (`libkrun.so.1`, `libkrunfw.so.5`) pointing at the private copies — THEN the BLK probe executes the PRIVATE helper with `LD/DYLD_LIBRARY_PATH=privateDir` (the original path is never executed; a realpath→exec swap cannot smuggle unverified code); any later probe failure discards the private dir. `start()` execs the private helper with the loader path forced to the private dir. **Rootfs fd pin:** `resolveRootfs()` opens O_RDONLY\|O_NOFOLLOW, hashes from that fd, pins it; `start()` inherits it at fd 5, launch spec references `/dev/fd/5`, and the helper's launch mode preserves fd 5-7 across its mass-close (watermark 8 — the pinned rootfs fd plus the krun-stdio port pipe fds 6/7; `--has-blk` mode closes ≥5) with an `fcntl(F_GETFD)` check before `krun_add_disk`. Regression: post-probe swaps of gate/helper/libkrun/image-builder/rootfs are NEUTRALIZED; a pre-resolve rootfs swap fails the from-fd digest; a real ELF binary needing `libkrun.so.1` loads the verified private copy via `LD_LIBRARY_PATH` and fails without the shim; `close()` releases the pinned fd + private dir (called from backend cleanup). |
 
+### Security gate skip-policy regression
+
+```bash
+pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/security-gate-workflow.test.mjs
+```
+
+**Expected:** Six cases pass. A failed Linux artifact producer must fail the gate even when dependent Linux/VM jobs are skipped; only fork PRs may skip privileged Linux, and VM may skip only after a successful probe reports HVF unavailable. This unit test does **not** replace the real privileged Linux or Windows CI lanes.
+
 ### Pass / Fail Checklist (Phase S)
 
 | # | Test | Pass |
@@ -1532,10 +1553,11 @@ Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lan
 | S17 | VM L4 adversarial escape matrix (zero-skip, fail-closed) | ✅ (CI, macOS Apple Silicon) |
 | S18 | VM release trust root / signed manifest verification | ✅ (unit) |
 | S19 | VM verified-object binding (realpath exec-path + private copies / fd-pin) | ✅ (unit) |
+| S20 | Security gate rejects failed producer, unexpected Linux/VM skips, or failed HVF probe; accepts fork/HVF-unavailable exceptions | ✅ (workflow script unit) |
 
 ## Phase W — Windows Restricted Backend
 
-The native Windows backend suite lives in `packages/sandbox/tests/windows/`. It runs for real on the **`windows-restricted` CI lane** (`windows-latest`, hosted — steps execute in an elevated local-admin context) or on any Windows 10/11 host where the helper + trusted runtime are built and the `OctopusSandboxGate` companion service is installed. The lane is committed and fail-closed but has not yet run — it is where the native C code (authored correct-by-construction on macOS, uncompiled on the dev host) gets its first authoritative validation on a real Windows host. Run scoped:
+The native Windows backend suite lives in `packages/sandbox/tests/windows/`. It runs for real on the **`windows-restricted` CI lane** (`windows-latest`, hosted — steps execute in an elevated local-admin context) or on any Windows 10/11 host where the helper + trusted runtime are built and the `OctopusSandboxGate` companion service is installed. The hosted Windows lane builds the native helper and runs the behavioral suite for real; local macOS skips do not count as Windows coverage. Run scoped:
 
 ```bash
 pnpm --filter @agentoctopus/sandbox exec vitest run tests/windows
