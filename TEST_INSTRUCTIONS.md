@@ -130,7 +130,7 @@ packages/registry  — 47 tests  ✅
 packages/adapters  — 3 tests   ✅
 packages/core      — 65 tests  ✅
 apps/cli           — 57 tests  ✅
-apps/web           — 6 tests   ✅
+apps/web           — 9 tests   ✅
 packages/gateway   — 11 tests  ✅
 ```
 
@@ -297,6 +297,16 @@ Open `http://localhost:3000` in a browser.
 3. Shift+Enter in the textarea → inserts newline (does NOT send)
 
 Done
+
+---
+
+### 2.9 System theme synchronization
+
+```bash
+pnpm --filter web exec vitest run tests/theme-store.test.ts
+```
+
+**Expected:** Three tests pass: the server snapshot is stable for hydration; the browser snapshot follows `prefers-color-scheme`; and media-query listeners notify subscribers and are removed on cleanup. In the web UI, click the theme button to override the system preference until the page is reloaded.
 
 ---
 
@@ -482,6 +492,7 @@ Expected: bot replies `"hello" in Korean: 안녕하세요`.
 | 2.6 | `POST /api/feedback` thumbs down | ✅ |
 | 2.7 | `POST /api/feedback` 404 on unknown skill | ✅ |
 | 2.8 | Web UI loads, example pills work, feedback buttons work | ✅ |
+| 2.9 | System theme sync and manual override | ✅ |
 | 3.1 | Agent gateway starts on port 3002 | ✅ |
 | 3.2 | `GET /agent/health` returns `skills: ~4000+` | ✅ |
 | 3.3 | `POST /agent/ask` returns sessionId | ✅ |

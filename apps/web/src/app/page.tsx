@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { useSystemDarkMode } from './theme-store';
 
 // --- Types ---
 
@@ -142,7 +143,9 @@ export default function ChatPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'skills' | 'history'>('skills');
-  const [darkMode, setDarkMode] = useState(false);
+  const systemDarkMode = useSystemDarkMode();
+  const [darkModeOverride, setDarkModeOverride] = useState<boolean | null>(null);
+  const darkMode = darkModeOverride ?? systemDarkMode;
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -152,15 +155,6 @@ export default function ChatPage() {
       .then((r) => r.json())
       .then((data) => setSkills(data.skills || []))
       .catch(() => {});
-  }, []);
-
-  // Detect system dark mode
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    setDarkMode(mq.matches);
-    const handler = (e: MediaQueryListEvent) => setDarkMode(e.matches);
-    mq.addEventListener('change', handler);
-    return () => mq.removeEventListener('change', handler);
   }, []);
 
   // Apply dark mode
@@ -287,7 +281,7 @@ export default function ChatPage() {
               </button>
             )}
             <button
-              onClick={() => setDarkMode(!darkMode)}
+              onClick={() => setDarkModeOverride(!darkMode)}
               className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition text-zinc-500"
               title="Toggle dark mode"
             >
