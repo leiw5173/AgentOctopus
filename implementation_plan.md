@@ -469,8 +469,8 @@ Per-package declared test counts (workspace, not CI-expanded):
 | `packages/sandbox-vm-native` | 3 | 21 (16 pass + 5 skip without OCTOPUS_VM_IMAGE_BUILDER) |
 | `packages/gateway` | 1 | 11 |
 | `apps/cli` | 6 | 57 |
-| `apps/web` | 1 | 6 |
-| **Total** | **118** | **883 declared** |
+| `apps/web` | 3 | 10 |
+| **Total** | **120** | **887 declared** |
 
 Counts are `it/test` declarations; `it.each` expands to more at runtime (the sandbox security suite expands to 111). The privileged Linux lane is CI-owned (zero-skip on the provisioned runner, skipped on macOS dev hosts).
 

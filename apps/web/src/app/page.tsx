@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { useSystemDarkMode } from './theme-store';
+import { useTheme } from './theme-provider';
 
 // --- Types ---
 
@@ -143,9 +143,7 @@ export default function ChatPage() {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'skills' | 'history'>('skills');
-  const systemDarkMode = useSystemDarkMode();
-  const [darkModeOverride, setDarkModeOverride] = useState<boolean | null>(null);
-  const darkMode = darkModeOverride ?? systemDarkMode;
+  const { darkMode, toggleDarkMode } = useTheme();
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -156,11 +154,6 @@ export default function ChatPage() {
       .then((data) => setSkills(data.skills || []))
       .catch(() => {});
   }, []);
-
-  // Apply dark mode
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', darkMode);
-  }, [darkMode]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -281,7 +274,7 @@ export default function ChatPage() {
               </button>
             )}
             <button
-              onClick={() => setDarkModeOverride(!darkMode)}
+              onClick={toggleDarkMode}
               className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition text-zinc-500"
               title="Toggle dark mode"
             >

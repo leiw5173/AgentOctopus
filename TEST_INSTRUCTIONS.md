@@ -130,7 +130,7 @@ packages/registry  — 47 tests  ✅
 packages/adapters  — 3 tests   ✅
 packages/core      — 65 tests  ✅
 apps/cli           — 57 tests  ✅
-apps/web           — 9 tests   ✅
+apps/web           — 10 tests  ✅
 packages/gateway   — 11 tests  ✅
 ```
 
@@ -306,7 +306,7 @@ Done
 pnpm --filter web exec vitest run tests/theme-store.test.ts
 ```
 
-**Expected:** Three tests pass: the server snapshot is stable for hydration; the browser snapshot follows `prefers-color-scheme`; and media-query listeners notify subscribers and are removed on cleanup. In the web UI, click the theme button to override the system preference until the page is reloaded.
+**Expected:** Three store tests pass: a stable hydration snapshot, browser `prefers-color-scheme` updates, and listener cleanup. Run `pnpm --filter web test` for the fourth theme test, which confirms the root provider prerenders safely. In the browser, verify the chat theme button changes the actual page colors in both system-light and system-dark settings, and directly opening `/marketplace` follows the system setting.
 
 ---
 
