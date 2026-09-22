@@ -246,7 +246,7 @@ describe('createDefaultSandboxRunnerAsync', () => {
     return backends.map((b) => b.kind);
   }
 
-  it('includes only docker+os when createVmBackend returns unavailable', async () => {
+  it('includes docker+os+windows when createVmBackend returns unavailable', async () => {
     expect(getConfig().sandbox).toBeDefined();
 
     const runner = await createDefaultSandboxRunnerAsync(undefined, {
@@ -256,7 +256,7 @@ describe('createDefaultSandboxRunnerAsync', () => {
       }),
     });
     const kinds = backendKinds(runner);
-    expect(kinds).toEqual(['docker', 'os']);
+    expect(kinds).toEqual(['docker', 'os', 'windows']);
     expect(kinds).not.toContain('vm');
   });
 
