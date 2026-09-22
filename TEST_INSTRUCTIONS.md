@@ -123,13 +123,13 @@ node -e "const d=JSON.parse(require('fs').readFileSync(require('path').join(requ
 pnpm test
 ```
 
-**Expected:** On a macOS dev host, 1,215 pass and 97 platform-gated skip across 9 workspaces (1,312 cases); no failures. Key packages:
+**Expected:** On a macOS dev host, 1,224 pass and 97 platform-gated skip across 9 workspaces (1,321 cases); no failures. Key packages:
 ```
 packages/skills             — 147 pass ✅
 packages/registry           — 49 pass  ✅
 packages/adapters           — 31 pass  ✅
 packages/core               — 293 pass, 3 skip  ✅
-packages/sandbox            — 492 pass, 82 skip ✅
+packages/sandbox            — 501 pass, 82 skip ✅
 packages/sandbox-vm-native  — 106 pass, 12 skip ✅
 packages/gateway            — 30 pass  ✅
 apps/cli                    — 57 pass  ✅
@@ -1490,7 +1490,7 @@ curl -s -X POST http://localhost:3000/api/ask \
 
 ## Phase S — Sandbox Security Matrix
 
-The sandbox security suite lives in `packages/sandbox/tests/security/` (139 Vitest cases across 15 files; includes 6 security-gate skip-policy regressions). Run scoped:
+The sandbox security suite lives in `packages/sandbox/tests/security/` (148 Vitest cases across 16 files; includes 15 security-gate/HVF-probe workflow regressions). Run scoped:
 
 ```bash
 pnpm --filter @agentoctopus/sandbox exec vitest run tests/security
@@ -1525,10 +1525,10 @@ Runner prerequisites: the **hosted Docker + proxy** and **macOS restricted** lan
 ### Security gate skip-policy regression
 
 ```bash
-pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/security-gate-workflow.test.mjs
+pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/security-gate-workflow.test.mjs tests/security/hvf-probe-workflow.test.mjs
 ```
 
-**Expected:** Six cases pass. A failed Linux artifact producer must fail the gate even when dependent Linux/VM jobs are skipped; only fork PRs may skip privileged Linux, and VM may skip only after a successful probe reports HVF unavailable. This unit test does **not** replace the real privileged Linux or Windows CI lanes.
+**Expected:** Fifteen cases pass. A failed producer fails the gate despite dependent skips; fork PRs skip both self-hosted Linux and VM jobs, while same-repo/release runs must pass the signed physical HVF probe and real VM lane. Codesign/probe failures never become an allowed skip. The tests also catch wrong Linux staging paths and master-push/reusable-workflow concurrency collisions. Local tests do **not** replace the real Linux, Windows, or VM CI lanes.
 
 ### Pass / Fail Checklist (Phase S)
 
@@ -1553,7 +1553,7 @@ pnpm --filter @agentoctopus/sandbox exec vitest run tests/security/security-gate
 | S17 | VM L4 adversarial escape matrix (zero-skip, fail-closed) | ✅ (CI, macOS Apple Silicon) |
 | S18 | VM release trust root / signed manifest verification | ✅ (unit) |
 | S19 | VM verified-object binding (realpath exec-path + private copies / fd-pin) | ✅ (unit) |
-| S20 | Security gate rejects failed producer, unexpected Linux/VM skips, or failed HVF probe; accepts fork/HVF-unavailable exceptions | ✅ (workflow script unit) |
+| S20 | Security gate rejects failed producer and unauthorized skips; physical VM probe, fork guard, staging, and release concurrency | ✅ (15 workflow-script unit cases; real lanes still required) |
 
 ## Phase W — Windows Restricted Backend
 

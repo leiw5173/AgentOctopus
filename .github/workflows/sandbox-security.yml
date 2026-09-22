@@ -29,9 +29,11 @@ permissions:
 # cancel-in-progress: true — a stuck `privileged-linux` job (no self-hosted
 # runner registered) would otherwise queue-block every subsequent push in this
 # ref group. New runs cancel the stale one instead of piling up behind it.
-# Matches the convention used by ci.yml / changeset-check.yml.
+# Separate the direct push run from the Release Preflight workflow_call: the
+# called workflow inherits the caller's github.workflow and both share the
+# master ref, so a ref-only group cancels release qualification at random.
 concurrency:
-  group: sandbox-security-${{ github.ref }}
+  group: sandbox-security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -337,10 +339,9 @@ jobs:
       - name: Rescue stale in-workspace tmpfs before checkout
         shell: bash
         run: |
-          # Deliberately NOT `set -e`/pipefail-sensitive: this rescue must NEVER
-          # fail the job — a clean runner or a missing mount is not an error.
-          # The GHA runner forces `-e -o pipefail` on bash steps, so guard every
-          # command with `|| true` and end with an explicit `exit 0`.
+          # Stale-mount cleanup is best-effort; a clean runner is not an error.
+          # The required disk-backed staging directory is NOT best-effort:
+          # failure to create it must fail before package setup or checkout.
           #
           # Export TMPDIR for ALL later steps via $GITHUB_ENV (see the job-env
           # comment above: job-level `env:` can't expand $RUNNER_TMP, and the
@@ -348,11 +349,11 @@ jobs:
           # disk-backed /var/tmp dir: /var/tmp is on the root ext4 (several GB
           # free) AND AppArmor-authorized for the helper's unprivileged-userns
           # self-bind (see the env comment) — unlike the 930MB-RAM-starving
-          # tmpfs this replaced. Fall back to /var/tmp itself if unset.
+          # tmpfs this replaced.
           echo "TMPDIR=/var/tmp/oct-tmp" >> "$GITHUB_ENV"
-          # Create it now: pnpm/action-setup (which runs before the staging
-          # step) calls realpathSync(TMPDIR) and ENOENTs if the dir is absent.
-          mkdir -p "$TMPDIR" 2>/dev/null || true
+          # $GITHUB_ENV applies only to later steps, not this shell. Create the
+          # exact exported directory now; an inability to do so is fatal.
+          mkdir -p /var/tmp/oct-tmp
           ws="${{ github.workspace }}"
           tmp="$ws/.tmp"
           # A PRIOR run leaked a tmpfs mounted at the in-workspace .tmp. The
@@ -1116,14 +1117,12 @@ jobs:
   # Runner: a physical Apple Silicon self-hosted runner (labels
   # [self-hosted, macOS, arm64, physical]) — bare metal, where the probe
   # returns hvf=available and vm-lane runs for real. GitHub's runs-on array is
-  # AND-matched and has no priority/fallback semantics, so the hosted macos-15
-  # label is NOT listed here: including it would require a runner carrying both
-  # self-hosted AND macos-15, which never matches and leaves the job queued
-  # forever. A repo that wants hosted fallback should point these labels at a
-  # hosted pool instead; without any matching runner the job stays queued (and
-  # security-gate treats a missing vm-lane result fail-closed).
+  # AND-matched, so the hosted macos-15 label is not a fallback. Without a
+  # matching physical runner the job remains queued and cannot qualify CI.
   vm-hvf-probe:
     name: vm-hvf-probe
+    # Fork PRs must never reach the physical self-hosted runner.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS, arm64, physical]
     outputs:
       hvf: ${{ steps.probe.outputs.hvf }}
@@ -1144,32 +1143,31 @@ jobs:
             return r == HV_SUCCESS ? 0 : 1;
           }
           EOF
-          # Ad-hoc sign with ONLY the hypervisor entitlement (self-claimable;
-          # sufficient on physical hardware, denied inside a nested Vz guest).
+          # Ad-hoc sign with ONLY the hypervisor entitlement. This job runs
+          # exclusively on physical hosts; signing or VM creation failures are
+          # runner failures, never permission to skip VM qualification.
           cc -O2 -o /tmp/hvf_probe /tmp/hvf_probe.c -framework Hypervisor
           cat > /tmp/hvf_ent.plist <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>
           EOF
-          codesign -s - --entitlements /tmp/hvf_ent.plist --force /tmp/hvf_probe || true
+          codesign -s - --entitlements /tmp/hvf_ent.plist --force /tmp/hvf_probe
           if /tmp/hvf_probe; then
             echo "HVF available on this runner — vm-lane will run for real."
             echo "hvf=available" >> "$GITHUB_OUTPUT"
           else
-            echo "HVF UNAVAILABLE (nested-virt guest) — vm-lane will be skipped."
-            echo "::notice::VM qualification not executed on this runner: Hypervisor.framework is unavailable (GitHub-hosted macos-15 is a nested Virtualization.framework guest; HVF denies nested hv_vm_create). Run G1/G2 on a physical Apple Silicon runner."
-            echo "hvf=unavailable" >> "$GITHUB_OUTPUT"
+            echo "ERROR: hv_vm_create failed on the physical VM runner — do not skip qualification." >&2
+            exit 1
           fi
 
   vm-lane:
     name: vm-lane
     runs-on: [self-hosted, macOS, arm64, physical]
     needs: [produce-linux-artifacts, vm-hvf-probe]
-    # SKIPPED (result 'skipped') only for the recognized nested-virtualization
-    # limitation surfaced by vm-hvf-probe. On a physical Apple Silicon runner
-    # (hvf=available) the lane runs for real and remains fail-closed end to end.
-    if: needs.vm-hvf-probe.outputs.hvf == 'available'
+    # Fork PRs skip this persistent self-hosted runner (trust boundary).
+    # Same-repo and release runs require a real VM and stay fail-closed.
+    if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && needs.vm-hvf-probe.outputs.hvf == 'available'
     env:
       OCTOPUS_VM_LANE: '1'
     steps:
@@ -1381,28 +1379,25 @@ jobs:
             exit 1
           fi
           test "$MACOS_RESULT" = success
-          test "$HVF_PROBE_RESULT" = success
+          # Forks must skip BOTH physical VM jobs. Same-repo and release
+          # runs must pass the HVF probe and execute VM qualification.
+          if [ "$FORK_PR" = true ]; then
+            test "$HVF_PROBE_RESULT" = skipped
+            test "$VM_RESULT" = skipped
+          else
+            test "$HVF_PROBE_RESULT" = success
+            test "$HVF_AVAILABLE" = available
+            test "$VM_RESULT" = success
+          fi
           # windows-restricted is a hosted RESTRICTED lane that must always
           # succeed — it has no fork-guard skip and no environment-specific
           # qualification skip (unlike privileged-linux / vm-lane). It is the
           # Windows analog of macos-restricted and never claims full isolation.
           # An unexpected skip, failure, or cancellation is fail-closed here.
           test "$WINDOWS_RESULT" = success
-          # vm-lane is an environment-specific QUALIFICATION gate, not an
-          # unconditional hosted-CI gate. It is 'skipped' ONLY for the recognized
-          # nested-virtualization limitation (vm-hvf-probe found HVF unavailable
-          # on a GitHub-hosted macos-15 guest). Accept success (real G1/G2 ran,
-          # e.g. a physical Apple Silicon runner) or that specific skip; keep
-          # every other outcome — real VM failure, cancellation, or an
-          # UNEXPECTED skip — fail-closed. When skipped, say so plainly.
-          if [ "$VM_RESULT" = "skipped" ]; then
-            if [ "$HVF_AVAILABLE" != unavailable ]; then
-              echo "ERROR: vm-lane skipped without a confirmed unavailable hypervisor (probe: $HVF_AVAILABLE)" >&2
-              exit 1
-            fi
-            echo "NOTE: VM qualification not executed on this runner (Hypervisor.framework unavailable — nested-virt hosted macOS). G1/G2 must run on a physical Apple Silicon runner before release."
-          elif [ "$VM_RESULT" != "success" ]; then
-            echo "ERROR: vm-lane must succeed or be skipped only for the nested-virt limitation (got: $VM_RESULT)" >&2
-            exit 1
+          # A fork skip is a trust-boundary exception, never a claim of VM
+          # qualification. Physical same-repo and release runs must boot a VM.
+          if [ "$FORK_PR" = true ]; then
+            echo "NOTE: physical VM qualification skipped for untrusted fork PR."
           fi
 

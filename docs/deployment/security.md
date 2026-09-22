@@ -160,7 +160,7 @@ later phases never trust an on-disk path again:
   (regression-tested); a rootfs swapped *before* resolution still fails
   closed on the from-fd digest check.
 
-The `security-gate` requires the Linux artifact producer and HVF probe to succeed directly. It accepts a skipped privileged Linux job only for a fork PR (the trust boundary), and a skipped VM lane only when the successful probe reports HVF unavailable. A failed producer that skips its dependent Linux/VM jobs cannot yield a green aggregate gate. These skip-policy cases are exercised by `tests/security/security-gate-workflow.test.mjs`; full isolation qualification still requires the real CI runners.
+The `security-gate` directly requires the Linux artifact producer on every event. Fork PRs skip the privileged Linux lane and both physical self-hosted VM jobs; same-repo and release runs require the Linux lane, a successfully signed HVF probe, and real VM qualification. Signing or `hv_vm_create` failures on the physical runner fail the job rather than producing a permitted skip. A dependency-induced skip cannot turn a failed producer into a green gate. Direct master-push runs and Release Preflight's reusable security call use separate workflow-scoped concurrency groups, so they cannot cancel each other. Local workflow regression tests exercise the skip and probe paths; they do not replace the real CI lanes.
 
 Release infrastructure:
 
