@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdtemp, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import forge from 'node-forge';
+import { createSecureContext } from 'node:tls';
 import { SessionCa, writeCaBundle } from '../src/proxy/ca.js';
 
 describe('SessionCa', () => {
@@ -16,6 +17,23 @@ describe('SessionCa', () => {
     expect(caCert.verify(leafCert)).toBe(true);
     ca.destroy();
   });
+
+  it.each(['0001000000000000', '8000000000000000', '0000000000000000'])(
+    'issues a TLS-compatible positive serial for random bytes %s', (hex) => {
+      const ca = SessionCa.create();
+      const random = vi.spyOn(forge.random, 'getBytesSync').mockReturnValueOnce(forge.util.hexToBytes(hex));
+      try {
+        const leaf = ca.issueForHost('127.0.0.1');
+        expect(() => createSecureContext({ cert: leaf.certPem, key: leaf.keyPem })).not.toThrow();
+        const cert = forge.pki.certificateFromPem(leaf.certPem);
+        expect(BigInt(`0x${cert.serialNumber}`)).toBeGreaterThan(0n);
+        expect(parseInt(cert.serialNumber.slice(0, 2), 16)).toBeLessThan(128);
+      } finally {
+        random.mockRestore();
+        ca.destroy();
+      }
+    },
+  );
 
   it('uses dNSName SAN type 2 for hostnames and iPAddress SAN type 7 for literals', () => {
     const ca = SessionCa.create();

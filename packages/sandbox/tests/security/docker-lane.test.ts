@@ -73,7 +73,7 @@ interface RunningProbe {
   containerName: string;
   result: Promise<ProbeResult>;
   /** Poll `docker top` until the parent + grandchild are both visible. */
-  waitForGrandchildReady(): Promise<void>;
+  waitForGrandchildReady(): Promise<string>;
   cleanup(): Promise<void>;
 }
 
@@ -101,8 +101,8 @@ async function startProcessTreeProbe(input: { timeoutMs: number }): Promise<Runn
         const top = await runDocker(['top', containerName, '-eo', 'pid,ppid,comm']);
         // header + parent node + grandchild node => at least 3 lines, 2 node procs
         const nodeCount = (top.stdout.match(/node/g) ?? []).length;
-        if (top.code === 0 && nodeCount >= 2) return;
-        if (Date.now() > deadline) return; // proceed; assertion below decides
+        if (top.code === 0 && nodeCount >= 2) return top.stdout;
+        if (Date.now() > deadline) throw new Error('process-tree probe did not expose parent and grandchild');
         await new Promise((r) => setTimeout(r, 100));
       }
     },
@@ -196,13 +196,14 @@ describe('Docker lane — isolation', () => {
 
   it('times out, destroys the container, and reaps the grandchild', async (ctx) => {
     if (!needDocker(ctx)) return;
-    const running = await startProcessTreeProbe({ timeoutMs: 500 });
+    const running = await startProcessTreeProbe({ timeoutMs: 5_000 });
     try {
-      await running.waitForGrandchildReady();
-      const before = await runDocker(['top', running.containerName, '-eo', 'pid,ppid,comm']);
-      expect(before.stdout).toMatch(/node/);
+      // Assert the successful observation itself: a second docker top can race
+      // with the very timeout cleanup this test is validating.
+      const before = await running.waitForGrandchildReady();
+      expect((before.match(/node/g) ?? []).length).toBeGreaterThanOrEqual(2);
       // header + parent node + grandchild node
-      expect(before.stdout.trim().split('\n').length).toBeGreaterThanOrEqual(3);
+      expect(before.trim().split('\n').length).toBeGreaterThanOrEqual(3);
       const result = await running.result;
       expect(result.timedOut).toBe(true);
       // The timeout path issues `docker rm -f` without awaiting it, so poll for

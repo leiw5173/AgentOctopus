@@ -66,7 +66,8 @@ describe('security harness', () => {
       expect(typeof result.available).toBe('boolean');
       if (!result.available) expect(result.reason).toBeTruthy();
     }
-  });
+    // Docker info allows 15s and the disposable run allows 90s.
+  }, 120_000);
 
   describe('probePrivilegedLinux canonical artifact names', () => {
     let savedRoot: string | undefined;
