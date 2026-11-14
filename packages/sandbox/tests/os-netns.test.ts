@@ -15,7 +15,8 @@
  *    Skipped on macOS. `OCTOPUS_REQUIRE_OS_SANDBOX=1` converts a capability
  *    skip into a hard failure on the Plan 6 privileged lane.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import net from 'node:net';
@@ -246,21 +247,34 @@ describe('setupNetns (injected fake exec)', () => {
     expect(delStr).toContain(h.hostIf);
   });
 
-  it('derives a link-local /32 pair from the sessionId (collision-resistant across calls)', async () => {
-    const a = await setupNetns({ sessionId: 'sess same', exec: new FakeExec() });
-    const b = await setupNetns({ sessionId: 'sess same', exec: new FakeExec() });
-    // Same sessionId must still produce different names/addresses (random salt).
-    expect(a.name).not.toBe(b.name);
-    expect(a.proxyIp).not.toBe(b.proxyIp);
-    expect(a.proxyIp).toMatch(/^169\.254\.\d+\.1$/);
-    expect(a.skillIp).toMatch(/^169\.254\.\d+\.2$/);
-    // Third octet differs across calls (collision-resistant derivation).
-    const aThird = Number(a.proxyIp.split('.')[2]);
-    const bThird = Number(b.proxyIp.split('.')[2]);
-    expect(aThird).toBeGreaterThanOrEqual(0);
-    expect(aThird).toBeLessThanOrEqual(255);
-    expect(bThird).toBeGreaterThanOrEqual(0);
-    expect(bThird).toBeLessThanOrEqual(255);
+  it('salts names and link-local /32 pairs independently for the same sessionId', async () => {
+    // Only 254 third octets are available; random draws can legitimately
+    // collide. Fixed salts test derivation without a probabilistic assertion.
+    const random = vi.spyOn(crypto, 'randomBytes')
+      .mockReturnValueOnce(Buffer.from('11111111', 'hex'))
+      .mockReturnValueOnce(Buffer.alloc(8, 0))
+      .mockReturnValueOnce(Buffer.from('22222222', 'hex'))
+      .mockReturnValueOnce(Buffer.alloc(8, 1));
+    try {
+      const a = await setupNetns({ sessionId: 'sess same', exec: new FakeExec() });
+      const b = await setupNetns({ sessionId: 'sess same', exec: new FakeExec() });
+      expect(a.name).not.toBe(b.name);
+      expect(a.proxyIp).toBe('169.254.234.1');
+      expect(b.proxyIp).toBe('169.254.140.1');
+      expect(a.proxyIp).toMatch(/^169\.254\.\d+\.1$/);
+      expect(a.skillIp).toMatch(/^169\.254\.\d+\.2$/);
+      // Both samples remain valid link-local addresses.
+      const aThird = Number(a.proxyIp.split('.')[2]);
+      const bThird = Number(b.proxyIp.split('.')[2]);
+      expect(aThird).toBeGreaterThanOrEqual(0);
+      expect(aThird).toBeLessThanOrEqual(255);
+      expect(bThird).toBeGreaterThanOrEqual(0);
+      expect(bThird).toBeLessThanOrEqual(255);
+      await a.cleanup();
+      await b.cleanup();
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it('fails closed and removes the partial netns when `ip link add` fails', async () => {

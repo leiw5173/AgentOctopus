@@ -160,7 +160,7 @@ function createTestUpstreamCa(): TestUpstreamCa {
   const srvKeys = forge.pki.rsa.generateKeyPair(2048);
   const leaf = forge.pki.createCertificate();
   leaf.publicKey = srvKeys.publicKey;
-  leaf.serialNumber = forge.util.bytesToHex(forge.random.getBytesSync(8));
+  leaf.serialNumber = '01' + forge.util.bytesToHex(forge.random.getBytesSync(8));
   leaf.validity.notBefore = new Date();
   leaf.validity.notAfter = new Date(Date.now() + 24 * 3600 * 1000);
   leaf.setSubject([{ name: 'commonName', value: '127.0.0.1' }]);
