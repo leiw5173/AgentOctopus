@@ -9,6 +9,13 @@ updates:
       timezone: "Asia/Shanghai"
     open-pull-requests-limit: 5
     versioning-strategy: "auto"
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
     labels:
       - "dependencies"
     ignore:
