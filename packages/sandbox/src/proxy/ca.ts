@@ -41,7 +41,9 @@ export class SessionCa {
     const keys = forge.pki.rsa.generateKeyPair(2048);
     const cert = forge.pki.createCertificate();
     cert.publicKey = keys.publicKey;
-    cert.serialNumber = forge.util.bytesToHex(forge.random.getBytesSync(8));
+    // Prefix a nonzero positive byte so random leading zeros/sign bits never
+    // produce a zero, negative, or non-canonical ASN.1 INTEGER.
+    cert.serialNumber = '01' + forge.util.bytesToHex(forge.random.getBytesSync(8));
     cert.validity.notBefore = new Date();
     cert.validity.notAfter = new Date(Date.now() + 24 * 3600 * 1000);
     cert.setSubject([{ name: 'commonName', value: hostname }]);
